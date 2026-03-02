@@ -1382,15 +1382,19 @@ class ArmControlGUI(QMainWindow):
     # ==================== Simulation / 3D ====================
 
     def _select_sim_urdf_path(self) -> Optional[Path]:
-        so102_root = Path(__file__).resolve().parents[3]
+        repo_root = Path(__file__).resolve().parents[3]
         candidates = [
-            so102_root / "Urdf" / "urdf" / "soarmoce_purple.urdf",
-            so102_root / "Urdf" / "urdf" / "soarmoce_urdf.urdf",
-            so102_root / "Soarm101" / "SO101" / "so101_new_calib.urdf",
+            repo_root / "sdk" / "src" / "soarmMoce_sdk" / "resources" / "urdf" / "soarmoce_urdf.urdf",
+            repo_root / "Urdf" / "urdf" / "soarmoce_purple.urdf",
+            repo_root / "Urdf" / "urdf" / "soarmoce_urdf.urdf",
+            repo_root / "Soarm101" / "SO101" / "so101_new_calib.urdf",
             Path(__file__).resolve().parents[1] / "so101.urdf",
         ]
         for path in candidates:
             if path.exists():
+                # so101.urdf requires a sibling assets directory, otherwise PyBullet load fails.
+                if path.name == "so101.urdf" and not (path.parent / "assets").exists():
+                    continue
                 return path
         return None
 

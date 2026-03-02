@@ -16,13 +16,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/base.STL" />
+        <mesh filename="../meshes/base.STL" />
       </geometry>
       <material name="light_purple" /> </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/base.STL" />
+        <mesh filename="../meshes/base.STL" />
       </geometry>
     </collision>
   </link>
@@ -36,13 +36,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/shoulder.STL" />
+        <mesh filename="../meshes/shoulder.STL" />
       </geometry>
       <material name="white" /> </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/shoulder.STL" />
+        <mesh filename="../meshes/shoulder.STL" />
       </geometry>
     </collision>
   </link>
@@ -64,13 +64,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/shoulder_lift.STL" />
+        <mesh filename="../meshes/shoulder_lift.STL" />
       </geometry>
       <material name="light_purple" /> </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/shoulder_lift.STL" />
+        <mesh filename="../meshes/shoulder_lift.STL" />
       </geometry>
     </collision>
   </link>
@@ -92,13 +92,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/elbow.STL" />
+        <mesh filename="../meshes/elbow.STL" />
       </geometry>
       <material name="white" /> </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/elbow.STL" />
+        <mesh filename="../meshes/elbow.STL" />
       </geometry>
     </collision>
   </link>
@@ -120,13 +120,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/wrist.STL" />
+        <mesh filename="../meshes/wrist.STL" />
       </geometry>
       <material name="light_purple" /> </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/wrist.STL" />
+        <mesh filename="../meshes/wrist.STL" />
       </geometry>
     </collision>
   </link>
@@ -148,13 +148,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/wrist_roll.STL" />
+        <mesh filename="../meshes/wrist_roll.STL" />
       </geometry>
       <material name="white" /> </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/wrist_roll.STL" />
+        <mesh filename="../meshes/wrist_roll.STL" />
       </geometry>
     </collision>
   </link>
@@ -176,13 +176,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/gripper.STL" />
+        <mesh filename="../meshes/gripper.STL" />
       </geometry>
       <material name="light_purple" /> </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="/home/sunyuan/Code/Soarm_Moce/SO102/Urdf/meshes/gripper.STL" />
+        <mesh filename="../meshes/gripper.STL" />
       </geometry>
     </collision>
   </link>

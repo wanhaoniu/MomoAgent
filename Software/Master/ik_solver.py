@@ -12,13 +12,14 @@ from pathlib import Path
 
 _here = Path(__file__).resolve()
 _candidates = [
+    _here.parents[2] / "sdk" / "src",  # repo root/sdk/src
     _here.parents[2] / "soarmMoce_sdk" / "src",  # /SO102/soarmMoce_sdk/src
+    _here.parents[3] / "sdk" / "src",  # monorepo root/sdk/src
     _here.parents[3] / "soarmMoce_sdk" / "src",  # repo root/soarmMoce_sdk/src
 ]
 for _sdk_path in _candidates:
-    if _sdk_path.exists():
+    if _sdk_path.exists() and str(_sdk_path) not in sys.path:
         sys.path.insert(0, str(_sdk_path))
-        break
 
 try:
     from soarmMoce_sdk.kinematics import RobotModel
