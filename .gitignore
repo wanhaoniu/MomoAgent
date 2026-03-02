@@ -3,6 +3,7 @@
 *.SLDASM
 *.sldprt
 *.sldasm
+*.pyc
 ~$*
-
+Software/Slave/recordings_local
 .DS_Store
