@@ -40,7 +40,7 @@ from PyQt5.QtWidgets import (
 )
 
 from hmi.camera_window import CameraWindow
-from hmi.pages import HomePage, JobPage, QuickMovePage, SettingsPage
+from hmi.pages import JobPage, QuickMovePage, SettingsPage
 from hmi.speech_window import SpeechInputWindow
 from hmi.theme import apply_soft_effects, get_stylesheet
 from hmi.widgets import GlobalStatusBar
@@ -89,6 +89,10 @@ HEADER_ICON_FILES = {
         "home_24dp_000000_FILL0_wght400_GRAD0_opsz24.svg",
         "home_24dp_FFFFFF_FILL0_wght400_GRAD0_opsz24.svg",
     ),
+    "job": (
+        "Job_24dp_000000_FILL0_wght400_GRAD0_opsz24.svg",
+        "Job_24dp_FFFFFF_FILL0_wght400_GRAD0_opsz24.svg",
+    ),
     "settings": (
         "settings_24dp_000000_FILL0_wght400_GRAD0_opsz24.svg",
         "settings_24dp_FFFFFF_FILL0_wght400_GRAD0_opsz24.svg",
@@ -126,10 +130,10 @@ class ArmControlGUI(QMainWindow):
 
     log_signal = pyqtSignal(str, str)
 
-    PAGE_HOME = 0
-    PAGE_QUICK_MOVE = 1
-    PAGE_JOB = 2
-    PAGE_SETTINGS = 3
+    PAGE_QUICK_MOVE = 0
+    PAGE_JOB = 1
+    PAGE_SETTINGS = 2
+    PAGE_HOME = PAGE_QUICK_MOVE
 
     def __init__(self):
         super().__init__()
@@ -483,12 +487,10 @@ class ArmControlGUI(QMainWindow):
         self.stack = QStackedWidget()
         root.addWidget(self.stack, stretch=1)
 
-        self.home_page = HomePage()
         self.quick_page = QuickMovePage()
         self.job_page = JobPage()
         self.settings_page = SettingsPage()
 
-        self.stack.addWidget(self.home_page)
         self.stack.addWidget(self.quick_page)
         self.stack.addWidget(self.job_page)
         self.stack.addWidget(self.settings_page)
@@ -518,7 +520,7 @@ class ArmControlGUI(QMainWindow):
         self.on_jog_style_changed()
         self._apply_theme(self.current_theme)
         self.statusBar().showMessage(self._tr("status_ready"))
-        self._set_page(self.PAGE_HOME)
+        self._set_page(self.PAGE_QUICK_MOVE)
 
     def _build_header(self) -> QWidget:
         header = QFrame()
@@ -529,11 +531,17 @@ class ArmControlGUI(QMainWindow):
         self.back_home_btn = QPushButton(self._tr("btn_back_home"))
         self.back_home_btn.setObjectName("primaryBtn")
         self.back_home_btn.setFixedWidth(44)
-        self.back_home_btn.clicked.connect(lambda: self._set_page(self.PAGE_HOME))
+        self.back_home_btn.clicked.connect(lambda: self._set_page(self.PAGE_QUICK_MOVE))
         layout.addWidget(self.back_home_btn)
 
-        # Keep top bar minimal: only Home + Settings shortcuts.
+        # Keep top bar minimal: quick shortcut + Job + Settings.
         self.nav_buttons = []
+        self.top_job_btn = QPushButton(self._tr("nav_job"))
+        self.top_job_btn.setObjectName("primaryBtn")
+        self.top_job_btn.setFixedWidth(44)
+        self.top_job_btn.clicked.connect(lambda: self._set_page(self.PAGE_JOB))
+        layout.addWidget(self.top_job_btn)
+
         self.top_settings_btn = QPushButton(self._tr("nav_settings"))
         self.top_settings_btn.setObjectName("primaryBtn")
         self.top_settings_btn.setFixedWidth(44)
@@ -587,8 +595,8 @@ class ArmControlGUI(QMainWindow):
         pair = HEADER_ICON_FILES.get(key)
         if pair is None:
             return QIcon()
-        if key in ("home", "settings"):
-            # Keep these two compact top icons white in both light/dark themes.
+        if key in ("home", "job", "settings"):
+            # Keep compact top icons white in both light/dark themes.
             white_path = PICTURE_DIR / pair[1]
             path = white_path if white_path.exists() else self._picture_path_by_theme(pair[0], pair[1])
         else:
@@ -608,6 +616,7 @@ class ArmControlGUI(QMainWindow):
 
     def _apply_header_icons(self):
         self._back_home_has_icon = self._set_button_icon(self.back_home_btn, "home", size=18)
+        self._top_job_has_icon = self._set_button_icon(self.top_job_btn, "job", size=18)
         self._top_settings_has_icon = self._set_button_icon(self.top_settings_btn, "settings", size=18)
         self.camera_btn.setIcon(QIcon())
         self.speech_btn.setIcon(QIcon())
@@ -658,12 +667,6 @@ class ArmControlGUI(QMainWindow):
         return log_widget
 
     def _bind_signals(self):
-        self.home_page.open_page_requested.connect(self._set_page)
-        self.home_page.connect_clicked.connect(self.on_connect)
-        self.home_page.disconnect_clicked.connect(self.on_disconnect)
-        self.home_page.home_clicked.connect(self.on_home)
-        self.home_page.camera_clicked.connect(self.on_toggle_camera_window)
-
         self.quick_page.speed_changed.connect(self.on_speed_changed)
         self.quick_page.home_clicked.connect(self.on_home)
 
@@ -761,8 +764,13 @@ class ArmControlGUI(QMainWindow):
         if getattr(self, "_back_home_has_icon", False):
             self.back_home_btn.setText("")
         else:
-            self.back_home_btn.setText(self._tr("btn_back_home"))
-        self.back_home_btn.setToolTip(self._tr("nav_home"))
+            self.back_home_btn.setText(self._tr("nav_quick"))
+        self.back_home_btn.setToolTip(self._tr("nav_quick"))
+        if getattr(self, "_top_job_has_icon", False):
+            self.top_job_btn.setText("")
+        else:
+            self.top_job_btn.setText(self._tr("nav_job"))
+        self.top_job_btn.setToolTip(self._tr("nav_job"))
         if getattr(self, "_top_settings_has_icon", False):
             self.top_settings_btn.setText("")
         else:
@@ -773,7 +781,6 @@ class ArmControlGUI(QMainWindow):
         self.log_btn.setText(self._plain_header_text("btn_log"))
         self.lang_label.setText(self._tr("lang_label"))
 
-        self.home_page.set_texts(self._tr)
         self.quick_page.set_texts(self._tr)
         self.job_page.set_texts(self._tr, self.recording)
         self.settings_page.set_texts(self._tr)
@@ -824,8 +831,6 @@ class ArmControlGUI(QMainWindow):
         stylesheet = get_stylesheet(theme_norm)
         self.setStyleSheet(stylesheet)
         apply_soft_effects(self, theme_norm)
-        if hasattr(self.home_page, "set_theme"):
-            self.home_page.set_theme(theme_norm)
         if hasattr(self.quick_page, "set_theme"):
             self.quick_page.set_theme(theme_norm)
         if self._sim_backend == "vtk" and self.sim_vtk_view is not None:
@@ -1196,7 +1201,6 @@ class ArmControlGUI(QMainWindow):
         self.sim_vtk_view.set_camera_preset(str(preset))
 
     def _update_connection_widgets(self):
-        self.home_page.set_connected(self.connected)
         self.settings_page.set_connected(self.connected)
         self.job_page.set_connected(self.connected)
         self.quick_page.set_motion_enabled(self.connected or self._sim_ready)
