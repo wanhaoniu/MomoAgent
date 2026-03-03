@@ -1483,14 +1483,18 @@ class ArmControlGUI(QMainWindow):
             return False, {"ok": False, "error": "failed to read pose after move"}
         xyz_after, rpy_after = pose_after
         err = float(np.linalg.norm(np.asarray(xyz_after, dtype=float) - np.asarray(target_xyz, dtype=float)))
+        tol_m = 0.10
+        within_tol = bool(err <= tol_m)
 
         result = {
-            "ok": err <= 0.10,
-            "message": "moved" if err <= 0.10 else "move completed with large error",
+            "ok": within_tol,
+            "message": "moved" if within_tol else "move completed with large error",
             "backend": f"main-thread-{self._sim_backend}",
             "frame": frame,
             "duration": duration,
             "wait": wait,
+            "tolerance_m": tol_m,
+            "within_tolerance": within_tol,
             "target_xyz_m": [float(v) for v in target_xyz.tolist()],
             "actual_xyz_m": [float(v) for v in np.asarray(xyz_after, dtype=float).tolist()],
             "actual_rpy_rad": [float(v) for v in np.asarray(rpy_after, dtype=float).tolist()],
@@ -1581,6 +1585,104 @@ class ArmControlGUI(QMainWindow):
             pass
         return True, {"ok": True, "message": "stopped", "backend": f"main-thread-{self._sim_backend}"}
 
+    def _tool_set_gripper_main_thread(self, target: float) -> bool:
+        if len(self.sim_q) == 0 or len(self._sim_limits) != len(self.sim_q):
+            return False
+        idx = None
+        for i, name in enumerate(self.sim_joint_names):
+            if "gripper" in str(name).lower():
+                idx = i
+                break
+        if idx is None:
+            return False
+        lo, hi = self._sim_limits[idx]
+        q_new = np.asarray(self.sim_q, dtype=float).copy()
+        q_new[idx] = float(np.clip(float(target), float(lo), float(hi)))
+        self.sim_q = q_new
+        self._update_sim_plot()
+        return True
+
+    def _tool_run_skill_main_thread(self, payload: Dict[str, object]) -> Tuple[bool, Dict[str, object]]:
+        raw_name = str(payload.get("name", "") or "").strip().lower()
+        params = payload.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
+        if not raw_name:
+            return False, {"ok": False, "error": "run_skill requires non-empty name"}
+
+        if raw_name in ("dance_short", "dance", "wave"):
+            pose = self._get_sim_pose_xyzrpy()
+            if pose is None:
+                return False, {"ok": False, "error": "failed to read current pose"}
+            xyz0, _rpy0 = pose
+            amp_xy = max(0.01, min(0.10, self._tool_to_float(params.get("amplitude_xy", 0.04), 0.04)))
+            amp_z = max(0.00, min(0.10, self._tool_to_float(params.get("amplitude_z", 0.02), 0.02)))
+            duration = max(0.2, min(3.0, self._tool_to_float(params.get("duration", 0.6), 0.6)))
+            waypoints = [
+                (xyz0[0] + amp_xy, xyz0[1], xyz0[2]),
+                (xyz0[0], xyz0[1] + amp_xy, xyz0[2] + amp_z),
+                (xyz0[0] - amp_xy, xyz0[1], xyz0[2]),
+                (xyz0[0], xyz0[1] - amp_xy, xyz0[2] + amp_z),
+                (xyz0[0], xyz0[1], xyz0[2]),
+            ]
+
+            step_results = []
+            all_ok = True
+            for i, wp in enumerate(waypoints):
+                ok_i, res_i = self._tool_move_robot_arm_main_thread(
+                    {"x": float(wp[0]), "y": float(wp[1]), "z": float(wp[2]), "frame": "base", "duration": duration, "wait": True}
+                )
+                all_ok = all_ok and bool(ok_i)
+                step_results.append({"step": i + 1, "ok": bool(ok_i), "result": res_i})
+            return (
+                all_ok,
+                {
+                    "ok": all_ok,
+                    "skill": "dance_short",
+                    "message": "dance skill completed",
+                    "steps": step_results,
+                    "backend": f"main-thread-{self._sim_backend}",
+                },
+            )
+
+        if raw_name in ("grasp_apple", "grasp_apple_mock", "pick_apple"):
+            target_x = self._tool_to_float(params.get("x", 0.30), 0.30)
+            target_y = self._tool_to_float(params.get("y", 0.00), 0.00)
+            target_z = self._tool_to_float(params.get("z", 0.08), 0.08)
+            approach_z = target_z + max(0.05, self._tool_to_float(params.get("approach_offset_z", 0.08), 0.08))
+            pre_grasp_z = target_z + max(0.01, self._tool_to_float(params.get("pre_grasp_offset_z", 0.02), 0.02))
+            motion_dur = max(0.2, min(3.0, self._tool_to_float(params.get("duration", 0.8), 0.8)))
+
+            phases = []
+            ok1, r1 = self._tool_move_robot_arm_main_thread(
+                {"x": target_x, "y": target_y, "z": approach_z, "frame": "base", "duration": motion_dur, "wait": True}
+            )
+            phases.append({"phase": "approach", "ok": bool(ok1), "result": r1})
+            ok2, r2 = self._tool_move_robot_arm_main_thread(
+                {"x": target_x, "y": target_y, "z": pre_grasp_z, "frame": "base", "duration": motion_dur, "wait": True}
+            )
+            phases.append({"phase": "descend", "ok": bool(ok2), "result": r2})
+            gripper_ok = self._tool_set_gripper_main_thread(0.2)
+            phases.append({"phase": "close_gripper", "ok": bool(gripper_ok), "result": {"ok": bool(gripper_ok)}})
+            ok3, r3 = self._tool_move_robot_arm_main_thread(
+                {"x": target_x, "y": target_y, "z": approach_z, "frame": "base", "duration": motion_dur, "wait": True}
+            )
+            phases.append({"phase": "lift", "ok": bool(ok3), "result": r3})
+            overall = bool(ok1 and ok2 and ok3)
+            return (
+                overall,
+                {
+                    "ok": overall,
+                    "skill": "grasp_apple_mock",
+                    "message": "grasp apple mock completed",
+                    "target_xyz_m": [float(target_x), float(target_y), float(target_z)],
+                    "backend": f"main-thread-{self._sim_backend}",
+                    "phases": phases,
+                },
+            )
+
+        return False, {"ok": False, "error": f"unsupported skill: {raw_name}"}
+
     def _on_speech_tool_request(self, tool_name: str, payload: Dict[str, object], request_id: str):
         speech = self.speech_window
         req_id = str(request_id or "").strip()
@@ -1601,6 +1703,8 @@ class ArmControlGUI(QMainWindow):
                 ok, result = self._tool_get_camera_frame_main_thread(args)
             elif name == "stop_robot":
                 ok, result = self._tool_stop_robot_main_thread()
+            elif name == "run_skill":
+                ok, result = self._tool_run_skill_main_thread(args)
             else:
                 ok = False
                 result = {"ok": False, "error": f"unsupported tool: {name}"}

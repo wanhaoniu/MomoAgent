@@ -10,6 +10,7 @@ import re
 import subprocess
 import threading
 import wave
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -528,9 +529,12 @@ class _OpenClawAgentWorker(QThread):
         return (
             "以下是你刚请求的工具执行结果（JSON）：\n"
             f"{blob}\n\n"
-            "请基于这些结果继续："
-            "如果还需要工具调用，请继续返回 tool_calls；"
-            "如果任务完成，请直接返回最终中文答复。"
+            "请基于这些结果继续，并严格遵守：\n"
+            "1) 必须优先依据每条 result 里的 ok / within_tolerance 字段判断执行是否成功。\n"
+            "2) 若 ok=true（或 within_tolerance=true），禁止描述为“误差较大”或“失败”。\n"
+            "3) 若 ok=false，才可以描述失败或误差超限。\n"
+            "4) 如果当前目标复杂（如抓取、跳舞），优先尝试 run_skill，而不是直接拒绝。\n"
+            "5) 如果还需要工具调用，请继续返回 tool_calls；如果任务完成，请直接返回最终中文答复。"
         )
 
     @staticmethod
@@ -545,7 +549,11 @@ class _OpenClawAgentWorker(QThread):
             "{\"tool_calls\":[{\"id\":\"call_x\",\"type\":\"function\",\"function\":{\"name\":\"...\",\"arguments\":\"{...}\"}}]}。\n"
             "3) 当用户要求执行相对移动（如“高一点”“往左移动”）时，必须先调用 get_robot_state 获取当前 (x,y,z) 绝对坐标，"
             "再把相对偏移量加到当前坐标上，最后调用 move_robot_arm。\n"
-            "4) 如果不需要工具调用，直接返回简短中文结果。\n\n"
+            "4) 遇到高层目标（如“抓红苹果”“让机械臂跳舞”）时，优先调用 run_skill：\n"
+            "   - 抓苹果 -> run_skill(name=\"grasp_apple_mock\", params={...})\n"
+            "   - 跳舞 -> run_skill(name=\"dance_short\", params={...})\n"
+            "   只有明确超出当前能力且存在安全风险时，才简短拒绝。\n"
+            "5) 对无效语音或闲聊（非控制指令）返回简短自然回复，不要生硬报错。\n\n"
             f"用户请求：{user_message}"
         )
 
@@ -714,7 +722,6 @@ class SpeechInputWindow(QWidget):
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(16)
         self._anim_timer.timeout.connect(self._on_anim_tick)
-        self._anim_timer.start()
 
     def set_window_title(self, title: str):
         self.setWindowTitle(title)
@@ -803,6 +810,18 @@ class SpeechInputWindow(QWidget):
         self._phase = (self._phase + self._anim_timer.interval() / self._cycle_ms) % 1.0
         self.update()
 
+    def _set_ripple_active(self, active: bool):
+        active = bool(active)
+        if active:
+            if not self._anim_timer.isActive():
+                self._phase = 0.0
+                self._anim_timer.start()
+        else:
+            if self._anim_timer.isActive():
+                self._anim_timer.stop()
+            self._phase = 0.0
+        self.update()
+
     def _ripple_base_color(self) -> QColor:
         if self._theme == "dark":
             return QColor(168, 201, 255)
@@ -852,13 +871,14 @@ class SpeechInputWindow(QWidget):
         self._is_listening = True
         self._status_text = "录音中，点击结束"
         self.listening_changed.emit(True)
-        self.update()
+        self._set_ripple_active(True)
 
     def _stop_listening(self):
         if not self._is_listening:
             return b""
         self._is_listening = False
         self.listening_changed.emit(False)
+        self._set_ripple_active(False)
 
         if self._audio_stream is not None:
             try:
@@ -1033,22 +1053,19 @@ class SpeechInputWindow(QWidget):
         painter.setBrush(self._center_fill_color())
         painter.drawEllipse(center, min_radius * 1.22, min_radius * 1.22)
 
-        amp = 1.20 if self._is_listening else 0.45
-        if self._is_transcribing:
-            amp = 0.65
-        if self._is_agent_running:
-            amp = max(amp, 0.78)
-        for idx in range(self._ripple_count):
-            progress = (self._phase + idx / float(self._ripple_count)) % 1.0
-            radius = min_radius + progress * (max_radius - min_radius)
-            alpha = int((1.0 - progress) * 95.0 * amp)
-            if alpha <= 0:
-                continue
-            fill = QColor(base.red(), base.green(), base.blue(), int(alpha * 0.28))
-            stroke = QColor(base.red(), base.green(), base.blue(), alpha)
-            painter.setBrush(fill)
-            painter.setPen(QPen(stroke, 2.0))
-            painter.drawEllipse(center, radius, radius)
+        if self._is_listening:
+            amp = 1.20
+            for idx in range(self._ripple_count):
+                progress = (self._phase + idx / float(self._ripple_count)) % 1.0
+                radius = min_radius + progress * (max_radius - min_radius)
+                alpha = int((1.0 - progress) * 95.0 * amp)
+                if alpha <= 0:
+                    continue
+                fill = QColor(base.red(), base.green(), base.blue(), int(alpha * 0.28))
+                stroke = QColor(base.red(), base.green(), base.blue(), alpha)
+                painter.setBrush(fill)
+                painter.setPen(QPen(stroke, 2.0))
+                painter.drawEllipse(center, radius, radius)
 
         icon_bg_radius = side * 0.18
         border_color = QColor(base.red(), base.green(), base.blue(), 125 if self._theme == "dark" else 95)
@@ -1121,6 +1138,8 @@ class SpeechInputWindow(QWidget):
     def closeEvent(self, event):
         if self._is_listening:
             self._stop_listening()
+        else:
+            self._set_ripple_active(False)
         if self._stt_worker is not None:
             try:
                 self._stt_worker.quit()

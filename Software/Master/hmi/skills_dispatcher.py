@@ -67,6 +67,29 @@ OPENAI_TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_skill",
+            "description": "Run a higher-level robot behavior skill by name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name, e.g. dance_short or grasp_apple_mock",
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "Optional parameters for selected skill",
+                        "additionalProperties": True,
+                    },
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -297,6 +320,7 @@ class LocalToolDispatcher:
             "get_robot_state",
             "get_camera_frame",
             "stop_robot",
+            "run_skill",
         ):
             return self._dispatch_via_tool_requester(func, args)
 
@@ -325,6 +349,30 @@ class LocalToolDispatcher:
             )
         if func == "stop_robot":
             return self.stop_robot()
+        if func == "run_skill":
+            name = str(args.get("name", "")).strip()
+            params = args.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+            if not name:
+                raise ValueError("run_skill requires non-empty name")
+            # Mock fallback behavior when no main-thread requester is provided.
+            if name in ("dance_short", "dance", "wave"):
+                return json.dumps(
+                    {"ok": True, "skill": name, "message": "dance skill executed (mock)"},
+                    ensure_ascii=False,
+                )
+            if name in ("grasp_apple", "grasp_apple_mock", "pick_apple"):
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "skill": name,
+                        "message": "grasp apple skill executed (mock)",
+                        "target": {"label": "red apple"},
+                    },
+                    ensure_ascii=False,
+                )
+            raise ValueError(f"unsupported skill: {name}")
         raise ValueError(f"Unknown tool: {func}")
 
 
