@@ -1371,6 +1371,12 @@ class ArmControlGUI(QMainWindow):
                 self.speech_window.transcript_ready.connect(self._on_speech_transcript_ready)
             if hasattr(self.speech_window, "transcript_failed"):
                 self.speech_window.transcript_failed.connect(self._on_speech_transcript_failed)
+            if hasattr(self.speech_window, "agent_reply_ready"):
+                self.speech_window.agent_reply_ready.connect(self._on_speech_agent_reply_ready)
+            if hasattr(self.speech_window, "agent_failed"):
+                self.speech_window.agent_failed.connect(self._on_speech_agent_failed)
+            if hasattr(self.speech_window, "agent_session_changed"):
+                self.speech_window.agent_session_changed.connect(self._on_speech_agent_session_changed)
         return self.speech_window
 
     def _on_speech_window_closed(self):
@@ -1388,6 +1394,23 @@ class ArmControlGUI(QMainWindow):
             msg = "Speech recognition failed"
         self.log(f"[Speech] {msg}", "error")
         self.statusBar().showMessage(msg)
+
+    def _on_speech_agent_reply_ready(self, text: str):
+        msg = str(text or "").strip()
+        if not msg:
+            return
+        self.log(f"[OpenClaw] {msg}", "success")
+        self.statusBar().showMessage(f"OpenClaw: {msg[:80]}")
+
+    def _on_speech_agent_failed(self, message: str):
+        msg = str(message or "").strip() or "OpenClaw invocation failed"
+        self.log(f"[OpenClaw] {msg}", "error")
+        self.statusBar().showMessage(msg)
+
+    def _on_speech_agent_session_changed(self, session_id: str):
+        sid = str(session_id or "").strip()
+        if sid:
+            self.log(f"[OpenClaw] Session: {sid}", "info")
 
     def _is_speech_window_visible(self) -> bool:
         return self.speech_window is not None and self.speech_window.isVisible()

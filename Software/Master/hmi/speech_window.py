@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import io
+import json
 import os
+import subprocess
 import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -20,6 +22,23 @@ from PyQt5.QtWidgets import QWidget
 GROQ_API_KEY_FALLBACK = " "
 GROQ_STT_URL_DEFAULT = "https://api.groq.com/openai/v1/audio/transcriptions"
 GROQ_STT_MODEL_DEFAULT = "whisper-large-v3"
+
+OPENCLAW_BIN_DEFAULT = "openclaw"
+OPENCLAW_AGENT_ID_DEFAULT = "main"
+OPENCLAW_TIMEOUT_SEC_DEFAULT = 90.0
+OPENCLAW_THINKING_DEFAULT = "minimal"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    val = str(raw).strip().lower()
+    if val in ("1", "true", "yes", "on", "y"):
+        return True
+    if val in ("0", "false", "no", "off", "n"):
+        return False
+    return bool(default)
 
 
 def _extract_text_from_stt_payload(payload: Any) -> str:
@@ -40,6 +59,77 @@ def _extract_text_from_stt_payload(payload: Any) -> str:
                 if got:
                     return got
     return ""
+
+
+def _parse_json_with_noise(raw: str) -> Optional[Any]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    first_obj = text.find("{")
+    last_obj = text.rfind("}")
+    if first_obj >= 0 and last_obj > first_obj:
+        snippet = text[first_obj : last_obj + 1]
+        try:
+            return json.loads(snippet)
+        except Exception:
+            pass
+
+    first_arr = text.find("[")
+    last_arr = text.rfind("]")
+    if first_arr >= 0 and last_arr > first_arr:
+        snippet = text[first_arr : last_arr + 1]
+        try:
+            return json.loads(snippet)
+        except Exception:
+            pass
+    return None
+
+
+def _extract_text_from_openclaw_payload(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload.strip()
+    if isinstance(payload, list):
+        texts = [_extract_text_from_openclaw_payload(x) for x in payload]
+        texts = [x for x in texts if x]
+        return "\n".join(texts).strip()
+    if isinstance(payload, dict):
+        if isinstance(payload.get("payloads"), list):
+            texts: List[str] = []
+            for item in payload.get("payloads", []):
+                if isinstance(item, dict):
+                    t = str(item.get("text", "")).strip()
+                    if t:
+                        texts.append(t)
+            if texts:
+                return "\n".join(texts).strip()
+        for key in ("text", "message", "content", "reply", "answer"):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        for key in ("data", "result", "output", "choices"):
+            if key in payload:
+                got = _extract_text_from_openclaw_payload(payload[key])
+                if got:
+                    return got
+    return ""
+
+
+def _extract_openclaw_session_id(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    meta = payload.get("meta")
+    if not isinstance(meta, dict):
+        return ""
+    agent_meta = meta.get("agentMeta")
+    if not isinstance(agent_meta, dict):
+        return ""
+    sid = agent_meta.get("sessionId")
+    return str(sid).strip() if sid is not None else ""
 
 
 def groq_audio_to_text(
@@ -119,6 +209,94 @@ class _GroqSttWorker(QThread):
         self.done.emit(text)
 
 
+class _OpenClawAgentWorker(QThread):
+    done = pyqtSignal(str, str)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        message: str,
+        openclaw_bin: str,
+        agent_id: str,
+        session_id: str,
+        local_mode: bool,
+        timeout_sec: float,
+        thinking: str,
+    ):
+        super().__init__()
+        self._message = str(message or "").strip()
+        self._openclaw_bin = str(openclaw_bin or OPENCLAW_BIN_DEFAULT).strip() or OPENCLAW_BIN_DEFAULT
+        self._agent_id = str(agent_id or OPENCLAW_AGENT_ID_DEFAULT).strip() or OPENCLAW_AGENT_ID_DEFAULT
+        self._session_id = str(session_id or "").strip()
+        self._local_mode = bool(local_mode)
+        self._timeout_sec = max(5.0, float(timeout_sec))
+        self._thinking = str(thinking or OPENCLAW_THINKING_DEFAULT).strip() or OPENCLAW_THINKING_DEFAULT
+
+    def run(self):
+        if not self._message:
+            self.failed.emit("OpenClaw 输入为空")
+            return
+
+        cmd = [
+            self._openclaw_bin,
+            "--no-color",
+            "agent",
+            "--json",
+            "--message",
+            self._message,
+            "--thinking",
+            self._thinking,
+        ]
+        if self._local_mode:
+            cmd.append("--local")
+
+        if self._session_id:
+            cmd.extend(["--session-id", self._session_id])
+        else:
+            cmd.extend(["--agent", self._agent_id])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout_sec,
+                check=False,
+            )
+        except FileNotFoundError:
+            self.failed.emit(f"找不到 OpenClaw 可执行文件: {self._openclaw_bin}")
+            return
+        except subprocess.TimeoutExpired:
+            self.failed.emit("OpenClaw 调用超时")
+            return
+        except Exception as exc:
+            self.failed.emit(f"OpenClaw 调用失败: {exc}")
+            return
+
+        stdout_text = str(proc.stdout or "").strip()
+        stderr_text = str(proc.stderr or "").strip()
+
+        if proc.returncode != 0:
+            err = stderr_text or stdout_text or f"OpenClaw 返回错误码 {proc.returncode}"
+            self.failed.emit(err)
+            return
+
+        payload = _parse_json_with_noise(stdout_text)
+        if payload is None and stderr_text:
+            payload = _parse_json_with_noise(stderr_text)
+
+        session_id = _extract_openclaw_session_id(payload)
+        reply = _extract_text_from_openclaw_payload(payload)
+        if not reply:
+            reply = stdout_text
+        reply = str(reply or "").strip()
+        if not reply:
+            self.failed.emit("OpenClaw 未返回可用文本")
+            return
+
+        self.done.emit(reply, session_id)
+
+
 class SpeechInputWindow(QWidget):
     """Frameless always-on-top speech window with animated ripples."""
 
@@ -127,6 +305,9 @@ class SpeechInputWindow(QWidget):
     transcribing_changed = pyqtSignal(bool)
     transcript_ready = pyqtSignal(str)
     transcript_failed = pyqtSignal(str)
+    agent_reply_ready = pyqtSignal(str)
+    agent_failed = pyqtSignal(str)
+    agent_session_changed = pyqtSignal(str)
 
     def __init__(self, title: str, icon_path: Optional[Path] = None):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -146,18 +327,39 @@ class SpeechInputWindow(QWidget):
 
         self._is_listening = False
         self._is_transcribing = False
+        self._is_agent_running = False
         self._status_text = "点击开始说话"
         self._last_text = ""
+        self._last_agent_reply = ""
 
         self._sample_rate = 16000
         self._channels = 1
         self._audio_stream: Optional[sd.InputStream] = None
         self._audio_chunks: List[np.ndarray] = []
         self._stt_worker: Optional[_GroqSttWorker] = None
+        self._openclaw_worker: Optional[_OpenClawAgentWorker] = None
 
         self._groq_api_key = os.getenv("GROQ_API_KEY", GROQ_API_KEY_FALLBACK).strip()
         self._groq_stt_url = os.getenv("GROQ_STT_URL", GROQ_STT_URL_DEFAULT).strip()
         self._groq_stt_model = os.getenv("GROQ_STT_MODEL", GROQ_STT_MODEL_DEFAULT).strip()
+
+        self._openclaw_enabled = _env_bool("OPENCLAW_ENABLED", True)
+        self._openclaw_bin = str(os.getenv("OPENCLAW_BIN", OPENCLAW_BIN_DEFAULT)).strip() or OPENCLAW_BIN_DEFAULT
+        self._openclaw_agent_id = str(
+            os.getenv("OPENCLAW_AGENT_ID", OPENCLAW_AGENT_ID_DEFAULT)
+        ).strip() or OPENCLAW_AGENT_ID_DEFAULT
+        self._openclaw_local_mode = _env_bool("OPENCLAW_LOCAL", True)
+        self._openclaw_thinking = str(
+            os.getenv("OPENCLAW_THINKING", OPENCLAW_THINKING_DEFAULT)
+        ).strip() or OPENCLAW_THINKING_DEFAULT
+        try:
+            self._openclaw_timeout_sec = float(
+                str(os.getenv("OPENCLAW_TIMEOUT_SEC", str(OPENCLAW_TIMEOUT_SEC_DEFAULT))).strip()
+            )
+        except Exception:
+            self._openclaw_timeout_sec = OPENCLAW_TIMEOUT_SEC_DEFAULT
+        self._openclaw_timeout_sec = max(5.0, self._openclaw_timeout_sec)
+        self._openclaw_session_id = str(os.getenv("OPENCLAW_SESSION_ID", "")).strip()
 
         if icon_path is not None:
             self.set_icon(icon_path)
@@ -186,6 +388,39 @@ class SpeechInputWindow(QWidget):
             self._groq_stt_url = str(stt_url).strip()
         if model is not None:
             self._groq_stt_model = str(model).strip()
+
+    def set_openclaw_config(
+        self,
+        enabled: bool = True,
+        openclaw_bin: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        local_mode: Optional[bool] = None,
+        thinking: Optional[str] = None,
+        timeout_sec: Optional[float] = None,
+        session_id: Optional[str] = None,
+    ):
+        self._openclaw_enabled = bool(enabled)
+        if openclaw_bin is not None:
+            val = str(openclaw_bin).strip()
+            if val:
+                self._openclaw_bin = val
+        if agent_id is not None:
+            val = str(agent_id).strip()
+            if val:
+                self._openclaw_agent_id = val
+        if local_mode is not None:
+            self._openclaw_local_mode = bool(local_mode)
+        if thinking is not None:
+            val = str(thinking).strip()
+            if val:
+                self._openclaw_thinking = val
+        if timeout_sec is not None:
+            try:
+                self._openclaw_timeout_sec = max(5.0, float(timeout_sec))
+            except Exception:
+                pass
+        if session_id is not None:
+            self._openclaw_session_id = str(session_id).strip()
 
     # Backward compatibility for old call sites.
     def set_minimax_config(self, api_key: str, stt_url: Optional[str] = None, model: Optional[str] = None):
@@ -303,10 +538,74 @@ class SpeechInputWindow(QWidget):
         self._stt_worker.finished.connect(self._on_stt_finished)
         self._stt_worker.start()
 
+    def _start_openclaw(self, prompt_text: str):
+        text = str(prompt_text or "").strip()
+        if not text:
+            return
+        if not self._openclaw_enabled:
+            return
+        if self._is_agent_running:
+            self._status_text = "OpenClaw 正在处理中，请稍候..."
+            self.update()
+            return
+
+        self._is_agent_running = True
+        self._status_text = f"你说: {text}\nOpenClaw处理中..."
+        self.update()
+
+        self._openclaw_worker = _OpenClawAgentWorker(
+            message=text,
+            openclaw_bin=self._openclaw_bin,
+            agent_id=self._openclaw_agent_id,
+            session_id=self._openclaw_session_id,
+            local_mode=self._openclaw_local_mode,
+            timeout_sec=self._openclaw_timeout_sec,
+            thinking=self._openclaw_thinking,
+        )
+        self._openclaw_worker.done.connect(self._on_openclaw_done)
+        self._openclaw_worker.failed.connect(self._on_openclaw_failed)
+        self._openclaw_worker.finished.connect(self._on_openclaw_finished)
+        self._openclaw_worker.start()
+
+    def _on_openclaw_done(self, reply: str, session_id: str):
+        reply_text = str(reply or "").strip()
+        self._last_agent_reply = reply_text
+        if reply_text:
+            self._status_text = f"Momo: {reply_text}"
+            self.agent_reply_ready.emit(reply_text)
+        else:
+            self._status_text = "OpenClaw 未返回文本"
+            self.agent_failed.emit(self._status_text)
+
+        sid = str(session_id or "").strip()
+        if sid and sid != self._openclaw_session_id:
+            self._openclaw_session_id = sid
+            self.agent_session_changed.emit(sid)
+        self.update()
+
+    def _on_openclaw_failed(self, error_text: str):
+        msg = str(error_text or "").strip() or "OpenClaw 调用失败"
+        self._status_text = msg
+        self.agent_failed.emit(msg)
+        self.update()
+
+    def _on_openclaw_finished(self):
+        self._is_agent_running = False
+        self._openclaw_worker = None
+        self.update()
+
     def _on_stt_done(self, text: str):
         self._last_text = str(text).strip()
-        self._status_text = self._last_text if self._last_text else "未识别到有效文本"
         self.transcript_ready.emit(self._last_text)
+        if not self._last_text:
+            self._status_text = "未识别到有效文本"
+            self.update()
+            return
+
+        if self._openclaw_enabled:
+            self._start_openclaw(self._last_text)
+        else:
+            self._status_text = self._last_text
         self.update()
 
     def _on_stt_failed(self, error_text: str):
@@ -341,6 +640,8 @@ class SpeechInputWindow(QWidget):
         amp = 1.20 if self._is_listening else 0.45
         if self._is_transcribing:
             amp = 0.65
+        if self._is_agent_running:
+            amp = max(amp, 0.78)
         for idx in range(self._ripple_count):
             progress = (self._phase + idx / float(self._ripple_count)) % 1.0
             radius = min_radius + progress * (max_radius - min_radius)
@@ -409,7 +710,7 @@ class SpeechInputWindow(QWidget):
             if was_dragging:
                 event.accept()
                 return
-            if self._is_transcribing:
+            if self._is_transcribing or self._is_agent_running:
                 event.accept()
                 return
             if self._is_listening:
@@ -431,5 +732,15 @@ class SpeechInputWindow(QWidget):
             except Exception:
                 pass
             self._stt_worker = None
+        if self._openclaw_worker is not None:
+            try:
+                self._openclaw_worker.requestInterruption()
+                self._openclaw_worker.wait(1000)
+                if self._openclaw_worker.isRunning():
+                    self._openclaw_worker.terminate()
+                    self._openclaw_worker.wait(500)
+            except Exception:
+                pass
+            self._openclaw_worker = None
         self.closed.emit()
         super().closeEvent(event)
