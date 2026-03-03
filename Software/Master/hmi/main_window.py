@@ -177,6 +177,7 @@ class ArmControlGUI(QMainWindow):
         self.last_frame = None
         self.last_frame_fps = 0.0
         self.last_frame_latency = 0.0
+        self._virtual_cam_tick_ts = time.time()
 
         self.init_ui()
         self.setup_timers()
@@ -705,6 +706,10 @@ class ArmControlGUI(QMainWindow):
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.update_status)
         self.status_timer.start(500)
+
+        self.virtual_cam_timer = QTimer()
+        self.virtual_cam_timer.timeout.connect(self._on_virtual_cam_tick)
+        self.virtual_cam_timer.start(33)
 
     def _set_page(self, index: int):
         index = int(index)
@@ -1245,6 +1250,61 @@ class ArmControlGUI(QMainWindow):
             Qt.SmoothTransformation,
         )
 
+    def _using_virtual_vtk_camera(self) -> bool:
+        return self._sim_backend == "vtk" and self.sim_vtk_view is not None
+
+    def _fetch_virtual_vtk_frame(self) -> Optional[np.ndarray]:
+        if not self._using_virtual_vtk_camera():
+            return None
+
+        width = 960
+        height = 720
+        if self.camera_window is not None:
+            width = max(320, int(self.camera_window.camera_label.width()))
+            height = max(240, int(self.camera_window.camera_label.height()))
+        try:
+            frame = self.sim_vtk_view.render_eye_in_hand_frame(width=width, height=height)
+        except Exception:
+            return None
+        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            return None
+        return frame
+
+    def _display_camera_frame(self, frame: np.ndarray, fps: float, latency: float):
+        display_frame = frame.copy()
+        if self.recording:
+            cv2.circle(display_frame, (display_frame.shape[1] - 30, 30), 15, (0, 0, 255), -1)
+            cv2.putText(display_frame, "REC", (display_frame.shape[1] - 70, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+        self.last_frame = frame.copy()
+        self.last_frame_fps = float(fps)
+        self.last_frame_latency = float(latency)
+
+        if self._is_camera_window_visible():
+            self.camera_window.set_frame(
+                display_frame,
+                f"FPS: {int(max(0.0, fps))}",
+                self._tr("latency_value", value=float(latency)),
+                f"RTT: {self.last_rtt_text}",
+                self.recording,
+            )
+
+    def _on_virtual_cam_tick(self):
+        if not self._is_camera_window_visible():
+            return
+        if not self._using_virtual_vtk_camera():
+            return
+
+        frame = self._fetch_virtual_vtk_frame()
+        if frame is None:
+            return
+
+        now = time.time()
+        dt = max(1e-3, now - float(self._virtual_cam_tick_ts))
+        self._virtual_cam_tick_ts = now
+        fps = 1.0 / dt
+        self._display_camera_frame(frame, fps=fps, latency=0.0)
+
     def _ensure_camera_window(self):
         if self.camera_window is None:
             self.camera_window = CameraWindow(
@@ -1277,17 +1337,18 @@ class ArmControlGUI(QMainWindow):
         cam.activateWindow()
         self._set_camera_btn_text(True)
 
+        if self._using_virtual_vtk_camera():
+            frame = self._fetch_virtual_vtk_frame()
+            if frame is not None:
+                self._virtual_cam_tick_ts = time.time()
+                self._display_camera_frame(frame, fps=30.0, latency=0.0)
+                return
+
         if self.last_frame is not None:
-            frame = self.last_frame.copy()
-            if self.recording:
-                cv2.circle(frame, (frame.shape[1] - 30, 30), 15, (0, 0, 255), -1)
-                cv2.putText(frame, "REC", (frame.shape[1] - 70, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-            cam.set_frame(
-                frame,
-                f"FPS: {int(self.last_frame_fps)}",
-                self._tr("latency_value", value=self.last_frame_latency),
-                f"RTT: {self.last_rtt_text}",
-                self.recording,
+            self._display_camera_frame(
+                self.last_frame,
+                fps=float(self.last_frame_fps),
+                latency=float(self.last_frame_latency),
             )
 
     # ==================== Speech window ====================
@@ -1397,7 +1458,7 @@ class ArmControlGUI(QMainWindow):
                 )
                 self.client.start()
 
-                if VIDEO_AVAILABLE:
+                if VIDEO_AVAILABLE and not self._using_virtual_vtk_camera():
                     self.video_client = VideoClient(server_ip=ip, video_port=cam_port)
                     threading.Thread(target=self.video_client.start, daemon=True).start()
                     self.video_thread = VideoThread(self.video_client)
@@ -1458,8 +1519,17 @@ class ArmControlGUI(QMainWindow):
         self.last_rtt_text = "--"
 
         if self.camera_window is not None:
-            pixmap = self._build_placeholder_pixmap(self.camera_window.camera_label)
-            self.camera_window.set_placeholder(pixmap, self._tr("camera_disconnected"))
+            if self._using_virtual_vtk_camera():
+                frame = self._fetch_virtual_vtk_frame()
+                if frame is not None:
+                    self._virtual_cam_tick_ts = time.time()
+                    self._display_camera_frame(frame, fps=30.0, latency=0.0)
+                else:
+                    pixmap = self._build_placeholder_pixmap(self.camera_window.camera_label)
+                    self.camera_window.set_placeholder(pixmap, self._tr("camera_disconnected"))
+            else:
+                pixmap = self._build_placeholder_pixmap(self.camera_window.camera_label)
+                self.camera_window.set_placeholder(pixmap, self._tr("camera_disconnected"))
 
         self.log(self._tr("log_disconnected"), "warning")
         self.statusBar().showMessage(self._tr("status_disconnected"))
@@ -1496,25 +1566,9 @@ class ArmControlGUI(QMainWindow):
     # ==================== Camera frames ====================
 
     def update_camera(self, frame: np.ndarray, latency: float, fps: float):
-        self.last_frame = frame.copy()
-        self.last_frame_latency = float(latency)
-        self.last_frame_fps = float(fps)
-
-        display_frame = frame.copy()
-        if self.recording:
-            cv2.circle(display_frame, (display_frame.shape[1] - 30, 30), 15, (0, 0, 255), -1)
-            cv2.putText(display_frame, "REC", (display_frame.shape[1] - 70, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-
-        if self._is_camera_window_visible():
-            fps_text = f"FPS: {int(fps)}"
-            latency_text = self._tr("latency_value", value=latency)
-            self.camera_window.set_frame(
-                display_frame,
-                fps_text,
-                latency_text,
-                f"RTT: {self.last_rtt_text}",
-                self.recording,
-            )
+        if self._using_virtual_vtk_camera():
+            return
+        self._display_camera_frame(frame, fps=float(fps), latency=float(latency))
 
     # ==================== Position management ====================
 

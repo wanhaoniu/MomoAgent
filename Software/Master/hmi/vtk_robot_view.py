@@ -13,6 +13,7 @@ import pybullet as pb
 import vtk
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+from vtkmodules.util import numpy_support
 
 
 @dataclass
@@ -79,15 +80,29 @@ class VtkRobotView(QWidget):
         self.joint_values: List[float] = []
         self._child_link_to_joint: Dict[str, int] = {}
         self._ee_link_index: Optional[int] = None
+        self._urdf_joint_order: List[Tuple[str, str]] = []
+        self._eye_in_hand_link_name: Optional[str] = None
+        self._eye_in_hand_link_index: Optional[int] = None
 
         self._actors_by_link: Dict[str, List[vtk.vtkActor]] = {}
+        self._eye_actors_by_link: Dict[str, List[vtk.vtkActor]] = {}
         self._mesh_actors: List[vtk.vtkActor] = []
+        self._eye_mesh_actors: List[vtk.vtkActor] = []
         self._normal_filters: List[vtk.vtkPolyDataNormals] = []
         self._joint_label_actors: List[Tuple[int, vtk.vtkBillboardTextActor3D]] = []
         self._lights: List[vtk.vtkLight] = []
+        self._eye_lights: List[vtk.vtkLight] = []
         self._floor_actor: vtk.vtkActor | None = None
         self._ground_line_actor: vtk.vtkActor | None = None
+        self._eye_floor_actor: vtk.vtkActor | None = None
+        self._eye_ground_line_actor: vtk.vtkActor | None = None
         self._scene_axes_actor: vtk.vtkAxesActor | None = None
+        self._apple_actor: vtk.vtkActor | None = None
+        self._apple_eye_actor: vtk.vtkActor | None = None
+        self._eye_renderer: vtk.vtkRenderer | None = None
+        self._eye_render_window: vtk.vtkRenderWindow | None = None
+        self._eye_camera: vtk.vtkCamera | None = None
+        self._eye_w2i: vtk.vtkWindowToImageFilter | None = None
 
         self._antialias_mode = "off"
         self._antialias_samples = 0
@@ -101,9 +116,11 @@ class VtkRobotView(QWidget):
         self._build_widget()
         visuals = self._load_visuals_from_urdf()
         self._init_pybullet_kinematics()
+        self._init_eye_in_hand_pipeline()
         self._add_floor()
         self._add_lights()
         self._add_mesh_actors(visuals)
+        self._add_apple_model()
         self._add_orientation_axes()
 
         self.set_background("studio")
@@ -134,6 +151,112 @@ class VtkRobotView(QWidget):
         self.interactor = self.render_window.GetInteractor()
         self.interactor.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
 
+    def _init_eye_in_hand_pipeline(self):
+        self._eye_renderer = vtk.vtkRenderer()
+        self._eye_renderer.SetBackground(0.05, 0.06, 0.08)
+        self._eye_renderer.GradientBackgroundOff()
+        self._eye_renderer.AutomaticLightCreationOn()
+
+        self._eye_render_window = vtk.vtkRenderWindow()
+        self._eye_render_window.SetOffScreenRendering(1)
+        self._eye_render_window.SetMultiSamples(0)
+        self._eye_render_window.SetSize(960, 720)
+        self._eye_render_window.AddRenderer(self._eye_renderer)
+
+        self._eye_camera = vtk.vtkCamera()
+        self._eye_camera.SetViewAngle(62.0)
+        self._eye_renderer.SetActiveCamera(self._eye_camera)
+
+        self._eye_w2i = vtk.vtkWindowToImageFilter()
+        self._eye_w2i.SetInput(self._eye_render_window)
+        self._eye_w2i.SetInputBufferTypeToRGB()
+        self._eye_w2i.ReadFrontBufferOff()
+
+    @staticmethod
+    def _copy_actor_property(src: vtk.vtkActor, dst: vtk.vtkActor):
+        src_prop = src.GetProperty()
+        dst_prop = dst.GetProperty()
+        if src_prop is None or dst_prop is None:
+            return
+        dst_prop.DeepCopy(src_prop)
+
+    def _resolve_apple_mesh_path(self) -> Optional[Path]:
+        candidates = [
+            self.urdf_path.parent.parent / "apple" / "Apple.stl",
+            Path(__file__).resolve().parents[3] / "sdk" / "src" / "soarmMoce_sdk" / "resources" / "apple" / "Apple.stl",
+        ]
+        for path in candidates:
+            if path.exists():
+                return path.resolve()
+        return None
+
+    @staticmethod
+    def _estimate_mesh_scale(bounds: Sequence[float]) -> float:
+        if len(bounds) < 6:
+            return 1.0
+        span = max(float(bounds[1] - bounds[0]), float(bounds[3] - bounds[2]), float(bounds[5] - bounds[4]))
+        if span > 2.0:
+            return 0.001
+        if span > 0.3:
+            return 0.01
+        return 1.0
+
+    def _add_apple_model(self):
+        apple_path = self._resolve_apple_mesh_path()
+        if apple_path is None:
+            return
+
+        reader = vtk.vtkSTLReader()
+        reader.SetFileName(str(apple_path))
+        reader.Update()
+        output = reader.GetOutput()
+        if output is None or output.GetNumberOfPoints() == 0:
+            return
+
+        scale = self._estimate_mesh_scale(output.GetBounds())
+        tf = vtk.vtkTransform()
+        tf.Scale(scale, scale, scale)
+
+        tf_filter = vtk.vtkTransformPolyDataFilter()
+        tf_filter.SetTransform(tf)
+        tf_filter.SetInputConnection(reader.GetOutputPort())
+
+        normals = vtk.vtkPolyDataNormals()
+        normals.SetInputConnection(tf_filter.GetOutputPort())
+        normals.ComputePointNormalsOn()
+        normals.ComputeCellNormalsOff()
+        normals.ConsistencyOn()
+        normals.AutoOrientNormalsOff()
+        normals.SetFeatureAngle(self._mesh_feature_angle)
+        normals.SplittingOn()
+        self._normal_filters.append(normals)
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(normals.GetOutputPort())
+
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.SetPosition(0.30, 0.00, 0.05)
+        prop = actor.GetProperty()
+        prop.SetColor(1.0, 0.0, 0.0)
+        prop.SetInterpolationToPhong()
+        prop.SetAmbient(0.24)
+        prop.SetDiffuse(0.74)
+        prop.SetSpecular(0.18)
+        prop.SetSpecularPower(22.0)
+        self.renderer.AddActor(actor)
+        self._apple_actor = actor
+        self._mesh_actors.append(actor)
+
+        if self._eye_renderer is not None:
+            eye_actor = vtk.vtkActor()
+            eye_actor.SetMapper(mapper)
+            eye_actor.SetPosition(0.30, 0.00, 0.05)
+            self._copy_actor_property(actor, eye_actor)
+            self._eye_renderer.AddActor(eye_actor)
+            self._apple_eye_actor = eye_actor
+            self._eye_mesh_actors.append(eye_actor)
+
     def _resolve_mesh_path(self, mesh_filename: str) -> Path:
         path = Path(mesh_filename)
         if path.is_absolute():
@@ -149,6 +272,7 @@ class VtkRobotView(QWidget):
 
         all_links = []
         child_links = set()
+        self._urdf_joint_order = []
         materials: Dict[str, Tuple[float, float, float]] = {}
         visuals: List[VisualMesh] = []
 
@@ -163,9 +287,12 @@ class VtkRobotView(QWidget):
             materials[name] = (float(rgba[0]), float(rgba[1]), float(rgba[2]))
 
         for joint_node in root.findall("joint"):
+            joint_name = str(joint_node.get("name") or "")
             child_node = joint_node.find("child")
-            if child_node is not None and child_node.get("link"):
-                child_links.add(child_node.get("link"))
+            child_link = child_node.get("link") if child_node is not None else None
+            if child_link:
+                child_links.add(child_link)
+                self._urdf_joint_order.append((joint_name, str(child_link)))
 
         for link_node in root.findall("link"):
             link_name = link_node.get("name")
@@ -259,6 +386,33 @@ class VtkRobotView(QWidget):
         if not self.joint_indices:
             raise RuntimeError("No movable joints found in URDF")
         self._ee_link_index = self._detect_end_effector_index()
+        self._eye_in_hand_link_name = self._detect_eye_in_hand_link_name()
+        if self._eye_in_hand_link_name:
+            self._eye_in_hand_link_index = self._child_link_to_joint.get(self._eye_in_hand_link_name)
+        if self._eye_in_hand_link_index is None:
+            self._eye_in_hand_link_index = self._ee_link_index
+
+    def _detect_eye_in_hand_link_name(self) -> Optional[str]:
+        if not self._urdf_joint_order:
+            return None
+
+        preferred_joint_names = (
+            "wrist_roll",
+            
+        )
+        for joint_name, child_link in self._urdf_joint_order:
+            if joint_name.strip().lower() in preferred_joint_names:
+                return child_link
+
+        preferred_link_names = (
+            "wrist_roll",
+            
+        )
+        for _joint_name, child_link in self._urdf_joint_order:
+            if child_link.strip().lower() in preferred_link_names:
+                return child_link
+
+        return self._urdf_joint_order[-1][1]
 
     def _detect_end_effector_index(self) -> Optional[int]:
         if self.pb_client is None or self.pb_robot_id is None:
@@ -307,6 +461,72 @@ class VtkRobotView(QWidget):
         rpy = np.array(pb.getEulerFromQuaternion(state[5]), dtype=float)
         return xyz, rpy
 
+    def _update_eye_in_hand_camera_pose(self):
+        if self.pb_client is None or self.pb_robot_id is None:
+            return
+        if self._eye_camera is None:
+            return
+
+        link_idx = self._eye_in_hand_link_index
+        if link_idx is None:
+            link_idx = self._ee_link_index
+        if link_idx is None:
+            return
+
+        state = pb.getLinkState(
+            self.pb_robot_id,
+            int(link_idx),
+            computeForwardKinematics=True,
+            physicsClientId=self.pb_client,
+        )
+        link_pos = np.asarray(state[4], dtype=float)
+        link_quat = state[5]
+        rot = np.asarray(pb.getMatrixFromQuaternion(link_quat), dtype=float).reshape(3, 3)
+
+        # Eye-in-hand camera: offset slightly above the wrist frame and look forward.
+        cam_pos = link_pos + rot @ np.array([0.060, 0.000, 0.028], dtype=float)
+        focal = cam_pos + rot @ np.array([0.320, 0.000, 0.000], dtype=float)
+        view_up = rot @ np.array([0.000, 0.000, 1.000], dtype=float)
+
+        self._eye_camera.SetPosition(float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2]))
+        self._eye_camera.SetFocalPoint(float(focal[0]), float(focal[1]), float(focal[2]))
+        self._eye_camera.SetViewUp(float(view_up[0]), float(view_up[1]), float(view_up[2]))
+        self._eye_camera.SetParallelProjection(False)
+        self._eye_camera.SetViewAngle(62.0)
+        if self._eye_renderer is not None:
+            self._eye_renderer.ResetCameraClippingRange()
+
+    def render_eye_in_hand_frame(self, width: int = 960, height: int = 720) -> Optional[np.ndarray]:
+        if self._eye_renderer is None or self._eye_render_window is None or self._eye_w2i is None:
+            return None
+
+        w = max(160, int(width))
+        h = max(120, int(height))
+
+        self._update_eye_in_hand_camera_pose()
+        self._eye_render_window.SetSize(w, h)
+        self._eye_render_window.Render()
+        self._eye_w2i.Modified()
+        self._eye_w2i.Update()
+
+        image = self._eye_w2i.GetOutput()
+        if image is None:
+            return None
+        dims = image.GetDimensions()
+        if dims is None or dims[0] <= 0 or dims[1] <= 0:
+            return None
+
+        scalars = image.GetPointData().GetScalars()
+        if scalars is None or scalars.GetNumberOfComponents() < 3:
+            return None
+
+        frame = numpy_support.vtk_to_numpy(scalars)
+        h_img, w_img = int(dims[1]), int(dims[0])
+        frame = frame.reshape(h_img, w_img, scalars.GetNumberOfComponents())
+        rgb = np.ascontiguousarray(np.flipud(frame[:, :, :3]))
+        bgr = np.ascontiguousarray(rgb[:, :, ::-1])
+        return bgr
+
     def _make_local_visual_filter(self, reader_output_port, visual: VisualMesh):
         rot = _rpy_matrix(float(visual.origin_rpy[0]), float(visual.origin_rpy[1]), float(visual.origin_rpy[2]))
         rot_scaled = rot @ np.diag(visual.scale_xyz)
@@ -329,7 +549,10 @@ class VtkRobotView(QWidget):
         return tf_filter
 
     def _add_mesh_actors(self, visuals: List[VisualMesh]):
+        self._actors_by_link.clear()
+        self._eye_actors_by_link.clear()
         self._mesh_actors.clear()
+        self._eye_mesh_actors.clear()
         self._normal_filters.clear()
 
         for visual in visuals:
@@ -372,6 +595,14 @@ class VtkRobotView(QWidget):
             self.renderer.AddActor(actor)
             self._mesh_actors.append(actor)
             self._actors_by_link.setdefault(visual.link_name, []).append(actor)
+
+            if self._eye_renderer is not None:
+                eye_actor = vtk.vtkActor()
+                eye_actor.SetMapper(mapper)
+                self._copy_actor_property(actor, eye_actor)
+                self._eye_renderer.AddActor(eye_actor)
+                self._eye_mesh_actors.append(eye_actor)
+                self._eye_actors_by_link.setdefault(visual.link_name, []).append(eye_actor)
 
         for idx, _joint_idx in enumerate(self.joint_indices):
             text = vtk.vtkBillboardTextActor3D()
@@ -516,6 +747,23 @@ class VtkRobotView(QWidget):
             prop.SetAmbient(0.90)
             prop.SetDiffuse(0.10)
 
+        if self._eye_floor_actor is not None:
+            prop = self._eye_floor_actor.GetProperty()
+            prop.SetColor(*floor_color)
+            prop.SetAmbient(0.82)
+            prop.SetDiffuse(0.20)
+            prop.SetSpecular(0.03)
+            prop.SetSpecularPower(6.0)
+            prop.SetOpacity(floor_opacity)
+
+        if self._eye_ground_line_actor is not None:
+            prop = self._eye_ground_line_actor.GetProperty()
+            prop.SetColor(*line_color)
+            prop.SetLineWidth(1.1)
+            prop.SetOpacity(line_opacity)
+            prop.SetAmbient(0.90)
+            prop.SetDiffuse(0.10)
+
     def _add_floor(self):
         # Ground disk (transparent gray) plus radial/concentric helper lines.
         disk = vtk.vtkDiskSource()
@@ -533,6 +781,13 @@ class VtkRobotView(QWidget):
         self.renderer.AddActor(disk_actor)
         self._floor_actor = disk_actor
 
+        if self._eye_renderer is not None:
+            eye_disk_actor = vtk.vtkActor()
+            eye_disk_actor.SetMapper(disk_mapper)
+            eye_disk_actor.SetPosition(0.0, 0.0, -0.0015)
+            self._eye_renderer.AddActor(eye_disk_actor)
+            self._eye_floor_actor = eye_disk_actor
+
         grid_poly = self._build_ground_grid_polydata(radius=0.80, circles=5, radials=24, circle_segments=120, z=0.0005)
         grid_mapper = vtk.vtkPolyDataMapper()
         grid_mapper.SetInputData(grid_poly)
@@ -541,6 +796,13 @@ class VtkRobotView(QWidget):
         grid_actor.SetPosition(0.0, 0.0, -0.0010)
         self.renderer.AddActor(grid_actor)
         self._ground_line_actor = grid_actor
+
+        if self._eye_renderer is not None:
+            eye_grid_actor = vtk.vtkActor()
+            eye_grid_actor.SetMapper(grid_mapper)
+            eye_grid_actor.SetPosition(0.0, 0.0, -0.0010)
+            self._eye_renderer.AddActor(eye_grid_actor)
+            self._eye_ground_line_actor = eye_grid_actor
 
         # Small in-scene axis near the ground; keep the corner orientation widget as well.
         axes = vtk.vtkAxesActor()
@@ -563,6 +825,12 @@ class VtkRobotView(QWidget):
             self.renderer.RemoveLight(light)
         self._lights.clear()
 
+        if self._eye_renderer is not None:
+            self._eye_renderer.AutomaticLightCreationOff()
+            for light in self._eye_lights:
+                self._eye_renderer.RemoveLight(light)
+            self._eye_lights.clear()
+
         key = vtk.vtkLight()
         # Key light from +X +Y direction.
         key.SetLightTypeToSceneLight()
@@ -572,6 +840,11 @@ class VtkRobotView(QWidget):
         key.SetIntensity(0.78)
         self.renderer.AddLight(key)
         self._lights.append(key)
+        if self._eye_renderer is not None:
+            eye_key = vtk.vtkLight()
+            eye_key.DeepCopy(key)
+            self._eye_renderer.AddLight(eye_key)
+            self._eye_lights.append(eye_key)
 
         fill = vtk.vtkLight()
         fill.SetLightTypeToSceneLight()
@@ -581,6 +854,11 @@ class VtkRobotView(QWidget):
         fill.SetIntensity(0.34)
         self.renderer.AddLight(fill)
         self._lights.append(fill)
+        if self._eye_renderer is not None:
+            eye_fill = vtk.vtkLight()
+            eye_fill.DeepCopy(fill)
+            self._eye_renderer.AddLight(eye_fill)
+            self._eye_lights.append(eye_fill)
 
         rim = vtk.vtkLight()
         rim.SetLightTypeToSceneLight()
@@ -590,6 +868,11 @@ class VtkRobotView(QWidget):
         rim.SetIntensity(0.14)
         self.renderer.AddLight(rim)
         self._lights.append(rim)
+        if self._eye_renderer is not None:
+            eye_rim = vtk.vtkLight()
+            eye_rim.DeepCopy(rim)
+            self._eye_renderer.AddLight(eye_rim)
+            self._eye_lights.append(eye_rim)
 
     def _add_orientation_axes(self):
         axes = vtk.vtkAxesActor()
@@ -697,9 +980,18 @@ class VtkRobotView(QWidget):
             prop.SetDiffuse(values["diffuse"])
             prop.SetSpecular(values["specular"])
             prop.SetSpecularPower(values["specular_power"])
+        for actor in self._eye_mesh_actors:
+            prop = actor.GetProperty()
+            prop.SetInterpolationToPhong()
+            prop.SetAmbient(values["ambient"])
+            prop.SetDiffuse(values["diffuse"])
+            prop.SetSpecular(values["specular"])
+            prop.SetSpecularPower(values["specular_power"])
         self._update_ground_style()
 
         self.render_window.Render()
+        if self._eye_render_window is not None:
+            self._eye_render_window.Render()
 
     def set_background(self, theme: str = "studio"):
         theme_norm = (theme or "light").strip().lower()
@@ -721,6 +1013,11 @@ class VtkRobotView(QWidget):
         else:
             self.renderer.GradientBackgroundOff()
 
+        if self._eye_renderer is not None:
+            eye_bg = (0.08, 0.10, 0.14) if self._background_theme == "dark" else (0.96, 0.97, 0.98)
+            self._eye_renderer.SetBackground(*eye_bg)
+            self._eye_renderer.GradientBackgroundOff()
+
         if hasattr(self.render_window, "SetUseSRGBColorSpace"):
             try:
                 self.render_window.SetUseSRGBColorSpace(bool(cfg["srgb"]))
@@ -730,6 +1027,8 @@ class VtkRobotView(QWidget):
         self._update_joint_label_style()
 
         self.render_window.Render()
+        if self._eye_render_window is not None:
+            self._eye_render_window.Render()
 
     def set_ui_theme(self, theme: str = "light"):
         theme_norm = (theme or "light").strip().lower()
@@ -841,6 +1140,27 @@ class VtkRobotView(QWidget):
             for actor in actors:
                 actor.SetUserMatrix(mat)
 
+        for link_name, actors in self._eye_actors_by_link.items():
+            if link_name == self.base_link_name:
+                for actor in actors:
+                    actor.SetUserMatrix(identity)
+                continue
+
+            joint_idx = self._child_link_to_joint.get(link_name)
+            if joint_idx is None:
+                continue
+
+            state = pb.getLinkState(
+                self.pb_robot_id,
+                joint_idx,
+                computeForwardKinematics=True,
+                physicsClientId=self.pb_client,
+            )
+            world_pos, world_quat = state[4], state[5]
+            mat = _vtk_matrix_from_pose(world_pos, world_quat)
+            for actor in actors:
+                actor.SetUserMatrix(mat)
+
         for label_joint_idx, label_actor in self._joint_label_actors:
             state = pb.getLinkState(
                 self.pb_robot_id,
@@ -851,9 +1171,24 @@ class VtkRobotView(QWidget):
             pos = state[4]
             label_actor.SetPosition(pos[0] + 0.03, pos[1] + 0.03, pos[2] + 0.02)
 
+        self._update_eye_in_hand_camera_pose()
+
         self.render_window.Render()
+        if self._eye_render_window is not None:
+            self._eye_render_window.Render()
 
     def shutdown(self):
+        if self._eye_render_window is not None:
+            try:
+                self._eye_render_window.Finalize()
+            except Exception:
+                pass
+            self._eye_render_window = None
+        self._eye_renderer = None
+        self._eye_camera = None
+        self._eye_w2i = None
+        self._eye_lights.clear()
+
         if self.pb_client is not None:
             try:
                 pb.disconnect(self.pb_client)
