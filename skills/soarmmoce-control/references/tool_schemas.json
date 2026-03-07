@@ -1,0 +1,207 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "move_robot_arm",
+      "description": "Move robot TCP in Cartesian space using SDK move_tcp, then return latest robot state.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "number",
+            "description": "Target x in meters."
+          },
+          "y": {
+            "type": "number",
+            "description": "Target y in meters."
+          },
+          "z": {
+            "type": "number",
+            "description": "Target z in meters."
+          },
+          "rpy": {
+            "type": "array",
+            "description": "Optional roll/pitch/yaw in radians.",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "frame": {
+            "type": "string",
+            "enum": [
+              "base",
+              "tool"
+            ],
+            "default": "base"
+          },
+          "duration": {
+            "type": "number",
+            "default": 2.0
+          },
+          "wait": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Optional wait timeout in seconds."
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "z"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "move_robot_delta",
+      "description": "Move robot TCP by relative offsets (dx,dy,dz) and return latest state.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dx": {
+            "type": "number",
+            "description": "Offset x in meters."
+          },
+          "dy": {
+            "type": "number",
+            "description": "Offset y in meters."
+          },
+          "dz": {
+            "type": "number",
+            "description": "Offset z in meters."
+          },
+          "frame": {
+            "type": "string",
+            "enum": [
+              "base",
+              "tool"
+            ],
+            "default": "base"
+          },
+          "duration": {
+            "type": "number",
+            "default": 2.0
+          },
+          "wait": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Optional wait timeout in seconds."
+          }
+        },
+        "required": [
+          "dx",
+          "dy",
+          "dz"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_robot_state",
+      "description": "Get current robot state from SDK.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "set_gripper",
+      "description": "Set gripper open ratio with SDK.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "open_ratio": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "0.0 closed, 1.0 open."
+          },
+          "wait": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Optional wait timeout in seconds."
+          }
+        },
+        "required": [
+          "open_ratio"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "open_gripper",
+      "description": "Open gripper fully.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "wait": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Optional wait timeout in seconds."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "close_gripper",
+      "description": "Close gripper fully.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "wait": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Optional wait timeout in seconds."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "stop_robot",
+      "description": "Stop robot motion immediately via SDK.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  }
+]

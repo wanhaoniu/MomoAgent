@@ -1,0 +1,4 @@
+interface:
+  display_name: "SoarmMoce Control"
+  short_description: "SDK-backed OpenClaw tool calling for SoarmMoce arm control"
+  default_prompt: "Use $soarmmoce-control to call move_robot_arm/get_robot_state/set_gripper/stop_robot with structured {ok,result,error} responses."

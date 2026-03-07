@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import uuid
 import wave
 import time
 from pathlib import Path
@@ -30,6 +31,9 @@ GROQ_STT_MODEL_DEFAULT = "whisper-large-v3"
 OPENCLAW_BIN_DEFAULT = "openclaw"
 OPENCLAW_AGENT_ID_DEFAULT = "main"
 OPENCLAW_TIMEOUT_SEC_DEFAULT = 90.0
+OPENCLAW_SKILL_NAME_DEFAULT = "soarmmoce-control"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SDK_SRC = REPO_ROOT / "sdk" / "src"
 
 OPENCLAW_THINKING_DEFAULT = "minimal"
 
@@ -111,7 +115,9 @@ def _extract_text_from_openclaw_payload(payload: Any) -> str:
                     if t:
                         texts.append(t)
             if texts:
-                return "\n".join(texts).strip()
+                # OpenClaw may stream intermediate thoughts as multiple payload items;
+                # prefer the last non-empty item as final assistant reply.
+                return texts[-1].strip()
         for key in ("text", "message", "content", "reply", "answer"):
             val = payload.get(key)
             if isinstance(val, str) and val.strip():
@@ -135,6 +141,58 @@ def _extract_openclaw_session_id(payload: Any) -> str:
         return ""
     sid = agent_meta.get("sessionId")
     return str(sid).strip() if sid is not None else ""
+
+
+def _looks_like_node_request(text: str) -> bool:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    cn_hits = ("节点", "发布一个节点", "哪个节点", "node agent", "nodes")
+    en_hits = ("which node", "need a node", "specify a node", "publish a node")
+    return any(x in raw for x in cn_hits) or any(x in raw for x in en_hits)
+
+
+def _looks_like_python_missing(text: str) -> bool:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    hits = ("python command is not found", "command not found", "`python`", "python: not found")
+    return any(x in raw for x in hits)
+
+
+def _looks_like_dispatch_usage_error(text: str) -> bool:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    hits = (
+        "not directly supported by the script",
+        "use the `call` subcommand",
+        "use the call subcommand",
+        "can't be found",
+    )
+    return any(x in raw for x in hits)
+
+
+def _build_robot_control_message(user_text: str, skill_name: str) -> str:
+    text = str(user_text or "").strip()
+    skill = str(skill_name or "").strip() or OPENCLAW_SKILL_NAME_DEFAULT
+    return f"请使用 ${skill} 处理机械臂控制请求。\n{text}"
+
+
+def _sanitize_openclaw_reply(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    if "你在执行机械臂控制模式" not in raw:
+        return raw
+
+    for marker in ("机械臂已", "夹爪已", "执行成功", "执行失败", "SKILL_NOT_AVAILABLE", "失败", "成功"):
+        idx = raw.rfind(marker)
+        if idx >= 0:
+            cleaned = raw[idx:].strip()
+            if cleaned:
+                return cleaned
+    return raw
 
 
 def _parse_tool_arguments(value: Any) -> Dict[str, Any]:
@@ -365,6 +423,9 @@ class _OpenClawAgentWorker(QThread):
         local_mode: bool,
         timeout_sec: float,
         thinking: str,
+        skill_name: str,
+        robot_mode: bool,
+        node_retry_count: int,
     ):
         super().__init__()
         self._message = str(message or "").strip()
@@ -374,6 +435,20 @@ class _OpenClawAgentWorker(QThread):
         self._local_mode = bool(local_mode)
         self._timeout_sec = max(5.0, float(timeout_sec))
         self._thinking = str(thinking or OPENCLAW_THINKING_DEFAULT).strip() or OPENCLAW_THINKING_DEFAULT
+        self._skill_name = str(skill_name or OPENCLAW_SKILL_NAME_DEFAULT).strip() or OPENCLAW_SKILL_NAME_DEFAULT
+        self._robot_mode = bool(robot_mode)
+        self._node_retry_count = max(0, int(node_retry_count))
+
+    def _build_subprocess_env(self) -> Dict[str, str]:
+        env = os.environ.copy()
+        if SDK_SRC.exists():
+            existing_pp = str(env.get("PYTHONPATH", "")).strip()
+            sdk_src_str = str(SDK_SRC.resolve())
+            if existing_pp:
+                env["PYTHONPATH"] = f"{sdk_src_str}:{existing_pp}"
+            else:
+                env["PYTHONPATH"] = sdk_src_str
+        return env
 
     def _build_agent_cmd(self, message: str, session_id: str) -> List[str]:
         cmd = [
@@ -397,6 +472,12 @@ class _OpenClawAgentWorker(QThread):
 
     def _invoke_openclaw_once(self, message: str, session_id: str) -> Dict[str, Any]:
         cmd = self._build_agent_cmd(message=message, session_id=session_id)
+        cwd = None
+        env = self._build_subprocess_env()
+        if self._robot_mode:
+            skill_dir = Path.home() / ".openclaw" / "skills" / self._skill_name
+            if skill_dir.exists() and skill_dir.is_dir():
+                cwd = str(skill_dir)
         try:
             proc = subprocess.run(
                 cmd,
@@ -404,6 +485,8 @@ class _OpenClawAgentWorker(QThread):
                 text=True,
                 timeout=self._timeout_sec,
                 check=False,
+                cwd=cwd,
+                env=env,
             )
         except FileNotFoundError:
             raise RuntimeError(f"找不到 OpenClaw 可执行文件: {self._openclaw_bin}")
@@ -429,6 +512,15 @@ class _OpenClawAgentWorker(QThread):
             "stderr": stderr_text,
         }
 
+    def _prepare_message(self, message: str, retry: bool = False) -> str:
+        base = str(message or "").strip()
+        if not self._robot_mode:
+            return base
+        prompt = _build_robot_control_message(base, self._skill_name)
+        if retry:
+            prompt += "\n\n再次强调：不要询问节点，直接调用技能工具执行。"
+        return prompt
+
     def run(self):
         if not self._message:
             self.failed.emit("OpenClaw 输入为空")
@@ -438,36 +530,58 @@ class _OpenClawAgentWorker(QThread):
             self.failed.emit("OpenClaw 请求已取消")
             return
 
-        try:
-            result = self._invoke_openclaw_once(message=self._message, session_id=self._session_id)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-            return
+        attempts = 1 + self._node_retry_count
+        current_session = self._session_id
+        for idx in range(attempts):
+            retry = idx > 0
+            try:
+                result = self._invoke_openclaw_once(
+                    message=self._prepare_message(self._message, retry=retry),
+                    session_id=current_session,
+                )
+            except Exception as exc:
+                self.failed.emit(str(exc))
+                return
 
-        payload = result.get("payload")
-        stdout_text = str(result.get("stdout", "")).strip()
-        current_session = _extract_openclaw_session_id(payload) or self._session_id
+            payload = result.get("payload")
+            stdout_text = str(result.get("stdout", "")).strip()
+            current_session = _extract_openclaw_session_id(payload) or current_session
 
-        tool_calls = _extract_tool_calls_from_payload(payload)
-        if tool_calls:
-            names = [str(x.get("name", "")).strip() for x in tool_calls]
-            names = [x for x in names if x]
-            summary = ", ".join(names[:4]) if names else "unknown"
-            self.failed.emit(
-                "OpenClaw 返回了 tool_calls（"
-                f"{summary}），但当前 GUI 不再执行本地工具。"
-                "请确认 ~/.openclaw/skills 的技能已正确安装并可由 OpenClaw 原生执行。"
-            )
-            return
+            reply = _extract_text_from_openclaw_payload(payload)
+            if not reply:
+                reply = stdout_text
+            reply = str(reply or "").strip()
+            if not reply:
+                self.failed.emit("OpenClaw 未返回可用文本")
+                return
 
-        reply = _extract_text_from_openclaw_payload(payload)
-        if not reply:
-            reply = stdout_text
-        reply = str(reply or "").strip()
-        if not reply:
-            self.failed.emit("OpenClaw 未返回可用文本")
+            if _looks_like_node_request(reply) and idx + 1 < attempts:
+                continue
+            if _looks_like_dispatch_usage_error(reply) and idx + 1 < attempts:
+                continue
+
+            if _looks_like_node_request(reply):
+                self.failed.emit(
+                    "OpenClaw 仍在请求节点，未进入 soarmmoce-control 技能执行链路。"
+                    "请检查 ~/.openclaw/skills 中技能安装状态。"
+                )
+                return
+            if _looks_like_dispatch_usage_error(reply):
+                self.failed.emit(
+                    "OpenClaw 已进入技能链路，但工具脚本调用格式不正确。"
+                    "应使用：python3 ~/.openclaw/skills/soarmmoce-control/scripts/soarmmoce_tools.py call --name ... --args ..."
+                )
+                return
+
+            if _looks_like_python_missing(reply):
+                self.failed.emit(
+                    "OpenClaw 已进入技能链路，但执行环境缺少 `python` 命令。"
+                    "请在系统中提供 `python` 或让技能脚本固定使用 python3。"
+                )
+                return
+
+            self.done.emit(reply, current_session)
             return
-        self.done.emit(reply, current_session)
 
 
 class SpeechInputWindow(QWidget):
@@ -521,7 +635,18 @@ class SpeechInputWindow(QWidget):
         self._openclaw_agent_id = str(
             os.getenv("OPENCLAW_AGENT_ID", OPENCLAW_AGENT_ID_DEFAULT)
         ).strip() or OPENCLAW_AGENT_ID_DEFAULT
-        self._openclaw_local_mode = _env_bool("OPENCLAW_LOCAL", True)
+        self._openclaw_skill_name = str(
+            os.getenv("OPENCLAW_SKILL_NAME", OPENCLAW_SKILL_NAME_DEFAULT)
+        ).strip() or OPENCLAW_SKILL_NAME_DEFAULT
+        self._openclaw_local_mode = _env_bool("OPENCLAW_LOCAL", False)
+        self._openclaw_robot_mode = _env_bool("OPENCLAW_ROBOT_MODE", True)
+        self._openclaw_force_new_session = _env_bool("OPENCLAW_FORCE_NEW_SESSION", False)
+        try:
+            self._openclaw_node_retry_count = max(
+                0, int(str(os.getenv("OPENCLAW_NODE_RETRY_COUNT", "2")).strip())
+            )
+        except Exception:
+            self._openclaw_node_retry_count = 2
         self._openclaw_thinking = str(
             os.getenv("OPENCLAW_THINKING", OPENCLAW_THINKING_DEFAULT)
         ).strip() or OPENCLAW_THINKING_DEFAULT
@@ -566,7 +691,11 @@ class SpeechInputWindow(QWidget):
         enabled: bool = True,
         openclaw_bin: Optional[str] = None,
         agent_id: Optional[str] = None,
+        skill_name: Optional[str] = None,
         local_mode: Optional[bool] = None,
+        robot_mode: Optional[bool] = None,
+        force_new_session: Optional[bool] = None,
+        node_retry_count: Optional[int] = None,
         thinking: Optional[str] = None,
         timeout_sec: Optional[float] = None,
         session_id: Optional[str] = None,
@@ -580,8 +709,21 @@ class SpeechInputWindow(QWidget):
             val = str(agent_id).strip()
             if val:
                 self._openclaw_agent_id = val
+        if skill_name is not None:
+            val = str(skill_name).strip()
+            if val:
+                self._openclaw_skill_name = val
         if local_mode is not None:
             self._openclaw_local_mode = bool(local_mode)
+        if robot_mode is not None:
+            self._openclaw_robot_mode = bool(robot_mode)
+        if force_new_session is not None:
+            self._openclaw_force_new_session = bool(force_new_session)
+        if node_retry_count is not None:
+            try:
+                self._openclaw_node_retry_count = max(0, int(node_retry_count))
+            except Exception:
+                pass
         if thinking is not None:
             val = str(thinking).strip()
             if val:
@@ -738,14 +880,21 @@ class SpeechInputWindow(QWidget):
         self._status_text = f"你说: {text}\nOpenClaw处理中..."
         self.update()
 
+        session_id = self._openclaw_session_id
+        if self._openclaw_force_new_session:
+            session_id = uuid.uuid4().hex
+
         self._openclaw_worker = _OpenClawAgentWorker(
             message=text,
             openclaw_bin=self._openclaw_bin,
             agent_id=self._openclaw_agent_id,
-            session_id=self._openclaw_session_id,
+            session_id=session_id,
             local_mode=self._openclaw_local_mode,
             timeout_sec=self._openclaw_timeout_sec,
             thinking=self._openclaw_thinking,
+            skill_name=self._openclaw_skill_name,
+            robot_mode=self._openclaw_robot_mode,
+            node_retry_count=self._openclaw_node_retry_count,
         )
         self._openclaw_worker.done.connect(self._on_openclaw_done)
         self._openclaw_worker.failed.connect(self._on_openclaw_failed)
@@ -753,7 +902,7 @@ class SpeechInputWindow(QWidget):
         self._openclaw_worker.start()
 
     def _on_openclaw_done(self, reply: str, session_id: str):
-        reply_text = str(reply or "").strip()
+        reply_text = _sanitize_openclaw_reply(str(reply or "").strip())
         self._last_agent_reply = reply_text
         if reply_text:
             self._status_text = f"Momo: {reply_text}"
@@ -763,7 +912,7 @@ class SpeechInputWindow(QWidget):
             self.agent_failed.emit(self._status_text)
 
         sid = str(session_id or "").strip()
-        if sid and sid != self._openclaw_session_id:
+        if (not self._openclaw_force_new_session) and sid and sid != self._openclaw_session_id:
             self._openclaw_session_id = sid
             self.agent_session_changed.emit(sid)
         self.update()

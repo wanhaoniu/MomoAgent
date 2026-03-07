@@ -197,6 +197,25 @@ class ArmControlGUI(QMainWindow):
         self._sdk_lock = threading.RLock()
         self._sdk_transport_override = str(os.getenv("SOARMMOCE_TRANSPORT", "")).strip().lower() or None
         self._sdk_config_path = str(os.getenv("SOARMMOCE_CONFIG", "")).strip() or None
+        self._sdk_mock_shared_state_path = str(
+            Path(
+                os.getenv(
+                    "SOARMMOCE_MOCK_SHARED_STATE_FILE",
+                    "/tmp/soarmmoce_mock_shared_state.json",
+                )
+            ).expanduser()
+        )
+        os.environ["SOARMMOCE_MOCK_SHARED_STATE_FILE"] = self._sdk_mock_shared_state_path
+        self._sdk_gui_sync_enabled = str(os.getenv("SOARMMOCE_GUI_SYNC", "1")).strip().lower() not in ("0", "false", "off", "no")
+        try:
+            self._sdk_gui_sync_interval_sec = max(
+                0.1,
+                float(str(os.getenv("SOARMMOCE_GUI_SYNC_INTERVAL", "0.5")).strip()),
+            )
+        except Exception:
+            self._sdk_gui_sync_interval_sec = 0.5
+        self._sdk_last_gui_sync_ts = 0.0
+        self._sdk_last_gui_sync_err_ts = 0.0
         self._jog_hold_timer = QTimer(self)
         self._jog_hold_timer.setInterval(100)
         self._jog_hold_timer.timeout.connect(self._on_quick_jog_hold_tick)
@@ -890,13 +909,25 @@ class ArmControlGUI(QMainWindow):
         self._update_global_status_bar()
 
     def _on_quick_joint_step(self, idx: int, direction: float):
-        if not self._sim_ready or idx >= len(self.sim_q):
+        if idx < 0:
             return
         step_deg = max(0.1, float(self.quick_page.step_angle_spin.value()))
         delta = math.radians(step_deg) * float(direction)
-        lo, hi = self._sim_limits[idx]
-        self.sim_q[idx] = float(np.clip(self.sim_q[idx] + delta, lo, hi))
-        self._update_sim_plot()
+        try:
+            robot = self._sdk_get_robot()
+            state_before = robot.get_state()
+            q_target = np.asarray(state_before.joint_state.q, dtype=float).copy()
+            if idx >= q_target.shape[0]:
+                return
+            lo, hi = robot.robot_model.joint_limits[idx]
+            q_target[idx] = float(np.clip(q_target[idx] + float(delta), float(lo), float(hi)))
+            speed_scale = max(0.1, float(self.speed_percent) / 100.0)
+            duration = float(np.clip(0.6 / speed_scale, 0.2, 2.0))
+            robot.move_joints(q_target, duration=duration, wait=True)
+            state_after = robot.get_state()
+            self._sync_sim_from_sdk_state(state_after)
+        except Exception as exc:
+            self.log(f"[Quick Joint] {exc}", "warning")
 
     def _quick_jog_mode_is_continuous(self) -> bool:
         combo = getattr(self.quick_page, "step_mode_combo", None)
@@ -1109,9 +1140,6 @@ class ArmControlGUI(QMainWindow):
         return None
 
     def _apply_quick_cartesian_jog(self, key: str):
-        if not self._sim_ready or len(self.sim_q) == 0:
-            return
-
         key_norm = self._normalize_jog_key(key)
         trans_map = {
             "+X": np.array([1.0, 0.0, 0.0], dtype=float),
@@ -1132,12 +1160,6 @@ class ArmControlGUI(QMainWindow):
         if key_norm not in trans_map and key_norm not in rot_map:
             return
 
-        pose = self._get_sim_pose_xyzrpy()
-        if pose is None:
-            return
-        xyz_now, rpy_now = pose
-        R_now = self._rpy_to_rotmat(rpy_now)
-
         step_mm = max(0.1, float(self.quick_page.step_dist_spin.value()))
         step_rad = math.radians(max(0.1, float(self.quick_page.step_angle_spin.value())))
         delta_pos_local = np.zeros(3, dtype=float)
@@ -1149,32 +1171,44 @@ class ArmControlGUI(QMainWindow):
 
         coord_mode = str(self.quick_page.coord_combo.currentText()).strip().lower()
         use_tool = coord_mode.startswith("tool")
-        if use_tool:
-            target_xyz = np.asarray(xyz_now, dtype=float) + (R_now @ delta_pos_local)
-            R_target = R_now @ self._rotvec_to_rotmat(delta_rot_local)
-        else:
-            target_xyz = np.asarray(xyz_now, dtype=float) + delta_pos_local
-            R_target = self._rotvec_to_rotmat(delta_rot_local) @ R_now
-        target_rpy = self._rotmat_to_rpy(R_target)
-
-        q_target = self._solve_sim_ik(target_xyz, target_rpy)
-        if q_target is None:
-            return
-        if q_target.shape[0] != len(self.sim_q):
-            return
-
-        q_clipped = np.asarray(q_target, dtype=float).copy()
-        for i, (lo, hi) in enumerate(self._sim_limits):
-            q_clipped[i] = float(np.clip(q_clipped[i], float(lo), float(hi)))
-        self.sim_q = q_clipped
-        self._update_sim_plot()
+        try:
+            robot = self._sdk_get_robot()
+            state_before = robot.get_state()
+            xyz_now = np.asarray(state_before.tcp_pose.xyz, dtype=float)
+            rpy_now = np.asarray(state_before.tcp_pose.rpy, dtype=float)
+            R_now = self._rpy_to_rotmat(rpy_now)
+            if use_tool:
+                target_xyz = np.asarray(xyz_now, dtype=float) + (R_now @ delta_pos_local)
+                R_target = R_now @ self._rotvec_to_rotmat(delta_rot_local)
+            else:
+                target_xyz = np.asarray(xyz_now, dtype=float) + delta_pos_local
+                R_target = self._rotvec_to_rotmat(delta_rot_local) @ R_now
+            target_rpy = self._rotmat_to_rpy(R_target)
+            speed_scale = max(0.1, float(self.speed_percent) / 100.0)
+            duration = float(np.clip(0.6 / speed_scale, 0.2, 2.0))
+            robot.move_pose(
+                xyz=target_xyz,
+                rpy=target_rpy,
+                duration=duration,
+                wait=True,
+            )
+            state_after = robot.get_state()
+            self._sync_sim_from_sdk_state(state_after)
+        except Exception as exc:
+            self.log(f"[Quick Jog] {exc}", "warning")
 
     def _on_quick_origin(self):
-        if not self._sim_ready:
-            return
         self._on_quick_jog_released()
-        self._on_sim_reset()
-        self.statusBar().showMessage("Simulation reset to zero")
+        try:
+            robot = self._sdk_get_robot()
+            speed_scale = max(0.1, float(self.speed_percent) / 100.0)
+            duration = float(np.clip(1.8 / speed_scale, 0.5, 5.0))
+            robot.home(duration=duration, wait=True)
+            state_after = robot.get_state()
+            self._sync_sim_from_sdk_state(state_after)
+            self.statusBar().showMessage("Robot moved to home")
+        except Exception as exc:
+            self.log(f"[Quick Home] {exc}", "warning")
 
     def _on_quick_free_move(self):
         combo = getattr(self.quick_page, "step_mode_combo", None)
@@ -1531,6 +1565,29 @@ class ArmControlGUI(QMainWindow):
             q_dst[i] = float(np.clip(q_dst[i], float(lo), float(hi)))
         self.sim_q = q_dst
         self._update_sim_plot()
+
+    def _sync_gui_from_sdk(self, force: bool = False) -> bool:
+        if not self._sim_ready or not self._sdk_gui_sync_enabled:
+            return False
+        if self.connected and self.client:
+            # ArmClient-connected mode keeps its own update path.
+            return False
+
+        now = time.time()
+        if (not force) and (now - float(self._sdk_last_gui_sync_ts) < float(self._sdk_gui_sync_interval_sec)):
+            return False
+
+        try:
+            robot = self._sdk_get_robot()
+            state = robot.get_state()
+            self._sync_sim_from_sdk_state(state)
+            self._sdk_last_gui_sync_ts = now
+            return True
+        except Exception as exc:
+            if now - float(self._sdk_last_gui_sync_err_ts) >= 5.0:
+                self._sdk_last_gui_sync_err_ts = now
+                self.log(f"[SDK sync] {exc}", "warning")
+            return False
 
     def _tool_find_joint_index(self, joint_name: str) -> Optional[int]:
         key = str(joint_name or "").strip().lower()
@@ -2509,7 +2566,8 @@ class ArmControlGUI(QMainWindow):
         if not self.connected or not self.client:
             self.last_rtt_text = "--"
             if self._sim_ready:
-                self._update_quick_pose_from_sim()
+                if not self._sync_gui_from_sdk():
+                    self._update_quick_pose_from_sim()
         else:
             buf = list(self.client.rtt_ms_buf)
             if buf:
