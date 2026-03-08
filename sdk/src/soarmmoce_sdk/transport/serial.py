@@ -10,7 +10,7 @@ from .base import TransportBase
 class SerialTransport(TransportBase):
     """Serial transport placeholder.
 
-    TODO: adapt to existing motor bus implementation (see SO102/Software/Master/so101_utils.py).
+    TODO: adapt to existing motor bus implementation (see Software/Master/so101_utils.py).
     """
 
     def __init__(self, dof: int, port: str, baudrate: int = 115200, timeout: float = 1.0):
