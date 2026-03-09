@@ -42,13 +42,8 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                     "x": {"type": "number", "description": "Target x in meters."},
                     "y": {"type": "number", "description": "Target y in meters."},
                     "z": {"type": "number", "description": "Target z in meters."},
-                    "rpy": {
-                        "type": "array",
-                        "description": "Optional roll/pitch/yaw in radians.",
-                        "items": {"type": "number"},
-                        "minItems": 3,
-                        "maxItems": 3,
-                    },
+                    "tool_pitch": {"type": "number", "description": "Optional tool pitch in radians."},
+                    "tool_roll": {"type": "number", "description": "Optional tool roll in radians."},
                     "frame": {"type": "string", "enum": ["base", "tool"], "default": "base"},
                     "duration": {"type": "number", "default": 2.0},
                     "wait": {"type": "boolean", "default": True},
@@ -243,19 +238,6 @@ def _optional_str(arguments: Dict[str, Any], key: str, default: Optional[str] = 
     return str(value).strip()
 
 
-def _optional_rpy(arguments: Dict[str, Any]) -> Optional[List[float]]:
-    if "rpy" not in arguments:
-        return None
-    raw = arguments["rpy"]
-    if not isinstance(raw, list) or len(raw) != 3:
-        raise ValidationError("rpy must be an array of exactly 3 numbers")
-    out: List[float] = []
-    for idx, value in enumerate(raw):
-        if not isinstance(value, (int, float)):
-            raise ValidationError(f"rpy[{idx}] must be a number")
-        out.append(float(value))
-    return out
-
 
 def _parse_xyz_array(raw: Any, field: str) -> List[float]:
     if not isinstance(raw, (list, tuple)) or len(raw) != 3:
@@ -382,14 +364,15 @@ def _get_robot():
 def _tool_move_robot_arm(arguments: Dict[str, Any]) -> Dict[str, Any]:
     _ensure_allowed_keys(
         arguments,
-        {"x", "y", "z", "dx", "dy", "dz", "rpy", "frame", "duration", "wait", "timeout"},
+        {"x", "y", "z", "dx", "dy", "dz", "tool_pitch", "tool_roll", "frame", "duration", "wait", "timeout"},
     )
     dx = _optional_number(arguments, "dx", 0.0)
     dy = _optional_number(arguments, "dy", 0.0)
     dz = _optional_number(arguments, "dz", 0.0)
     use_delta = any(k in arguments for k in ("dx", "dy", "dz"))
 
-    rpy = _optional_rpy(arguments)
+    tool_pitch = _optional_number(arguments, "tool_pitch", None)
+    tool_roll = _optional_number(arguments, "tool_roll", None)
     frame = str(arguments.get("frame", "base") or "base").strip().lower()
     if frame not in {"base", "tool"}:
         raise ValidationError("frame must be 'base' or 'tool'")
@@ -434,7 +417,8 @@ def _tool_move_robot_arm(arguments: Dict[str, Any]) -> Dict[str, Any]:
         x=x,
         y=y,
         z=z,
-        rpy=rpy,
+        tool_pitch=tool_pitch,
+        tool_roll=tool_roll,
         frame=frame,
         duration=duration,
         wait=wait,
@@ -450,7 +434,8 @@ def _tool_move_robot_arm(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "dx": dx if use_delta else None,
             "dy": dy if use_delta else None,
             "dz": dz if use_delta else None,
-            "rpy": rpy,
+            "tool_pitch": tool_pitch,
+            "tool_roll": tool_roll,
             "frame": frame,
             "duration": duration,
             "wait": wait,
@@ -629,6 +614,8 @@ def _cli() -> None:
     cmd_move.add_argument("--dx", type=float, default=None)
     cmd_move.add_argument("--dy", type=float, default=None)
     cmd_move.add_argument("--dz", type=float, default=None)
+    cmd_move.add_argument("--tool-pitch", type=float, default=None)
+    cmd_move.add_argument("--tool-roll", type=float, default=None)
     cmd_move.add_argument("--frame", default="base", choices=["base", "tool"])
     cmd_move.add_argument("--duration", type=float, default=2.0)
     cmd_move.add_argument("--wait", type=_cli_bool, default=True)
@@ -671,7 +658,7 @@ def _cli() -> None:
             "wait": args.wait,
             "timeout": args.timeout,
         }
-        for key in ("x", "y", "z", "dx", "dy", "dz"):
+        for key in ("x", "y", "z", "dx", "dy", "dz", "tool_pitch", "tool_roll"):
             value = getattr(args, key)
             if value is not None:
                 payload[key] = value

@@ -1,66 +1,57 @@
-# SoarmMoce SDK API Reference
+# SDK API
 
-Package:
-- PyPI: `soarmmoce-sdk`
-- Import: `soarmmoce_sdk`
+## Model
 
-Main entry:
-- `from soarmmoce_sdk import Robot`
+The arm is modeled as a 5-DOF task-space robot.
 
-## Quick Start
+Controlled task variables:
+- `x`
+- `y`
+- `z`
+- `tool_pitch`
+- `tool_roll`
 
-```python
-from soarmmoce_sdk import Robot
+Not part of IK:
+- `gripper` open/close
 
-robot = Robot()  # load built-in default config
-robot.connect()
-state = robot.get_state()
-print(state.connected, state.joint_state.q, state.tcp_pose.xyz)
-robot.disconnect()
-```
+TCP definition:
+- A fixed point in front of the gripper base
+- Configured by `kinematics.tcp_offset`
 
-## Data Models
+## Core Types
 
-`JointState`
+### `JointState`
+
 - `q: np.ndarray`
 - `dq: Optional[np.ndarray]`
 - `tau: Optional[np.ndarray]`
 
-`Pose`
-- `xyz: np.ndarray` (meters)
-- `rpy: np.ndarray` (radians)
+### `Pose`
 
-`GripperState`
-- `available: bool`
-- `open_ratio: Optional[float]` (`0.0` closed, `1.0` open)
-- `moving: Optional[bool]`
+Observed full TCP pose.
 
-`PermissionState`
-- `allow_motion: bool`
-- `allow_gripper: bool`
-- `allow_home: bool`
-- `allow_stop: bool`
+- `xyz: np.ndarray`
+- `rpy: np.ndarray`
 
-`RobotState`
+### `ToolPose`
+
+5-DOF task pose used by the solver.
+
+- `xyz: np.ndarray`
+- `tool_pitch: float`
+- `tool_roll: float`
+
+### `RobotState`
+
 - `connected: bool`
 - `joint_state: JointState`
 - `tcp_pose: Pose`
+- `task_pose: ToolPose`
 - `gripper_state: Optional[GripperState]`
 - `permissions: Optional[PermissionState]`
-- `timestamp: Optional[float]` (unix seconds)
+- `timestamp: Optional[float]`
 
-## Error Types
-
-- `SoarmMoceError` (base)
-- `ConnectionError`
-- `ProtocolError`
-- `TimeoutError`
-- `IKError`
-- `LimitError`
-- `CapabilityError`
-- `PermissionError`
-
-## Robot API
+## Public API
 
 ### Construction
 
@@ -74,38 +65,23 @@ Robot(
 )
 ```
 
-Classmethod:
-
 ```python
-Robot.from_config(path: str, ...)
+Robot.from_config(path: str, ...) -> Robot
 ```
 
-Properties:
-- `connected -> bool`
-- `permissions -> PermissionState`
-
-Permission mutation:
-
-```python
-robot.set_permissions(
-    allow_motion: Optional[bool] = None,
-    allow_gripper: Optional[bool] = None,
-    allow_home: Optional[bool] = None,
-    allow_stop: Optional[bool] = None,
-) -> PermissionState
-```
-
-### Connection
-
-- `connect() -> None`
-- `disconnect() -> None`
+If `config_path is None`, the package default config is loaded.
 
 ### State
 
-- `get_joint_state() -> JointState`
-- `get_end_effector_pose(q: Optional[Sequence[float]] = None) -> Pose`
-- `get_gripper_state() -> GripperState`
-- `get_state() -> RobotState`
+```python
+connect() -> None
+disconnect() -> None
+get_joint_state() -> JointState
+get_end_effector_pose(q: Optional[Sequence[float]] = None) -> Pose
+get_task_pose(q: Optional[Sequence[float]] = None) -> ToolPose
+get_state() -> RobotState
+get_gripper_state() -> GripperState
+```
 
 ### Motion
 
@@ -123,7 +99,8 @@ move_joints(
 ```python
 move_pose(
     xyz: Sequence[float],
-    rpy: Sequence[float],
+    tool_pitch: float,
+    tool_roll: float,
     q0: Optional[Sequence[float]] = None,
     seed_policy: str = "current",
     duration: float = 2.0,
@@ -139,19 +116,25 @@ move_tcp(
     x: float,
     y: float,
     z: float,
-    rpy: Optional[Sequence[float]] = None,
-    frame: str = "base",  # "base" absolute target, "tool" local offset
+    tool_pitch: Optional[float] = None,
+    tool_roll: Optional[float] = None,
+    frame: str = "base",
     duration: float = 2.0,
     wait: bool = True,
     timeout: Optional[float] = None,
 ) -> np.ndarray
 ```
 
+Semantics:
+- `frame="base"`: absolute TCP target
+- `frame="tool"`: local TCP offset
+- If `tool_pitch/tool_roll` is omitted, current task orientation is preserved
+
 ```python
 rotate_joint(
     joint: Union[int, str],
     delta_deg: Optional[float] = None,
-    target_deg: Optional[float] = None,  # exactly one of delta_deg/target_deg
+    target_deg: Optional[float] = None,
     duration: float = 1.0,
     wait: bool = True,
     timeout: Optional[float] = None,
@@ -162,31 +145,25 @@ rotate_joint(
 
 ### High-Level
 
-- `home(duration: float = 2.0, wait: bool = True, timeout: Optional[float] = None) -> np.ndarray`
-- `set_gripper(open_ratio: float, wait: bool = True, timeout: Optional[float] = None) -> None`
-- `stop() -> None`
-- `wait_until_stopped(timeout: Optional[float] = None) -> None`
+```python
+home(duration: float = 2.0, wait: bool = True, timeout: Optional[float] = None) -> np.ndarray
+set_gripper(open_ratio: float, wait: bool = True, timeout: Optional[float] = None) -> None
+wait_until_stopped(timeout: Optional[float] = None) -> None
+stop() -> None
+```
 
-## Wait/Timeout Semantics
+## Errors
 
-- `wait=True` means the API calls `wait_until_stopped`.
-- Some transports cannot confirm physical completion; they use best-effort behavior.
-- `TimeoutError` is raised if wait times out.
+SDK methods raise SDK error types from `soarmmoce_sdk`:
 
-## Configuration Keys (default config)
+- `ConnectionError`
+- `TimeoutError`
+- `IKError`
+- `LimitError`
+- `CapabilityError`
+- `PermissionError`
 
-Core:
-- `transport.type`: `mock` | `tcp` | `serial`
-- `urdf.path`: supports `pkg://...`
-- `protocol.*`: tcp protocol options
-
-Permissions:
-- `permissions.allow_motion`
-- `permissions.allow_gripper`
-- `permissions.allow_home`
-- `permissions.allow_stop`
-
-Example:
+## Config Keys
 
 ```yaml
 transport:
@@ -197,4 +174,10 @@ permissions:
   allow_gripper: true
   allow_home: true
   allow_stop: true
+
+kinematics:
+  locked_joints:
+    gripper: 0.0
+  tcp_offset: [0.03, 0.0, 0.0]
+  yaw_offset_deg: 0.0
 ```
