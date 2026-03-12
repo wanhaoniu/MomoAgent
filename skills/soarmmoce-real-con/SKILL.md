@@ -50,6 +50,20 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_state.py
 python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_diag_ik.py --dx 0.02 --frame base
 ```
 
+### 1.2) 自动标定
+
+运行前先把机械臂摆到你认定的 `home` 姿态。脚本会以当前姿态作为 `home` 参考位，然后自动向正负两个方向寻限位，并把结果写到 `skills/soarmmoce-real-con/calibration/<robot_id>.json`。
+
+```bash
+python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_auto_calibrate.py
+```
+
+如果只想先生成 JSON，不回写寄存器：
+
+```bash
+python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_auto_calibrate.py --apply-registers false
+```
+
 ### 2) 小步笛卡尔移动
 
 ```bash
@@ -79,6 +93,24 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py joint --
 ```bash
 python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py home
 ```
+
+### 6) 人脸居中跟随
+
+先启动 `face_loc` 服务，再运行：
+
+```bash
+python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_face_follow.py --face-endpoint http://127.0.0.1:8011
+```
+
+当前默认行为：
+
+- `shoulder_pan` 做水平居中
+- `base z` 小步笛卡尔移动做上下修正
+- `base x` 小步笛卡尔移动做前后修正
+- 丢失人脸时不报错，改为自动左右扫描寻找人脸
+- 脚本会持续运行，直到你手动 `Ctrl+C` 停止
+
+如果你还想额外尝试关节级上下联动，再显式加 `--tilt-joint wrist_flex`。
 
 ## SDK 直接调用
 
@@ -151,9 +183,12 @@ PYTHONPATH=~/.openclaw/skills/soarmmoce-real-con/scripts python3 /tmp/soarmmoce_
 
 串口相关脚本不要并行运行；同一时刻只保留一个 `state/move/diag` 进程，否则容易出现假性的缺电机 ID 或端口占用。
 
+自动标定脚本同样不要和其它串口脚本并行运行。它的限位判定优先看 `Present_Velocity + Moving`，`Present_Current` 只作为兜底异常保护。
+
 ## 参考文件
 
 - `skills/soarmmoce-real-con/scripts/soarmmoce_sdk.py`
+- `skills/soarmmoce-real-con/scripts/soarmmoce_auto_calibrate.py`
 - `skills/soarmmoce-real-con/scripts/soarmmoce_state.py`
 - `skills/soarmmoce-real-con/scripts/soarmmoce_diag_ik.py`
 - `skills/soarmmoce-real-con/scripts/soarmmoce_move.py`

@@ -7,11 +7,11 @@ import json
 import os
 import re
 import subprocess
+import time
 import uuid
 import wave
-import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import requests
@@ -20,19 +20,29 @@ from PyQt5.QtCore import QPoint, QPointF, QRectF, Qt, QThread, QTimer, pyqtSigna
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import QWidget
 from dotenv import load_dotenv
-load_dotenv()  # Load environment variables from .env file, if it exists
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+for _dotenv_name in (".env", "env"):
+    _dotenv_path = REPO_ROOT / _dotenv_name
+    if _dotenv_path.exists():
+        load_dotenv(dotenv_path=_dotenv_path, override=False)
 
 # Extracted for easy replacement with env var later.
 # Recommended: export GROQ_API_KEY and remove fallback literal.
 GROQ_API_KEY_FALLBACK = os.getenv("GROQ_API_KEY")
 GROQ_STT_URL_DEFAULT = "https://api.groq.com/openai/v1/audio/transcriptions"
 GROQ_STT_MODEL_DEFAULT = "whisper-large-v3"
+GROQ_TTS_URL_DEFAULT = "https://api.groq.com/openai/v1/audio/speech"
+GROQ_TTS_MODEL_DEFAULT = "canopylabs/orpheus-v1-english"
+GROQ_TTS_VOICE_DEFAULT = "troy"
+GROQ_TTS_RESPONSE_FORMAT_DEFAULT = "wav"
+GROQ_TTS_TIMEOUT_SEC_DEFAULT = 45.0
+GROQ_TTS_MAX_CHARS_DEFAULT = 180
 
 OPENCLAW_BIN_DEFAULT = "openclaw"
 OPENCLAW_AGENT_ID_DEFAULT = "main"
 OPENCLAW_TIMEOUT_SEC_DEFAULT = 90.0
 OPENCLAW_SKILL_NAME_DEFAULT = "soarmmoce-control"
-REPO_ROOT = Path(__file__).resolve().parents[3]
 SDK_SRC = REPO_ROOT / "sdk" / "src"
 
 OPENCLAW_THINKING_DEFAULT = "minimal"
@@ -333,6 +343,137 @@ def _extract_tool_calls_from_payload(payload: Any) -> List[Dict[str, Any]]:
     return calls
 
 
+def _extract_groq_error_message(response: requests.Response, fallback: str) -> str:
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict):
+            msg = str(err.get("message", "")).strip()
+            if msg:
+                return msg
+        msg = str(payload.get("message", "")).strip()
+        if msg:
+            return msg
+
+    text = str(response.text or "").strip()
+    if text:
+        return text
+    return fallback
+
+
+def _split_text_for_tts(text: str, max_chars: int) -> List[str]:
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return []
+
+    limit = max(32, int(max_chars))
+    if len(raw) <= limit:
+        return [raw]
+
+    chunks: List[str] = []
+    pending: List[str] = []
+    pending_len = 0
+
+    def _flush_pending():
+        nonlocal pending, pending_len
+        if pending:
+            chunks.append("".join(pending).strip())
+        pending = []
+        pending_len = 0
+
+    for part in re.split(r"(?<=[。！？!?；;，,])", raw):
+        piece = part.strip()
+        if not piece:
+            continue
+        if len(piece) > limit:
+            _flush_pending()
+            for idx in range(0, len(piece), limit):
+                sub = piece[idx : idx + limit].strip()
+                if sub:
+                    chunks.append(sub)
+            continue
+        if pending_len + len(piece) > limit:
+            _flush_pending()
+        pending.append(piece)
+        pending_len += len(piece)
+
+    _flush_pending()
+    return [chunk for chunk in chunks if chunk]
+
+
+def _decode_wav_bytes(wav_bytes: bytes) -> Tuple[np.ndarray, int]:
+    if not wav_bytes:
+        raise ValueError("Groq TTS response is empty")
+
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        channels = int(wf.getnchannels())
+        sample_width = int(wf.getsampwidth())
+        sample_rate = int(wf.getframerate())
+        frame_count = int(wf.getnframes())
+        frame_bytes = wf.readframes(frame_count)
+
+    if sample_width == 1:
+        audio = np.frombuffer(frame_bytes, dtype=np.uint8).astype(np.float32)
+        audio = (audio - 128.0) / 128.0
+    elif sample_width == 2:
+        audio = np.frombuffer(frame_bytes, dtype="<i2")
+    elif sample_width == 4:
+        audio = np.frombuffer(frame_bytes, dtype="<i4")
+    else:
+        raise RuntimeError(f"Unsupported WAV sample width: {sample_width}")
+
+    if channels > 1:
+        audio = audio.reshape(-1, channels)
+    return audio, sample_rate
+
+
+def groq_text_to_speech(
+    text: str,
+    api_key: str,
+    url: str,
+    model: str,
+    voice: str,
+    response_format: str = GROQ_TTS_RESPONSE_FORMAT_DEFAULT,
+    timeout_sec: float = GROQ_TTS_TIMEOUT_SEC_DEFAULT,
+) -> bytes:
+    content = str(text or "").strip()
+    if not content:
+        raise ValueError("Empty TTS text")
+    if not api_key:
+        raise ValueError("Groq API key is empty")
+
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": str(model or "").strip() or GROQ_TTS_MODEL_DEFAULT,
+            "voice": str(voice or "").strip() or GROQ_TTS_VOICE_DEFAULT,
+            "input": content,
+            "response_format": str(response_format or "").strip() or GROQ_TTS_RESPONSE_FORMAT_DEFAULT,
+        },
+        timeout=float(timeout_sec),
+    )
+
+    if not response.ok:
+        raise RuntimeError(_extract_groq_error_message(response, "Groq TTS failed"))
+    if not response.content:
+        raise RuntimeError("Groq TTS response is empty")
+    return response.content
+
+
+def play_wav_bytes(wav_bytes: bytes):
+    audio, sample_rate = _decode_wav_bytes(wav_bytes)
+    sd.play(audio, sample_rate)
+    sd.wait()
+
+
 def groq_audio_to_text(
     wav_bytes: bytes,
     api_key: str,
@@ -408,6 +549,64 @@ class _GroqSttWorker(QThread):
             self.failed.emit(str(exc))
             return
         self.done.emit(text)
+
+
+class _GroqTtsWorker(QThread):
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        text: str,
+        api_key: str,
+        url: str,
+        model: str,
+        voice: str,
+        response_format: str,
+        timeout_sec: float,
+        max_chars: int,
+    ):
+        super().__init__()
+        self._text = str(text or "").strip()
+        self._api_key = str(api_key or "").strip()
+        self._url = str(url or "").strip() or GROQ_TTS_URL_DEFAULT
+        self._model = str(model or "").strip() or GROQ_TTS_MODEL_DEFAULT
+        self._voice = str(voice or "").strip() or GROQ_TTS_VOICE_DEFAULT
+        self._response_format = str(response_format or "").strip() or GROQ_TTS_RESPONSE_FORMAT_DEFAULT
+        self._timeout_sec = max(5.0, float(timeout_sec))
+        self._max_chars = max(32, int(max_chars))
+
+    def stop(self):
+        self.requestInterruption()
+        try:
+            sd.stop()
+        except Exception:
+            pass
+
+    def run(self):
+        try:
+            chunks = _split_text_for_tts(self._text, self._max_chars)
+            if not chunks:
+                raise ValueError("Empty TTS text")
+            for chunk in chunks:
+                if self.isInterruptionRequested():
+                    return
+                wav_bytes = groq_text_to_speech(
+                    text=chunk,
+                    api_key=self._api_key,
+                    url=self._url,
+                    model=self._model,
+                    voice=self._voice,
+                    response_format=self._response_format,
+                    timeout_sec=self._timeout_sec,
+                )
+                if self.isInterruptionRequested():
+                    return
+                play_wav_bytes(wav_bytes)
+                if self.isInterruptionRequested():
+                    return
+        except Exception as exc:
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(exc))
 
 
 class _OpenClawAgentWorker(QThread):
@@ -595,6 +794,7 @@ class SpeechInputWindow(QWidget):
     agent_reply_ready = pyqtSignal(str)
     agent_failed = pyqtSignal(str)
     agent_session_changed = pyqtSignal(str)
+    tts_failed = pyqtSignal(str)
 
     def __init__(self, title: str, icon_path: Optional[Path] = None):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -615,6 +815,7 @@ class SpeechInputWindow(QWidget):
         self._is_listening = False
         self._is_transcribing = False
         self._is_agent_running = False
+        self._is_tts_running = False
         self._status_text = "点击开始说话"
         self._last_text = ""
         self._last_agent_reply = ""
@@ -625,10 +826,32 @@ class SpeechInputWindow(QWidget):
         self._audio_chunks: List[np.ndarray] = []
         self._stt_worker: Optional[_GroqSttWorker] = None
         self._openclaw_worker: Optional[_OpenClawAgentWorker] = None
+        self._tts_worker: Optional[_GroqTtsWorker] = None
 
         self._groq_api_key = str(os.getenv("GROQ_API_KEY") or GROQ_API_KEY_FALLBACK or "").strip()
         self._groq_stt_url = os.getenv("GROQ_STT_URL", GROQ_STT_URL_DEFAULT).strip()
         self._groq_stt_model = os.getenv("GROQ_STT_MODEL", GROQ_STT_MODEL_DEFAULT).strip()
+        self._groq_tts_enabled = _env_bool("GROQ_TTS_ENABLED", True)
+        self._groq_tts_url = os.getenv("GROQ_TTS_URL", GROQ_TTS_URL_DEFAULT).strip()
+        self._groq_tts_model = os.getenv("GROQ_TTS_MODEL", GROQ_TTS_MODEL_DEFAULT).strip()
+        self._groq_tts_voice = os.getenv("GROQ_TTS_VOICE", GROQ_TTS_VOICE_DEFAULT).strip()
+        self._groq_tts_response_format = (
+            os.getenv("GROQ_TTS_RESPONSE_FORMAT", GROQ_TTS_RESPONSE_FORMAT_DEFAULT).strip()
+        )
+        try:
+            self._groq_tts_timeout_sec = float(
+                str(os.getenv("GROQ_TTS_TIMEOUT_SEC", str(GROQ_TTS_TIMEOUT_SEC_DEFAULT))).strip()
+            )
+        except Exception:
+            self._groq_tts_timeout_sec = GROQ_TTS_TIMEOUT_SEC_DEFAULT
+        self._groq_tts_timeout_sec = max(5.0, self._groq_tts_timeout_sec)
+        try:
+            self._groq_tts_max_chars = max(
+                32,
+                int(str(os.getenv("GROQ_TTS_MAX_CHARS", str(GROQ_TTS_MAX_CHARS_DEFAULT))).strip()),
+            )
+        except Exception:
+            self._groq_tts_max_chars = GROQ_TTS_MAX_CHARS_DEFAULT
 
         self._openclaw_enabled = _env_bool("OPENCLAW_ENABLED", True)
         self._openclaw_bin = str(os.getenv("OPENCLAW_BIN", OPENCLAW_BIN_DEFAULT)).strip() or OPENCLAW_BIN_DEFAULT
@@ -686,6 +909,42 @@ class SpeechInputWindow(QWidget):
         if model is not None:
             self._groq_stt_model = str(model).strip()
 
+    def set_groq_tts_config(
+        self,
+        enabled: Optional[bool] = None,
+        api_key: Optional[str] = None,
+        url: Optional[str] = None,
+        model: Optional[str] = None,
+        voice: Optional[str] = None,
+        response_format: Optional[str] = None,
+        timeout_sec: Optional[float] = None,
+        max_chars: Optional[int] = None,
+    ):
+        if enabled is not None:
+            self._groq_tts_enabled = bool(enabled)
+        if api_key is not None:
+            self._groq_api_key = str(api_key or "").strip()
+        if url is not None:
+            self._groq_tts_url = str(url or "").strip() or GROQ_TTS_URL_DEFAULT
+        if model is not None:
+            self._groq_tts_model = str(model or "").strip() or GROQ_TTS_MODEL_DEFAULT
+        if voice is not None:
+            self._groq_tts_voice = str(voice or "").strip() or GROQ_TTS_VOICE_DEFAULT
+        if response_format is not None:
+            self._groq_tts_response_format = (
+                str(response_format or "").strip() or GROQ_TTS_RESPONSE_FORMAT_DEFAULT
+            )
+        if timeout_sec is not None:
+            try:
+                self._groq_tts_timeout_sec = max(5.0, float(timeout_sec))
+            except Exception:
+                pass
+        if max_chars is not None:
+            try:
+                self._groq_tts_max_chars = max(32, int(max_chars))
+            except Exception:
+                pass
+
     def set_openclaw_config(
         self,
         enabled: bool = True,
@@ -740,6 +999,63 @@ class SpeechInputWindow(QWidget):
     def set_minimax_config(self, api_key: str, stt_url: Optional[str] = None, model: Optional[str] = None):
         self.set_groq_config(api_key=api_key, stt_url=stt_url, model=model)
 
+    def _stop_tts_playback(self, wait_ms: int = 1000):
+        worker = self._tts_worker
+        if worker is None:
+            try:
+                sd.stop()
+            except Exception:
+                pass
+            self._is_tts_running = False
+            return
+
+        try:
+            worker.stop()
+        except Exception:
+            try:
+                worker.requestInterruption()
+            except Exception:
+                pass
+            try:
+                sd.stop()
+            except Exception:
+                pass
+
+        if wait_ms > 0:
+            try:
+                worker.wait(wait_ms)
+            except Exception:
+                pass
+        if not worker.isRunning():
+            self._tts_worker = None
+            self._is_tts_running = False
+
+    def _start_tts(self, reply_text: str):
+        text = str(reply_text or "").strip()
+        if not text or not self._groq_tts_enabled:
+            return
+
+        self._stop_tts_playback(wait_ms=500)
+        if self._tts_worker is not None and self._tts_worker.isRunning():
+            msg = "语音播报仍在停止中，已跳过本次播报"
+            self.tts_failed.emit(msg)
+            return
+
+        self._is_tts_running = True
+        self._tts_worker = _GroqTtsWorker(
+            text=text,
+            api_key=self._groq_api_key,
+            url=self._groq_tts_url,
+            model=self._groq_tts_model,
+            voice=self._groq_tts_voice,
+            response_format=self._groq_tts_response_format,
+            timeout_sec=self._groq_tts_timeout_sec,
+            max_chars=self._groq_tts_max_chars,
+        )
+        self._tts_worker.failed.connect(self._on_tts_failed)
+        self._tts_worker.finished.connect(self._on_tts_finished)
+        self._tts_worker.start()
+
     def _on_anim_tick(self):
         self._phase = (self._phase + self._anim_timer.interval() / self._cycle_ms) % 1.0
         self.update()
@@ -786,6 +1102,7 @@ class SpeechInputWindow(QWidget):
     def _start_listening(self):
         if self._is_listening or self._is_transcribing:
             return
+        self._stop_tts_playback(wait_ms=500)
         try:
             self._audio_chunks = []
             self._audio_stream = sd.InputStream(
@@ -907,6 +1224,7 @@ class SpeechInputWindow(QWidget):
         if reply_text:
             self._status_text = f"Momo: {reply_text}"
             self.agent_reply_ready.emit(reply_text)
+            self._start_tts(reply_text)
         else:
             self._status_text = "OpenClaw 未返回文本"
             self.agent_failed.emit(self._status_text)
@@ -952,6 +1270,21 @@ class SpeechInputWindow(QWidget):
         self._is_transcribing = False
         self.transcribing_changed.emit(False)
         self._stt_worker = None
+        self.update()
+
+    def _on_tts_failed(self, error_text: str):
+        self._is_tts_running = False
+        msg = str(error_text or "").strip() or "Groq 语音播报失败"
+        if self._last_agent_reply:
+            self._status_text = f"Momo: {self._last_agent_reply}\n语音播报失败"
+        else:
+            self._status_text = msg
+        self.tts_failed.emit(msg)
+        self.update()
+
+    def _on_tts_finished(self):
+        self._is_tts_running = False
+        self._tts_worker = None
         self.update()
 
     def paintEvent(self, event):
@@ -1075,5 +1408,6 @@ class SpeechInputWindow(QWidget):
             except Exception:
                 pass
             self._openclaw_worker = None
+        self._stop_tts_playback(wait_ms=1000)
         self.closed.emit()
         super().closeEvent(event)

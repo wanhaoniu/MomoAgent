@@ -1,0 +1,11 @@
+{
+  "name": "smart-mirror-face-tracking",
+  "version": "0.2.0",
+  "description": "Root-level OpenClaw skill package for local smart mirror face tracking.",
+  "entry_script": "scripts/face_tracking_skill.py",
+  "actions_schema": "actions.schema.json",
+  "notes": [
+    "This repository root is the skill root.",
+    "Keep action names stable if you remap this to a stricter OpenClaw manifest format."
+  ]
+}

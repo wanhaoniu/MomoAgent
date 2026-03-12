@@ -1,0 +1,63 @@
+app_name: smart-mirror-face-tracking
+
+source:
+  type: capture
+  capture_uri: ${FACE_TRACK_CAMERA_DEVICE:/dev/video0}
+  width: 1280
+  height: 720
+  fps: 30
+  rotation_deg: ${FACE_TRACK_CAMERA_ROTATION:0}
+  buffer_size: 1
+  reconnect_interval_sec: 2.0
+  loop_video: false
+  api_preference: v4l2
+
+detector:
+  backend: opencv_yunet
+  model_path: ${MODEL_PATH:../weights/face_detection_yunet_2023mar.onnx}
+  model_name: ${MODEL_NAME:}
+  model_root: ../weights/insightface
+  allow_auto_download: false
+  input_size: [320, 320]
+  confidence_threshold: 0.65
+  nms_threshold: 0.4
+  max_faces: 0
+  device: cpu
+  yunet_input_size: [320, 320]
+
+selection:
+  strategy: largest_face
+
+smoothing:
+  enabled: true
+  alpha_center: 0.35
+  alpha_area: 0.25
+  max_missing_frames_before_reset: 5
+
+hint:
+  dead_zone_ndx: 0.08
+  dead_zone_ndy: 0.08
+  min_face_area_ratio: 0.10
+  max_face_area_ratio: 0.28
+  use_smoothed_offset: true
+  use_smoothed_area_ratio: true
+
+visualizer:
+  enabled: true
+  window_name: Smart Mirror Face Tracking
+  draw_landmarks: true
+
+service:
+  host: ${SERVICE_HOST:0.0.0.0}
+  port: ${SERVICE_PORT:8000}
+  websocket_path: /ws/stream
+  ws_interval_sec: 0.05
+
+logging:
+  level: INFO
+  log_dir: ../logs
+  file_name: face_tracking.log
+
+runtime:
+  frame_queue_size: 2
+  fps_window_size: 30

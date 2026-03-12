@@ -74,6 +74,16 @@ try:
 except ImportError:
     VIDEO_AVAILABLE = False
 
+try:
+    from v4l2_camera_reader import V4L2CameraReader
+
+    V4L2_CAMERA_AVAILABLE = True
+    _V4L2_CAMERA_IMPORT_ERROR = None
+except Exception as _v4l2_e:
+    V4L2CameraReader = None
+    V4L2_CAMERA_AVAILABLE = False
+    _V4L2_CAMERA_IMPORT_ERROR = _v4l2_e
+
 PICTURE_DIR = Path(__file__).resolve().parents[1] / "Picture"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LOGO_PATH = PICTURE_DIR / "logo.png"
@@ -343,7 +353,12 @@ class ArmControlGUI(QMainWindow):
                 "settings_jog_soft": "柔和键帽",
                 "label_server_ip": "服务器 IP:",
                 "label_ctl_port": "控制端口:",
+                "label_camera_source": "相机来源:",
                 "label_cam_port": "摄像头端口:",
+                "label_camera_device": "本地摄像头:",
+                "label_camera_rotation": "画面旋转:",
+                "camera_source_udp": "UDP 视频流",
+                "camera_source_v4l2": "本地 V4L2 相机",
                 "label_leader_port": "主臂串口:",
                 "label_leader_id": "主臂 ID:",
                 "placeholder_pos_name": "位置名称",
@@ -471,7 +486,12 @@ class ArmControlGUI(QMainWindow):
                 "settings_jog_soft": "Soft Keycap",
                 "label_server_ip": "Server IP:",
                 "label_ctl_port": "Control Port:",
+                "label_camera_source": "Camera Source:",
                 "label_cam_port": "Camera Port:",
+                "label_camera_device": "Local Camera:",
+                "label_camera_rotation": "Camera Rotation:",
+                "camera_source_udp": "UDP Stream",
+                "camera_source_v4l2": "Local V4L2 Camera",
                 "label_leader_port": "Leader Serial:",
                 "label_leader_id": "Leader ID:",
                 "placeholder_pos_name": "Position name",
@@ -1053,7 +1073,11 @@ class ArmControlGUI(QMainWindow):
         with self._sdk_lock:
             robot = self._sdk_get_robot()
             state_before = robot.get_state()
-            q_target = np.asarray(state_before.joint_state.q, dtype=float).copy()
+            q_target = self._extract_joint_q_from_sdk_state(state_before, prefer_twin=True)
+            if q_target is None:
+                q_target = np.asarray(state_before.joint_state.q, dtype=float).copy()
+            else:
+                q_target = np.asarray(q_target, dtype=float).copy()
             if idx >= q_target.shape[0]:
                 raise ValueError(f"Joint index {idx} out of range")
             lo, hi = robot.robot_model.joint_limits[idx]
@@ -1097,8 +1121,13 @@ class ArmControlGUI(QMainWindow):
         with self._sdk_lock:
             robot = self._sdk_get_robot()
             state_before = robot.get_state()
-            xyz_now = np.asarray(state_before.tcp_pose.xyz, dtype=float)
-            rpy_now = np.asarray(state_before.tcp_pose.rpy, dtype=float)
+            pose_now = self._extract_tcp_pose_from_sdk_state(state_before, prefer_twin=True)
+            if pose_now is None:
+                xyz_now = np.asarray(state_before.tcp_pose.xyz, dtype=float)
+                rpy_now = np.asarray(state_before.tcp_pose.rpy, dtype=float)
+            else:
+                xyz_now = np.asarray(pose_now[0], dtype=float)
+                rpy_now = np.asarray(pose_now[1], dtype=float)
             R_now = self._rpy_to_rotmat(rpy_now)
             if use_tool:
                 target_xyz = np.asarray(xyz_now, dtype=float) + (R_now @ delta_pos_local)
@@ -1176,7 +1205,7 @@ class ArmControlGUI(QMainWindow):
         step_deg = max(0.1, float(self.quick_page.step_angle_spin.value()))
         delta = math.radians(step_deg) * float(direction)
         speed_scale = max(0.1, float(self.speed_percent) / 100.0)
-        duration = float(np.clip(0.6 / speed_scale, 0.2, 2.0))
+        duration = float(np.clip(0.20 / speed_scale, 0.08, 0.60))
         self._enqueue_sdk_command(
             {
                 "kind": "joint_step",
@@ -1437,10 +1466,11 @@ class ArmControlGUI(QMainWindow):
         coord_mode = str(self.quick_page.coord_combo.currentText()).strip().lower()
         use_tool = coord_mode.startswith("tool")
         speed_scale = max(0.1, float(self.speed_percent) / 100.0)
-        if self._quick_jog_mode_is_continuous():
+        is_continuous = self._quick_jog_mode_is_continuous()
+        if is_continuous:
             duration = float(np.clip(0.15 / speed_scale, 0.08, 0.5))
         else:
-            duration = float(np.clip(0.6 / speed_scale, 0.2, 2.0))
+            duration = float(np.clip(0.20 / speed_scale, 0.08, 0.60))
 
         self._enqueue_sdk_command(
             {
@@ -1452,7 +1482,7 @@ class ArmControlGUI(QMainWindow):
                 "use_tool": bool(use_tool),
                 "duration": duration,
             },
-            drop_kinds=("cartesian_jog", "stop"),
+            drop_kinds=("cartesian_jog", "stop") if is_continuous else ("stop",),
         )
 
     def _sdk_home_and_sync(self, duration: Optional[float] = None, source: str = "home") -> bool:
@@ -1945,6 +1975,29 @@ class ArmControlGUI(QMainWindow):
                 continue
             if q.shape[0] > 0:
                 return q
+        return None
+
+    def _extract_tcp_pose_from_sdk_state(
+        self, state: object, *, prefer_twin: bool = False
+    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        candidates = []
+        if prefer_twin:
+            candidates.append(getattr(state, "twin", None))
+        candidates.append(state)
+        if not prefer_twin:
+            candidates.append(getattr(state, "twin", None))
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            pose = getattr(candidate, "tcp_pose", None)
+            if pose is None:
+                continue
+            try:
+                xyz = np.asarray(getattr(pose, "xyz"), dtype=float).reshape(3)
+                rpy = np.asarray(getattr(pose, "rpy"), dtype=float).reshape(3)
+            except Exception:
+                continue
+            return xyz, rpy
         return None
 
     def _apply_sim_joint_q(self, q_src: np.ndarray, *, update_plot: bool = True) -> bool:
@@ -2723,12 +2776,8 @@ class ArmControlGUI(QMainWindow):
                 )
                 self.client.start()
 
-                if VIDEO_AVAILABLE and not self._using_virtual_vtk_camera():
-                    self.video_client = VideoClient(server_ip=ip, video_port=cam_port)
-                    threading.Thread(target=self.video_client.start, daemon=True).start()
-                    self.video_thread = VideoThread(self.video_client)
-                    self.video_thread.frame_ready.connect(self.update_camera)
-                    self.video_thread.start()
+                if not self._using_virtual_vtk_camera():
+                    self._start_camera_stream(ip=ip, cam_port=cam_port)
 
                 self.connected = True
                 self.connecting = False
@@ -2760,16 +2809,7 @@ class ArmControlGUI(QMainWindow):
         self._clear_pending_sdk_commands()
         self.log(self._tr("log_disconnecting"))
 
-        if self.video_thread:
-            self.video_thread.stop()
-            self.video_thread = None
-
-        if self.video_client:
-            try:
-                self.video_client.stop()
-            except Exception:
-                pass
-            self.video_client = None
+        self._stop_camera_stream()
 
         if self.client:
             try:
@@ -2814,6 +2854,71 @@ class ArmControlGUI(QMainWindow):
         if self._using_virtual_vtk_camera():
             return
         self._display_camera_frame(frame, fps=float(fps), latency=float(latency))
+
+    def _camera_source_mode(self) -> str:
+        if not hasattr(self.settings_page, "camera_source_combo"):
+            return "udp"
+        value = str(self.settings_page.camera_source_combo.currentData() or "udp").strip().lower()
+        return value if value in ("udp", "v4l2") else "udp"
+
+    def _camera_rotation_deg(self) -> int:
+        if not hasattr(self.settings_page, "camera_rotation_combo"):
+            return 0
+        try:
+            return int(self.settings_page.camera_rotation_combo.currentData() or 0)
+        except Exception:
+            return 0
+
+    def _camera_device_value(self) -> str:
+        if not hasattr(self.settings_page, "camera_device_input"):
+            return ""
+        return str(self.settings_page.camera_device_input.text() or "").strip()
+
+    def _create_camera_client(self, ip: str, cam_port: int):
+        mode = self._camera_source_mode()
+        if mode == "v4l2":
+            if not V4L2_CAMERA_AVAILABLE or V4L2CameraReader is None:
+                raise RuntimeError(f"Local V4L2 camera is unavailable: {_V4L2_CAMERA_IMPORT_ERROR}")
+            raw_device = self._camera_device_value()
+            device_path = raw_device if raw_device.startswith("/dev/video") else None
+            name_hint = None if device_path else (raw_device or None)
+            return V4L2CameraReader(
+                device=device_path,
+                name_hint=name_hint,
+                rotation_deg=self._camera_rotation_deg(),
+                width=1280,
+                height=720,
+                fps=30,
+            )
+
+        if not VIDEO_AVAILABLE:
+            raise RuntimeError("UDP camera client is unavailable: failed to import video_client_h264")
+        return VideoClient(server_ip=ip, video_port=cam_port)
+
+    def _start_camera_stream(self, ip: str, cam_port: int):
+        self._stop_camera_stream()
+        try:
+            self.video_client = self._create_camera_client(ip=ip, cam_port=cam_port)
+            self.video_client.start()
+            self.video_thread = VideoThread(self.video_client)
+            self.video_thread.frame_ready.connect(self.update_camera)
+            self.video_thread.start()
+        except Exception as exc:
+            self.video_client = None
+            self.video_thread = None
+            self.log(f"[Camera] {exc}", "warning")
+
+    def _stop_camera_stream(self):
+        if self.video_thread:
+            self.video_thread.stop()
+            self.video_thread = None
+
+        if self.video_client:
+            try:
+                self.video_client.stop()
+            except Exception:
+                pass
+            self.video_client = None
 
     # ==================== Position management ====================
 

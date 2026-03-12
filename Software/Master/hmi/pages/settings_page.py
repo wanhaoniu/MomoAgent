@@ -1,5 +1,7 @@
 """Settings page with secondary tabs."""
 
+import os
+
 from PyQt5.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -46,16 +48,35 @@ class SettingsPage(QWidget):
         group = QGroupBox("Connection")
         form = QGridLayout(group)
 
+        camera_source_default = str(os.getenv("SOARMMOCE_CAMERA_SOURCE", "udp")).strip().lower()
+        camera_device_default = str(
+            os.getenv("SOARMMOCE_CAMERA_DEVICE", os.getenv("SOARMMOCE_CAMERA_NAME_HINT", ""))
+        ).strip()
+        camera_rotation_default = str(os.getenv("SOARMMOCE_CAMERA_ROTATION", "0")).strip()
+
         self.server_ip_label = QLabel("Server IP")
         self.ip_input = QLineEdit("192.168.66.130")
         self.control_port_label = QLabel("Control Port")
         self.port_input = QSpinBox()
         self.port_input.setRange(1, 65535)
         self.port_input.setValue(6666)
+        self.camera_source_label = QLabel("Camera Source")
+        self.camera_source_combo = QComboBox()
+        self.camera_source_combo.addItem("UDP Stream", "udp")
+        self.camera_source_combo.addItem("Local V4L2", "v4l2")
         self.camera_port_label = QLabel("Camera Port")
         self.cam_port_input = QSpinBox()
         self.cam_port_input.setRange(1, 65535)
         self.cam_port_input.setValue(6000)
+        self.camera_device_label = QLabel("Local Camera")
+        self.camera_device_input = QLineEdit(camera_device_default)
+        self.camera_device_input.setPlaceholderText("/dev/video0 or LRCP G-720P")
+        self.camera_rotation_label = QLabel("Camera Rotation")
+        self.camera_rotation_combo = QComboBox()
+        self.camera_rotation_combo.addItem("0°", 0)
+        self.camera_rotation_combo.addItem("90°", 90)
+        self.camera_rotation_combo.addItem("180°", 180)
+        self.camera_rotation_combo.addItem("270°", 270)
         self.leader_port_label = QLabel("Leader Serial")
         self.leader_port_input = QLineEdit("/dev/ttyACM1")
         self.leader_id_label = QLabel("Leader ID")
@@ -66,12 +87,18 @@ class SettingsPage(QWidget):
         form.addWidget(self.ip_input, 0, 1)
         form.addWidget(self.control_port_label, 1, 0)
         form.addWidget(self.port_input, 1, 1)
-        form.addWidget(self.camera_port_label, 2, 0)
-        form.addWidget(self.cam_port_input, 2, 1)
-        form.addWidget(self.leader_port_label, 3, 0)
-        form.addWidget(self.leader_port_input, 3, 1)
-        form.addWidget(self.leader_id_label, 4, 0)
-        form.addWidget(self.leader_id_combo, 4, 1)
+        form.addWidget(self.camera_source_label, 2, 0)
+        form.addWidget(self.camera_source_combo, 2, 1)
+        form.addWidget(self.camera_port_label, 3, 0)
+        form.addWidget(self.cam_port_input, 3, 1)
+        form.addWidget(self.camera_device_label, 4, 0)
+        form.addWidget(self.camera_device_input, 4, 1)
+        form.addWidget(self.camera_rotation_label, 5, 0)
+        form.addWidget(self.camera_rotation_combo, 5, 1)
+        form.addWidget(self.leader_port_label, 6, 0)
+        form.addWidget(self.leader_port_input, 6, 1)
+        form.addWidget(self.leader_id_label, 7, 0)
+        form.addWidget(self.leader_id_combo, 7, 1)
 
         btn_row = QHBoxLayout()
         self.test_conn_btn = QPushButton("Test")
@@ -84,9 +111,28 @@ class SettingsPage(QWidget):
         btn_row.addWidget(self.connect_btn)
         btn_row.addWidget(self.disconnect_btn)
 
+        idx = self.camera_source_combo.findData(camera_source_default if camera_source_default in ("udp", "v4l2") else "udp")
+        self.camera_source_combo.setCurrentIndex(max(0, idx))
+        idx = self.camera_rotation_combo.findData(int(camera_rotation_default) if camera_rotation_default.lstrip("-").isdigit() else 0)
+        if idx >= 0:
+            self.camera_rotation_combo.setCurrentIndex(idx)
+        self.camera_source_combo.currentIndexChanged.connect(self._on_camera_source_changed)
+        self._on_camera_source_changed()
+
         layout.addWidget(group)
         layout.addLayout(btn_row)
         layout.addStretch()
+
+    def _on_camera_source_changed(self):
+        is_udp = (self.camera_source_combo.currentData() or "udp") == "udp"
+        self.camera_port_label.setEnabled(is_udp)
+        self.cam_port_input.setEnabled(is_udp)
+
+        is_v4l2 = not is_udp
+        self.camera_device_label.setEnabled(is_v4l2)
+        self.camera_device_input.setEnabled(is_v4l2)
+        self.camera_rotation_label.setEnabled(is_v4l2)
+        self.camera_rotation_combo.setEnabled(is_v4l2)
 
     def _build_robot_tab(self):
         layout = QVBoxLayout(self.robot_tab)
@@ -197,10 +243,20 @@ class SettingsPage(QWidget):
 
         self.server_ip_label.setText(tr("label_server_ip"))
         self.control_port_label.setText(tr("label_ctl_port"))
+        self.camera_source_label.setText(tr("label_camera_source"))
         self.camera_port_label.setText(tr("label_cam_port"))
+        self.camera_device_label.setText(tr("label_camera_device"))
+        self.camera_rotation_label.setText(tr("label_camera_rotation"))
         self.leader_port_label.setText(tr("label_leader_port"))
         self.leader_id_label.setText(tr("label_leader_id"))
         self.jog_style_label.setText(tr("settings_jog_style"))
+
+        idx = self.camera_source_combo.findData("udp")
+        if idx >= 0:
+            self.camera_source_combo.setItemText(idx, tr("camera_source_udp"))
+        idx = self.camera_source_combo.findData("v4l2")
+        if idx >= 0:
+            self.camera_source_combo.setItemText(idx, tr("camera_source_v4l2"))
 
         idx = self.jog_style_combo.findData("line")
         if idx >= 0:

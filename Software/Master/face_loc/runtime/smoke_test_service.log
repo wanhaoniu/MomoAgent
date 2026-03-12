@@ -1,0 +1,202 @@
+2026-03-11 00:01:13,959 | INFO | face_tracking.main | Logging to /Users/niuwanhao/Desktop/Intern/pp_skills/face_loc/logs/face_tracking_video.log
+2026-03-11 00:01:13,959 | INFO | face_tracking.main | Starting in headless mode
+INFO:     Started server process [11111]
+INFO:     Waiting for application startup.
+2026-03-11 00:01:14,035 | INFO | TrackingEngine | Starting tracking engine
+2026-03-11 00:01:14,048 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,061 | INFO | TrackingEngine | OpenCV YuNet detector initialized: {'backend': 'opencv_yunet', 'requested_device': 'cpu', 'device': 'cpu', 'providers': ['CPUExecutionProvider'], 'model_path': '/Users/niuwanhao/Desktop/Intern/pp_skills/face_loc/weights/face_detection_yunet_2023mar.onnx', 'model_name': None}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8011 (Press CTRL+C to quit)
+2026-03-11 00:01:14,085 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,088 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,105 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,106 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,126 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,129 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,153 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,155 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,180 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,181 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,199 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,200 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,221 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,222 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,244 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,245 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,270 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,272 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,296 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,300 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,323 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,323 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,355 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,356 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,398 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,401 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,426 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,428 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,454 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,455 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,480 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,481 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,504 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,505 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,527 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,528 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,546 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,547 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,564 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,565 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,583 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,583 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,600 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,601 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,618 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,619 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,642 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,643 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,661 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,662 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,683 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,684 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,704 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,705 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,724 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,725 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,746 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,747 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,767 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,768 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,788 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,788 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,808 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,809 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,829 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,829 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,849 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,850 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,870 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,870 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,888 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,889 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,911 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,911 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,931 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,932 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,951 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,952 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,971 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,972 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:14,992 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:14,993 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,013 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,014 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,032 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,032 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,050 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,050 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,068 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,069 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,086 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,087 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,105 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,105 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,122 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,123 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,140 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,141 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,161 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,162 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,182 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,183 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,203 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,203 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,223 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,224 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,244 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,245 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,263 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,263 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,280 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,281 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,298 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,298 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,315 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,316 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,333 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,334 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,351 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,352 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,369 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,370 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,389 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,390 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,410 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,411 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,431 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,432 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,451 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,452 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,469 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,469 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,486 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,487 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,505 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,506 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,530 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,531 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,553 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,554 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,578 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,579 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,628 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,632 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,667 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,668 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,697 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,701 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,727 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,728 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,753 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,754 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,775 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,777 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,798 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,799 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,821 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,822 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,844 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,845 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,866 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,867 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,892 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,893 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,915 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,916 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,940 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,941 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,966 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,967 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:15,992 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:15,993 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+INFO:     127.0.0.1:56782 - "GET /health HTTP/1.1" 200 OK
+2026-03-11 00:01:16,021 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:16,022 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+INFO:     127.0.0.1:56783 - "GET /latest HTTP/1.1" 200 OK
+2026-03-11 00:01:16,046 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:16,046 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:16,066 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:16,067 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:16,087 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:16,088 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+INFO:     Shutting down
+2026-03-11 00:01:16,113 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:16,114 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:16,145 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:16,146 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+2026-03-11 00:01:16,170 | INFO | TrackingEngine | Video file reached EOF, reopening because loop_video=true
+2026-03-11 00:01:16,171 | INFO | TrackingEngine | Video source opened: {'type': 'video_file', 'camera_index': 0, 'rtsp_url': None, 'video_path': 'runtime/smoke_test.avi', 'capture_uri': None, 'width': 1280, 'height': 720, 'fps': 30.0}
+INFO:     Waiting for application shutdown.
+2026-03-11 00:01:16,190 | INFO | TrackingEngine | Stopping tracking engine
+INFO:     Application shutdown complete.
+INFO:     Finished server process [11111]

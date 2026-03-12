@@ -22,6 +22,7 @@ from lerobot.motors.feetech import FeetechMotorsBus, OperatingMode
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+SKILL_ROOT = Path(__file__).resolve().parents[1]
 JOINTS = [
     "shoulder_pan",
     "shoulder_lift",
@@ -132,6 +133,7 @@ def _candidate_calibration_dirs() -> list[Path]:
         candidates.append(Path(env).expanduser())
     candidates.extend(
         [
+            SKILL_ROOT / "calibration",
             Path.home() / ".cache/huggingface/lerobot/calibration/robots/so101_follower",
             REPO_ROOT / "Software/Slave/calibration/robots/so101_follower",
             REPO_ROOT / "Software/Master/calibration/robots/so101_follower",

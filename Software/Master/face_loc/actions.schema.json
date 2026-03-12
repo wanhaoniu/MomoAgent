@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "skill": "smart-mirror-face-tracking",
+  "actions": [
+    {
+      "name": "start_face_tracking",
+      "description": "Start the local face tracking service in the background.",
+      "command": "python scripts/face_tracking_skill.py start_face_tracking ...",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source_type": { "type": "string", "enum": ["camera", "rtsp", "video_file", "capture"] },
+          "camera_index": { "type": "integer" },
+          "rtsp_url": { "type": "string" },
+          "video_path": { "type": "string" },
+          "capture_uri": { "type": "string" },
+          "model_backend": { "type": "string", "enum": ["opencv_yunet", "insightface_onnx", "insightface_faceanalysis"] },
+          "model_path": { "type": "string" },
+          "model_name": { "type": "string" },
+          "device": { "type": "string", "enum": ["cpu", "auto", "cuda"] },
+          "show_gui": { "type": "boolean" },
+          "host": { "type": "string" },
+          "port": { "type": "integer" }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "already_running": { "type": "boolean" },
+          "pid": { "type": "integer" },
+          "host": { "type": "string" },
+          "port": { "type": "integer" },
+          "health": { "type": "object" },
+          "config": { "type": "object" }
+        }
+      }
+    },
+    {
+      "name": "get_face_tracking_result",
+      "description": "Get the latest face tracking JSON payload.",
+      "command": "python scripts/face_tracking_skill.py get_face_tracking_result",
+      "input_schema": { "type": "object", "properties": {} },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "result": { "type": "object" }
+        }
+      }
+    },
+    {
+      "name": "get_face_tracking_status",
+      "description": "Get running status, FPS and latest state.",
+      "command": "python scripts/face_tracking_skill.py get_face_tracking_status",
+      "input_schema": { "type": "object", "properties": {} },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "running": { "type": "boolean" },
+          "status": { "type": "object" }
+        }
+      }
+    },
+    {
+      "name": "stop_face_tracking",
+      "description": "Stop the background face tracking service.",
+      "command": "python scripts/face_tracking_skill.py stop_face_tracking",
+      "input_schema": { "type": "object", "properties": {} },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "stopped": { "type": "boolean" },
+          "forced": { "type": "boolean" }
+        }
+      }
+    }
+  ]
+}

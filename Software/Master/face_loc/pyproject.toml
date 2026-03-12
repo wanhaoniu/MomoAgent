@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-mirror-face-tracking"
+version = "0.1.0"
+description = "Real-time face detection and tracking feedback service for smart mirror robotics integration."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Codex" }
+]
+dependencies = [
+  "fastapi>=0.111.0",
+  "uvicorn[standard]>=0.30.0",
+  "pydantic>=2.7.0",
+  "PyYAML>=6.0.1",
+  "numpy>=1.26,<2.0",
+  "opencv-python>=4.8,<5"
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0.0"
+]
+insightface = [
+  "insightface>=0.7.3",
+  "onnxruntime>=1.19.0"
+]
+
+[project.scripts]
+face-tracking-service = "face_tracking.main:cli_main"
+face-tracking-skill = "face_tracking.openclaw_skill_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
