@@ -2046,8 +2046,24 @@ class ArmControlGUI(QMainWindow):
         self._apply_sim_joint_q(q_now, update_plot=True)
 
     def _handle_sim_motion_from_command(self, state: object, command: object, source: str):
-        # Treat hardware feedback as ground truth. The previous twin-based animation
-        # could diverge from the real arm during multi-turn lag or transport errors.
+        duration = 0.0
+        if isinstance(command, dict):
+            try:
+                duration = max(0.0, float(command.get("duration", 0.0) or 0.0))
+            except Exception:
+                duration = 0.0
+
+        q_target = self._extract_joint_q_from_sdk_state(state, prefer_twin=True)
+        q_actual = self._extract_joint_q_from_sdk_state(state, prefer_twin=False)
+        if (
+            q_target is not None
+            and q_actual is not None
+            and duration > 1e-4
+            and np.linalg.norm(np.asarray(q_target, dtype=float) - np.asarray(q_actual, dtype=float)) > 1e-5
+        ):
+            self._schedule_sim_motion(np.asarray(q_target, dtype=float), duration)
+            return
+
         self._cancel_sim_motion()
         self._sync_sim_from_sdk_state(state)
 
