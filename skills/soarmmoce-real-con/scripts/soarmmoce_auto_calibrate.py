@@ -5,10 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
+
+from lerobot.motors.feetech import OperatingMode
 
 from soarmmoce_cli_common import cli_bool, run_and_print
 from soarmmoce_sdk import (
@@ -22,6 +26,18 @@ from soarmmoce_sdk import (
 
 RAW_COUNTS_PER_REV = 4096
 HALF_RAW_COUNTS_PER_REV = RAW_COUNTS_PER_REV / 2.0
+DEFAULT_CONNECT_TIMEOUT_S = 8.0
+FULL_SPAN_SINGLE_TURN_JOINTS = ("shoulder_pan",)
+
+
+@dataclass(slots=True)
+class MultiTurnTrackerState:
+    last_wrapped_raw: int
+    continuous_raw: int
+
+
+class _ConnectTimeout(RuntimeError):
+    pass
 
 
 def _parse_joints(raw: str) -> list[str]:
@@ -38,6 +54,29 @@ def _parse_joints(raw: str) -> list[str]:
     return joints
 
 
+def _ensure_bus_with_timeout(arm: SoArmMoceController, timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S):
+    timeout_s = float(timeout_s)
+    if timeout_s <= 0.0:
+        return arm._ensure_bus()
+
+    def _handle_timeout(signum, frame):  # pragma: no cover - signal-driven path
+        raise _ConnectTimeout(f"Timed out after {timeout_s:.1f}s while connecting to arm bus")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        return arm._ensure_bus()
+    except _ConnectTimeout as exc:
+        arm.close()
+        raise RuntimeError(
+            f"{exc}. The script is hanging during serial handshake; check SOARMMOCE_PORT, power, and port occupancy."
+        ) from exc
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
 def _read_json(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
@@ -49,30 +88,31 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _unwrap_position_raw(joint: str, wrapped_raw: int, tracker: Dict[str, Dict[str, float]] | None) -> int:
-    wrapped = int(wrapped_raw) % RAW_COUNTS_PER_REV
+def _wrap_position_raw(raw_value: int | float) -> int:
+    return int(raw_value) % RAW_COUNTS_PER_REV
+
+
+def _unwrap_position_raw(joint: str, wrapped_raw: int, tracker: Dict[str, MultiTurnTrackerState] | None) -> int:
+    wrapped = _wrap_position_raw(wrapped_raw)
     if tracker is None or joint not in MULTI_TURN_JOINTS:
         return int(wrapped_raw)
     state = tracker.get(joint)
     if state is None:
-        continuous = float(wrapped)
+        state = MultiTurnTrackerState(last_wrapped_raw=wrapped, continuous_raw=wrapped)
+        tracker[joint] = state
+        return int(state.continuous_raw)
     else:
-        last_wrapped = float(state["last_wrapped_raw"])
-        last_continuous = float(state["continuous_raw"])
-        delta = float(wrapped) - last_wrapped
+        delta = int(wrapped) - int(state.last_wrapped_raw)
         if delta > HALF_RAW_COUNTS_PER_REV:
             delta -= RAW_COUNTS_PER_REV
         elif delta < -HALF_RAW_COUNTS_PER_REV:
             delta += RAW_COUNTS_PER_REV
-        continuous = last_continuous + delta
-    tracker[joint] = {
-        "last_wrapped_raw": float(wrapped),
-        "continuous_raw": float(continuous),
-    }
-    return int(round(continuous))
+        state.last_wrapped_raw = int(wrapped)
+        state.continuous_raw = int(round(int(state.continuous_raw) + delta))
+    return int(state.continuous_raw)
 
 
-def _read_joint_snapshot(bus, joint: str, tracker: Dict[str, Dict[str, float]] | None = None) -> Dict[str, Any]:
+def _read_joint_snapshot(bus, joint: str, tracker: Dict[str, MultiTurnTrackerState] | None = None) -> Dict[str, Any]:
     wrapped_raw = int(bus.read("Present_Position", joint, normalize=False))
     position_key = _unwrap_position_raw(joint, wrapped_raw, tracker)
     return {
@@ -84,28 +124,40 @@ def _read_joint_snapshot(bus, joint: str, tracker: Dict[str, Dict[str, float]] |
     }
 
 
+def _configure_joint_for_calibration(bus, joint: str) -> Dict[str, int]:
+    model = bus.motors[joint].model
+    max_res = int(bus.model_resolution_table[model] - 1)
+    if joint in MULTI_TURN_JOINTS:
+        bus.write("Homing_Offset", joint, 0, normalize=False)
+    bus.write("Min_Position_Limit", joint, 0, normalize=False)
+    bus.write("Max_Position_Limit", joint, max_res, normalize=False)
+    bus.write("Operating_Mode", joint, OperatingMode.POSITION.value, normalize=False)
+    time.sleep(0.02)
+    current_raw = _wrap_position_raw(bus.read("Present_Position", joint, normalize=False))
+    bus.write("Goal_Position", joint, current_raw, normalize=False)
+    return {"max_res": int(max_res), "current_wrapped_raw": int(current_raw)}
+
+
 def _command_goal_from_reference(bus, joint: str, direction: int, step_raw: int, reference_position_raw: int) -> Dict[str, Any]:
     direction = 1 if direction >= 0 else -1
     step_raw = max(1, int(step_raw))
     if joint in MULTI_TURN_JOINTS:
-        goal_value = int(direction * step_raw)
+        goal_value = _wrap_position_raw(int(reference_position_raw) + direction * step_raw)
     else:
         goal_value = int(min(4095, max(0, int(reference_position_raw) + direction * step_raw)))
     bus.write("Goal_Position", joint, goal_value, normalize=False)
     return {
-        "kind": "incremental_step" if joint in MULTI_TURN_JOINTS else "absolute_goal",
+        "kind": "wrapped_absolute_goal" if joint in MULTI_TURN_JOINTS else "absolute_goal",
         "goal_value": int(goal_value),
         "from_position": int(reference_position_raw),
     }
 
 
 def _hold_joint(bus, joint: str, reference_position_raw: int | None = None) -> None:
-    if joint in MULTI_TURN_JOINTS:
-        bus.write("Goal_Position", joint, 0, normalize=False)
-        return
     if reference_position_raw is None:
         reference_position_raw = int(bus.read("Present_Position", joint, normalize=False))
-    bus.write("Goal_Position", joint, int(reference_position_raw), normalize=False)
+    hold_value = _wrap_position_raw(reference_position_raw) if joint in MULTI_TURN_JOINTS else int(reference_position_raw)
+    bus.write("Goal_Position", joint, int(hold_value), normalize=False)
 
 
 def _is_limit_fault(exc: Exception) -> bool:
@@ -122,7 +174,7 @@ def _backoff_from_limit(
     poll_interval_s: float,
     attempts: int,
     reference_position_raw: int,
-    tracker: Dict[str, Dict[str, float]] | None,
+    tracker: Dict[str, MultiTurnTrackerState] | None,
 ) -> Dict[str, Any]:
     last_exc: Exception | None = None
     last_reference = int(reference_position_raw)
@@ -162,7 +214,7 @@ def _seek_limit(
     settle_samples: int,
     stall_current_abs_threshold: float,
     timeout_s: float,
-    tracker: Dict[str, Dict[str, float]] | None,
+    tracker: Dict[str, MultiTurnTrackerState] | None,
 ) -> Dict[str, Any]:
     start_ts = time.time()
     pos_hist: deque[int] = deque(maxlen=max(2, int(settle_samples)))
@@ -334,7 +386,7 @@ def _move_joint_back_to_target(
     poll_interval_s: float,
     timeout_s: float,
     position_tolerance_raw: int = 6,
-    tracker: Dict[str, Dict[str, float]] | None = None,
+    tracker: Dict[str, MultiTurnTrackerState] | None = None,
 ) -> Dict[str, Any]:
     start_ts = time.time()
     last_snap = _read_joint_snapshot(bus, joint, tracker=tracker)
@@ -367,6 +419,53 @@ def _desired_home_present_raw(max_res: int, motor_home_deg: float) -> int:
     return int(round(half_turn + float(motor_home_deg) * float(max_res) / 360.0))
 
 
+def _build_multi_turn_calibration_entry(
+    *,
+    current_cal,
+    home_present_raw: int,
+    home_present_wrapped_raw: int,
+    min_present_raw: int,
+    max_present_raw: int,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    home_present_raw = int(home_present_raw)
+    home_wrapped_raw = _wrap_position_raw(home_present_wrapped_raw)
+    min_present_raw = int(min_present_raw)
+    max_present_raw = int(max_present_raw)
+    min_relative_raw = int(min_present_raw - home_present_raw)
+    max_relative_raw = int(max_present_raw - home_present_raw)
+
+    if min_relative_raw > 0 or max_relative_raw < 0:
+        raise RuntimeError(
+            "Invalid multi-turn calibration span: home is not inside observed range "
+            f"(home={home_present_raw}, min={min_present_raw}, max={max_present_raw})"
+        )
+    if min_relative_raw >= max_relative_raw:
+        raise RuntimeError(
+            f"Invalid multi-turn calibration span: min_relative={min_relative_raw}, max_relative={max_relative_raw}"
+        )
+
+    entry = {
+        "id": int(current_cal.id),
+        "drive_mode": int(current_cal.drive_mode),
+        "homing_offset": 0,
+        "range_min": 0,
+        "range_max": int(RAW_COUNTS_PER_REV - 1),
+        "home_wrapped_raw": int(home_wrapped_raw),
+        "min_relative_raw": int(min_relative_raw),
+        "max_relative_raw": int(max_relative_raw),
+    }
+    result_payload = {
+        "calibration_mode": "multi_turn_mode0_relative_tracking",
+        "home_present_raw": int(home_present_raw),
+        "home_present_wrapped_raw": int(home_wrapped_raw),
+        "observed_range_min_raw": int(min_present_raw),
+        "observed_range_max_raw": int(max_present_raw),
+        "min_relative_raw": int(min_relative_raw),
+        "max_relative_raw": int(max_relative_raw),
+    }
+    return entry, result_payload
+
+
 def _calibrate(args: argparse.Namespace) -> Dict[str, Any]:
     config = resolve_config()
     output_path = (
@@ -377,26 +476,22 @@ def _calibrate(args: argparse.Namespace) -> Dict[str, Any]:
     joints = list(args.joints)
 
     with SoArmMoceController(config) as arm:
-        bus = arm._ensure_bus()
+        bus = _ensure_bus_with_timeout(arm)
         try:
             current_hw_calib = bus.read_calibration()
             source_calib_path = (config.calib_dir / f"{config.robot_id}.json").resolve()
             source_calib_json = _read_json(source_calib_path)
-            tracker: Dict[str, Dict[str, float]] = {}
+            with bus.torque_disabled():
+                for joint in joints:
+                    _configure_joint_for_calibration(bus, joint)
+
+            tracker: Dict[str, MultiTurnTrackerState] = {}
             home_present_raw: Dict[str, int] = {}
             home_present_wrapped_raw: Dict[str, int] = {}
             for joint in joints:
                 snap = _read_joint_snapshot(bus, joint, tracker=tracker)
                 home_present_raw[joint] = int(snap["position"])
                 home_present_wrapped_raw[joint] = int(snap["position_wrapped"])
-
-            for joint in joints:
-                if joint in MULTI_TURN_JOINTS:
-                    continue
-                model = bus.motors[joint].model
-                max_res = int(bus.model_resolution_table[model] - 1)
-                bus.write("Min_Position_Limit", joint, 0, normalize=False)
-                bus.write("Max_Position_Limit", joint, max_res, normalize=False)
 
             results: Dict[str, Any] = {}
             min_present_raw: Dict[str, int] = {}
@@ -468,15 +563,42 @@ def _calibrate(args: argparse.Namespace) -> Dict[str, Any]:
 
             for joint in joints:
                 current_cal = current_hw_calib[joint]
+                if joint in MULTI_TURN_JOINTS:
+                    entry, result_payload = _build_multi_turn_calibration_entry(
+                        current_cal=current_cal,
+                        home_present_raw=int(home_present_raw[joint]),
+                        home_present_wrapped_raw=int(home_present_wrapped_raw[joint]),
+                        min_present_raw=int(min_present_raw[joint]),
+                        max_present_raw=int(max_present_raw[joint]),
+                    )
+                    written_json[joint] = entry
+                    results[joint]["calibration"] = result_payload
+                    register_writes[joint] = {
+                        "homing_offset": int(entry["homing_offset"]),
+                        "range_min": int(entry["range_min"]),
+                        "range_max": int(entry["range_max"]),
+                        "home_wrapped_raw": int(entry["home_wrapped_raw"]),
+                        "min_relative_raw": int(entry["min_relative_raw"]),
+                        "max_relative_raw": int(entry["max_relative_raw"]),
+                        "calibration_mode": str(result_payload["calibration_mode"]),
+                    }
+                    continue
+
                 model = bus.motors[joint].model
                 max_res = int(bus.model_resolution_table[model] - 1)
                 motor_home_deg = arm._joint_to_motor_deg(joint, float(config.home_joints.get(joint, 0.0)))
                 desired_home = _desired_home_present_raw(max_res, motor_home_deg)
                 new_offset = int(round(int(current_cal.homing_offset) + int(home_present_raw[joint]) - desired_home))
-                new_min = int(round(int(min_present_raw[joint]) - int(home_present_raw[joint]) + desired_home))
-                new_max = int(round(int(max_present_raw[joint]) - int(home_present_raw[joint]) + desired_home))
-                if new_min >= new_max:
-                    raise RuntimeError(f"Invalid calibration span for {joint}: min={new_min}, max={new_max}")
+                if joint in FULL_SPAN_SINGLE_TURN_JOINTS:
+                    new_min = 0
+                    new_max = int(max_res)
+                    calibration_mode = "single_turn_offset_only_full_span"
+                else:
+                    new_min = int(round(int(min_present_raw[joint]) - int(home_present_raw[joint]) + desired_home))
+                    new_max = int(round(int(max_present_raw[joint]) - int(home_present_raw[joint]) + desired_home))
+                    if new_min >= new_max:
+                        raise RuntimeError(f"Invalid calibration span for {joint}: min={new_min}, max={new_max}")
+                    calibration_mode = "single_turn_seek_limits"
 
                 written_json[joint] = {
                     "id": int(current_cal.id),
@@ -490,15 +612,15 @@ def _calibrate(args: argparse.Namespace) -> Dict[str, Any]:
                     "range_min": int(new_min),
                     "range_max": int(new_max),
                     "desired_home_present_raw": int(desired_home),
+                    "calibration_mode": calibration_mode,
                 }
 
             if args.apply_registers:
                 for joint in joints:
                     write_spec = register_writes[joint]
                     bus.write("Homing_Offset", joint, int(write_spec["homing_offset"]), normalize=False)
-                    if joint not in MULTI_TURN_JOINTS:
-                        bus.write("Min_Position_Limit", joint, int(write_spec["range_min"]), normalize=False)
-                        bus.write("Max_Position_Limit", joint, int(write_spec["range_max"]), normalize=False)
+                    bus.write("Min_Position_Limit", joint, int(write_spec["range_min"]), normalize=False)
+                    bus.write("Max_Position_Limit", joint, int(write_spec["range_max"]), normalize=False)
 
             if args.save_json:
                 _write_json(output_path, written_json)

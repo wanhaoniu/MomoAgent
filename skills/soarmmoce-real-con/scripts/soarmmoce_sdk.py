@@ -37,6 +37,9 @@ MULTI_TURN_RAW_RANGE = 900000
 RAW_COUNTS_PER_REV = 4096.0
 HALF_RAW_COUNTS_PER_REV = RAW_COUNTS_PER_REV / 2.0
 DEFAULT_TARGET_FRAME = "wrist_roll"
+MULTI_TURN_SETTLE_TOL_DEG = 0.5
+MULTI_TURN_SETTLE_MAX_ITERS = 6
+MULTI_TURN_SETTLE_WAIT_S = 0.08
 DEFAULT_HOME_JOINTS = {
     "shoulder_pan": -8.923076923076923,
     "shoulder_lift": -9.31868131868132,
@@ -47,17 +50,25 @@ DEFAULT_HOME_JOINTS = {
 DEFAULT_JOINT_SCALES = {
     "shoulder_pan": 1.0,
     "shoulder_lift": 5.3,
-    "elbow_flex": 5.6,
+    "elbow_flex": -5.6,
     "wrist_flex": 1.0,
     "wrist_roll": 1.0,
 }
 DEFAULT_MODEL_OFFSETS_DEG = {
     "shoulder_pan": 0.0,
-    "shoulder_lift": -90.0,
+    "shoulder_lift": 0.0,
     "elbow_flex": 0.0,
-    "wrist_flex": -180.0,
+    "wrist_flex": 0.0,
     "wrist_roll": 0.0,
 }
+USER_DELTA_TO_MODEL_ROT = np.array(
+    [
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ],
+    dtype=float,
+)
 __all__ = [
     "ARM_JOINTS",
     "DEFAULT_MODEL_OFFSETS_DEG",
@@ -131,7 +142,20 @@ def _load_calibration(robot_name: str, calib_dir: Path) -> dict[str, MotorCalibr
     fpath = calib_dir / f"{robot_name}.json"
     if not fpath.exists():
         raise FileNotFoundError(f"Calibration file not found: {fpath}")
-    with open(fpath, "r", encoding="utf-8") as f, draccus.config_type("json"):
+    payload = json.loads(fpath.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Calibration file must contain a JSON object: {fpath}")
+
+    # Keep runtime bus calibration compatible with extended manual/auto calibration payloads.
+    base_fields = ("id", "drive_mode", "homing_offset", "range_min", "range_max")
+    filtered_payload = {}
+    for joint_name, entry in payload.items():
+        if not isinstance(entry, dict):
+            filtered_payload[joint_name] = entry
+            continue
+        filtered_payload[joint_name] = {field: entry[field] for field in base_fields if field in entry}
+
+    with io.StringIO(json.dumps(filtered_payload)) as f, draccus.config_type("json"):
         return draccus.load(dict[str, MotorCalibration], f)
 
 
@@ -311,7 +335,7 @@ def resolve_config() -> SoArmMoceConfig:
         model_offsets_deg=_resolve_model_offsets(),
         arm_p_coefficient=int(_env_value("SOARMMOCE_ARM_P_COEFFICIENT", default="16")),
         arm_d_coefficient=int(_env_value("SOARMMOCE_ARM_D_COEFFICIENT", default="8")),
-        max_ee_pos_err_m=float(_env_value("SOARMMOCE_MAX_EE_POS_ERR_M", default="0.01")),
+        max_ee_pos_err_m=float(_env_value("SOARMMOCE_MAX_EE_POS_ERR_M", default="0.02")),
         linear_step_m=float(_env_value("SOARMMOCE_LINEAR_STEP_M", default="0.01")),
         joint_step_deg=float(_env_value("SOARMMOCE_JOINT_STEP_DEG", default="5.0")),
         cartesian_settle_time_s=float(_env_value("SOARMMOCE_CARTESIAN_SETTLE_TIME_S", default="0.15")),
@@ -391,6 +415,12 @@ class SoArmMoceController:
             "model_offsets_deg": dict(self.config.model_offsets_deg),
             "ik_mode": "5dof_position_only",
             "cartesian_locked_joints": list(LOCKED_CARTESIAN_JOINTS),
+            "delta_frames": {
+                "base": "raw URDF base frame (matches packaged SDK/simulation)",
+                "urdf": "raw URDF base frame (alias of base)",
+                "user": "user-facing frame: x=forward, y=left, z=up",
+                "tool": "current tool frame",
+            },
             "gripper_available": False,
         }
 
@@ -427,17 +457,15 @@ class SoArmMoceController:
     ) -> Dict[str, Any]:
         if abs(dx) < 1e-12 and abs(dy) < 1e-12 and abs(dz) < 1e-12:
             raise ValidationError("At least one of dx/dy/dz must be non-zero")
-        if frame not in {"base", "tool"}:
-            raise ValidationError("frame must be 'base' or 'tool'")
+        if frame not in {"base", "urdf", "user", "tool"}:
+            raise ValidationError("frame must be 'base', 'urdf', 'user', or 'tool'")
 
         state = self.get_state()
         q_seed_deg = self._state_to_arm_q_deg(state)
         current_tf = self._forward_kinematics_from_arm_deg(q_seed_deg)
         delta = np.array([float(dx), float(dy), float(dz)], dtype=float)
-        if frame == "tool":
-            target_pos = np.asarray(current_tf.pos, dtype=float) + current_tf.rot_mat @ delta
-        else:
-            target_pos = np.asarray(current_tf.pos, dtype=float) + delta
+        resolved_delta = self._resolve_delta_in_model_frame(delta, frame=frame, current_tf=current_tf)
+        target_pos = np.asarray(current_tf.pos, dtype=float) + resolved_delta
 
         locked_joint_targets_deg = {
             joint_name: float(state["joint_state"][joint_name]) for joint_name in LOCKED_CARTESIAN_JOINTS
@@ -492,6 +520,7 @@ class SoArmMoceController:
         return {
             "note": "read-only IK diagnosis, does not move hardware",
             "request": {"dx": float(dx), "dy": float(dy), "dz": float(dz), "frame": frame},
+            "resolved_model_delta": self._xyz_dict(resolved_delta),
             "state": state,
             "target_tcp": self._xyz_dict(target_pos),
             "jacobian": {
@@ -578,17 +607,15 @@ class SoArmMoceController:
     ) -> Dict[str, Any]:
         if abs(dx) < 1e-12 and abs(dy) < 1e-12 and abs(dz) < 1e-12:
             raise ValidationError("At least one of dx/dy/dz must be non-zero")
-        if frame not in {"base", "tool"}:
-            raise ValidationError("frame must be 'base' or 'tool'")
+        if frame not in {"base", "urdf", "user", "tool"}:
+            raise ValidationError("frame must be 'base', 'urdf', 'user', or 'tool'")
         delta = np.array([float(dx), float(dy), float(dz)], dtype=float)
 
         before = self.get_state()
         q_seed_deg = self._state_to_arm_q_deg(before)
         current_tf = self._forward_kinematics_from_arm_deg(q_seed_deg)
-        if frame == "tool":
-            target_pos = np.asarray(current_tf.pos, dtype=float) + current_tf.rot_mat @ delta
-        else:
-            target_pos = np.asarray(current_tf.pos, dtype=float) + delta
+        resolved_delta = self._resolve_delta_in_model_frame(delta, frame=frame, current_tf=current_tf)
+        target_pos = np.asarray(current_tf.pos, dtype=float) + resolved_delta
         trace_steps: Optional[list[Dict[str, Any]]] = [] if trace else None
         state = self._move_tcp_smooth(
             start_state=before,
@@ -601,6 +628,7 @@ class SoArmMoceController:
         result = {
             "action": "move_delta",
             "requested_delta": {"dx": float(dx), "dy": float(dy), "dz": float(dz), "frame": frame},
+            "resolved_model_delta": self._xyz_dict(resolved_delta),
             "tcp_delta": self._tcp_delta(before, state),
             "state": state,
         }
@@ -826,6 +854,19 @@ class SoArmMoceController:
         q_rad = np.deg2rad(self._arm_to_model_q_deg(q_arm_deg))
         return chain.forward_kinematics(q_rad)
 
+    @staticmethod
+    def _resolve_delta_in_model_frame(delta: np.ndarray, *, frame: str, current_tf: kp.Transform) -> np.ndarray:
+        delta = np.asarray(delta, dtype=float).reshape(3)
+        if frame == "tool":
+            return np.asarray(current_tf.rot_mat, dtype=float) @ delta
+        if frame in {"base", "urdf"}:
+            return delta
+        if frame == "user":
+            # Convenience frame for teleop-style commands. The raw URDF/simulation base is
+            # left untouched in `frame="base"` so the real arm matches the packaged SDK.
+            return USER_DELTA_TO_MODEL_ROT @ delta
+        raise ValidationError(f"Unsupported delta frame: {frame}")
+
     def _solve_ik_to_position(
         self,
         target_pos: np.ndarray,
@@ -1037,6 +1078,48 @@ class SoArmMoceController:
                 cmd[name] = self._joint_to_motor_deg(name, float(target))
         return cmd
 
+    def _refine_multi_turn_targets(
+        self,
+        *,
+        bus: FeetechMotorsBus,
+        target_joint_deg: Dict[str, float],
+        state: Dict[str, Any],
+        deadline: Optional[float],
+    ) -> tuple[Dict[str, Any], list[Dict[str, Any]]]:
+        target_multi = {name: float(target_joint_deg[name]) for name in MULTI_TURN_JOINTS if name in target_joint_deg}
+        if not target_multi:
+            return state, []
+
+        corrections: list[Dict[str, Any]] = []
+        for _ in range(MULTI_TURN_SETTLE_MAX_ITERS):
+            current_joint_deg = {name: float(state["joint_state"][name]) for name in JOINTS}
+            residual = {
+                name: float(target_multi[name] - current_joint_deg[name])
+                for name in target_multi
+                if abs(float(target_multi[name] - current_joint_deg[name])) > MULTI_TURN_SETTLE_TOL_DEG
+            }
+            if not residual:
+                break
+
+            bus_cmd = self._build_bus_command(target_multi, current_joint_deg=current_joint_deg)
+            if not bus_cmd:
+                break
+            bus.sync_write("Goal_Position", bus_cmd)
+
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            settle_wait = MULTI_TURN_SETTLE_WAIT_S if remaining is None else min(MULTI_TURN_SETTLE_WAIT_S, remaining)
+            if settle_wait <= 0.0:
+                break
+            time.sleep(settle_wait)
+            state = self.get_state()
+            corrections.append(
+                {
+                    "residual_before_deg": residual,
+                    "bus_cmd": {name: float(value) for name, value in bus_cmd.items()},
+                }
+            )
+        return state, corrections
+
     def _move_goal(
         self,
         cmd: Dict[str, float],
@@ -1048,14 +1131,26 @@ class SoArmMoceController:
         trace_entry: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         bus = self._ensure_bus()
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
         current_joint_deg = self._read_joint_state_from_bus(bus)
         command_reference_joint_deg = dict(command_reference_joint_deg or current_joint_deg)
         raw_before = self._read_raw_present_position(bus) if trace_entry is not None else None
-        bus_cmd = self._build_bus_command(cmd, current_joint_deg=command_reference_joint_deg)
+        # Multi-turn joints are commanded as raw increments, so they must be computed from
+        # the latest measured state instead of the previous waypoint target. Otherwise lag
+        # accumulates and cartesian moves stall far short of the requested displacement.
+        bus_cmd = self._build_bus_command(cmd, current_joint_deg=current_joint_deg)
         if bus_cmd:
             bus.sync_write("Goal_Position", bus_cmd)
         self._wait(duration, wait, timeout)
         state = self.get_state()
+        correction_trace: list[Dict[str, Any]] = []
+        if wait:
+            state, correction_trace = self._refine_multi_turn_targets(
+                bus=bus,
+                target_joint_deg=cmd,
+                state=state,
+                deadline=deadline,
+            )
         if trace_entry is not None:
             raw_after = self._read_raw_present_position(bus)
             trace_entry.update(
@@ -1075,6 +1170,7 @@ class SoArmMoceController:
                     "raw_present_position_after": raw_after,
                     "raw_present_position_delta": self._raw_delta(raw_before or {}, raw_after),
                     "multi_turn_state": self._snapshot_multi_turn_state(),
+                    "multi_turn_settle_corrections": correction_trace,
                     "wait_s": float(duration),
                 }
             )
@@ -1104,12 +1200,19 @@ class SoArmMoceController:
         locked_joint_targets_deg = {
             joint_name: float(start_state["joint_state"][joint_name]) for joint_name in LOCKED_CARTESIAN_JOINTS
         }
+        # Reject cartesian requests that cannot meet the configured final-position tolerance
+        # before sending any waypoint to the bus. The incremental path can otherwise start
+        # moving and only fail after the arm has already drifted toward an unreachable target.
+        final_target_ik = self._solve_ik_to_position(
+            target_pos,
+            q_seed_deg,
+            locked_joint_targets_deg=locked_joint_targets_deg,
+        )
         state = start_state
         deadline = None if timeout is None else time.monotonic() + float(timeout)
         try:
             if not wait:
-                ik = self._solve_ik_to_position(target_pos, q_seed_deg, locked_joint_targets_deg=locked_joint_targets_deg)
-                cmd = {name: float(ik["q_target_deg"][idx]) for idx, name in enumerate(ARM_JOINTS)}
+                cmd = {name: float(final_target_ik["q_target_deg"][idx]) for idx, name in enumerate(ARM_JOINTS)}
                 trace_entry = None
                 if trace_steps is not None:
                     trace_entry = {
@@ -1119,8 +1222,8 @@ class SoArmMoceController:
                         "alpha": 1.0,
                         "waypoint_tcp_target": self._xyz_dict(target_pos),
                         "ik_target_joint_deg": cmd,
-                        "ik_pos_err_m": float(ik["pos_err_m"]),
-                        "ik_iterations": int(ik["iterations"]),
+                        "ik_pos_err_m": float(final_target_ik["pos_err_m"]),
+                        "ik_iterations": int(final_target_ik["iterations"]),
                     }
                 state = self._move_goal(
                     cmd,
@@ -1137,8 +1240,10 @@ class SoArmMoceController:
 
             step_m = max(1e-4, float(self.config.linear_step_m))
             distance = float(np.linalg.norm(target_pos - start_xyz))
-            hz_steps = int(np.ceil(max(0.0, float(duration)) * max(1.0, float(self.config.cartesian_update_hz))))
-            steps = max(1, int(np.ceil(distance / step_m)), hz_steps)
+            # For small cartesian moves, forcing many waypoints by update_hz makes each
+            # multi-turn increment too tiny to execute reliably on hardware. Keep waypoint
+            # count distance-driven so 1-2 cm motions are sent as meaningful steps.
+            steps = max(1, int(np.ceil(distance / step_m)))
             step_duration = max(0.0, float(duration)) / steps if steps else 0.0
             for step_index in range(1, steps + 1):
                 alpha = self._smooth_fraction(float(step_index) / float(steps))

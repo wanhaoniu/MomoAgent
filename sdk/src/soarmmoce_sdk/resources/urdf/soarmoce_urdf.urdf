@@ -76,7 +76,7 @@
   </link>
 
   <joint name="shoulder_lift" type="revolute">
-    <origin xyz="0.023908 -0.031327 0.098856" rpy="1.5708 0 1.5995" />
+    <origin xyz="0.023908 -0.031327 0.098856" rpy="3.141593 1.570793 -3.112889" />
     <parent link="shoulder" />
     <child link="shoulder_lift" />
     <axis xyz="0 0 1" />
@@ -132,7 +132,7 @@
   </link>
 
   <joint name="wrist" type="revolute">
-    <origin xyz="-0.15298 0.0021767 -0.003775" rpy="0 0 0" />
+    <origin xyz="-0.152980 0.002177 -0.003775" rpy="0.000000 0.000000 -1.570796" />
     <parent link="elbow" />
     <child link="wrist" />
     <axis xyz="0 0 1" />

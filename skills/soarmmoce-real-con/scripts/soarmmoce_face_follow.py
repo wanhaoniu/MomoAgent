@@ -439,7 +439,7 @@ def _probe_cartesian_axis_sign(
             dx=delta_kwargs["dx"],
             dy=delta_kwargs["dy"],
             dz=delta_kwargs["dz"],
-            frame="base",
+            frame="urdf",
             duration=move_duration_sec,
             wait=True,
         )
@@ -459,7 +459,7 @@ def _probe_cartesian_axis_sign(
                 dx=-delta_kwargs["dx"],
                 dy=-delta_kwargs["dy"],
                 dz=-delta_kwargs["dz"],
-                frame="base",
+                frame="urdf",
                 duration=move_duration_sec,
                 wait=True,
             )
@@ -1035,7 +1035,7 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         result = arm.move_delta(
                             dx=delta_dx,
                             dz=delta_dz,
-                            frame="base",
+                            frame="urdf",
                             duration=args.move_duration_sec,
                             wait=True,
                         )
@@ -1065,7 +1065,7 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         arm.move_delta(
                             dx=delta_dx,
                             dz=delta_dz,
-                            frame="base",
+                            frame="urdf",
                             duration=args.move_duration_sec,
                             wait=False,
                         )

@@ -31,12 +31,12 @@ robot:
   joint_scales:
     shoulder_pan: 1.0
     shoulder_lift: 5.3
-    elbow_flex: 5.6
+    elbow_flex: -5.6
     wrist_flex: 1.0
     wrist_roll: 1.0
   sim_joint_offsets_deg:
-    shoulder_lift: -90.0
-    wrist_flex: -180.0
+    shoulder_lift: 0.0
+    wrist_flex: 0.0
   multi_turn_joints: [shoulder_lift, elbow_flex]
   cartesian_locked_joints: [wrist_roll]
   gui_rotvec_to_joint:

@@ -19,7 +19,12 @@ def main() -> None:
     p_delta.add_argument("--dx", type=float, default=0.0)
     p_delta.add_argument("--dy", type=float, default=0.0)
     p_delta.add_argument("--dz", type=float, default=0.0)
-    p_delta.add_argument("--frame", choices=["base", "tool"], default="base")
+    p_delta.add_argument(
+        "--frame",
+        choices=["base", "urdf", "user", "tool"],
+        default="base",
+        help="base=raw URDF/sim frame, urdf=base alias, user=x forward y left z up, tool=current tool frame",
+    )
     p_delta.add_argument("--duration", type=float, default=1.0)
     p_delta.add_argument("--wait", type=cli_bool, default=True)
     p_delta.add_argument("--timeout", type=float, default=None)

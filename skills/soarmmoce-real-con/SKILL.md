@@ -156,13 +156,13 @@ PYTHONPATH=~/.openclaw/skills/soarmmoce-real-con/scripts python3 /tmp/soarmmoce_
 - `SOARMMOCE_URDF_PATH`：URDF 路径，默认优先使用 `sdk/src/soarmmoce_sdk/resources/urdf/soarmoce_urdf.urdf`
 - `SOARMMOCE_TARGET_FRAME`：末端 frame，默认 `wrist_roll`（按当前 5DOF 链截断）
 - `SOARMMOCE_HOME_JOINTS_JSON`：覆盖 home 目标关节
-- `SOARMMOCE_JOINT_SCALE_JSON`：覆盖关节减速比/方向，默认 `{"shoulder_pan":1.0,"shoulder_lift":5.3,"elbow_flex":5.6,"wrist_flex":1.0,"wrist_roll":1.0}`
-- `SOARMMOCE_MODEL_OFFSETS_JSON`：覆盖 URDF 模型角度偏置，默认 `{"shoulder_pan":0.0,"shoulder_lift":-90.0,"elbow_flex":0.0,"wrist_flex":-180.0,"wrist_roll":0.0}`
+- `SOARMMOCE_JOINT_SCALE_JSON`：覆盖关节减速比/方向，默认 `{"shoulder_pan":1.0,"shoulder_lift":5.3,"elbow_flex":-5.6,"wrist_flex":1.0,"wrist_roll":1.0}`
+- `SOARMMOCE_MODEL_OFFSETS_JSON`：覆盖 URDF 模型角度偏置，默认 `{"shoulder_pan":0.0,"shoulder_lift":0.0,"elbow_flex":0.0,"wrist_flex":0.0,"wrist_roll":0.0}`
 - `SOARMMOCE_LINEAR_STEP_M`：笛卡尔插值步长，默认 `0.01`
 - `SOARMMOCE_JOINT_STEP_DEG`：关节插值步长，默认 `5.0`
 - `SOARMMOCE_CARTESIAN_UPDATE_HZ`：笛卡尔轨迹下发频率，默认 `20.0`
 - `SOARMMOCE_JOINT_UPDATE_HZ`：关节轨迹下发频率，默认 `25.0`
-- `SOARMMOCE_MAX_EE_POS_ERR_M`：笛卡尔动作最终位置误差容忍，默认 `0.01`
+- `SOARMMOCE_MAX_EE_POS_ERR_M`：笛卡尔动作最终位置误差容忍，默认 `0.02`
 - `SOARMMOCE_IK_TARGET_TOL_M`：5DOF IK 收敛阈值，默认 `0.001`
 - `SOARMMOCE_IK_MAX_ITERS`：5DOF IK 最大迭代次数，默认 `200`
 - `SOARMMOCE_IK_DAMPING`：5DOF IK 阻尼系数，默认 `0.05`
@@ -182,7 +182,9 @@ PYTHONPATH=~/.openclaw/skills/soarmmoce-real-con/scripts python3 /tmp/soarmmoce_
 5. SDK 临时脚本
 6. `joint` / `joints` 仅作低层兜底
 
-对 `上/下/左/右` 默认使用 `frame="base"`。
+对 `delta` 相对移动，`frame="base"` 默认与正式 SDK/仿真一致，直接使用 URDF 原始基坐标。
+如果你想用更直觉的用户坐标，再显式使用 `frame="user"`，它按 `x=前后`、`y=左右`、`z=上下` 解释。
+`frame="urdf"` 是 `base` 的显式别名。
 只有用户明确要求沿末端当前方向前进/后退时，才优先使用 `frame="tool"`。
 
 串口相关脚本不要并行运行；同一时刻只保留一个 `state/move/diag` 进程，否则容易出现假性的缺电机 ID 或端口占用。
