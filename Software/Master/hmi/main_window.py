@@ -247,6 +247,8 @@ class ArmControlGUI(QMainWindow):
         self._sdk_last_gui_sync_ts = 0.0
         self._sdk_last_gui_sync_err_ts = 0.0
         self._sdk_visual_prefer_twin_until_ts = 0.0
+        self._sdk_visual_twin_tol_rad = math.radians(0.8)
+        self._sdk_visual_twin_slack_sec = 2.5
         self._sdk_cmd_queue = deque()
         self._sdk_cmd_cond = threading.Condition()
         self._sdk_cmd_running = True
@@ -1203,7 +1205,11 @@ class ArmControlGUI(QMainWindow):
 
     def _on_sdk_sync_state_ready(self, state: object):
         if self._sim_motion_active:
-            self._cancel_sim_motion()
+            # Let the local preview animation finish; otherwise periodic state sync
+            # snaps the 3D view back toward the lagging actual joints mid-motion.
+            self._sdk_last_gui_sync_ts = time.time()
+            self._update_quick_pose_from_sim()
+            return
         self._sync_sim_from_sdk_state(state)
         self._sdk_last_gui_sync_ts = time.time()
         self._update_quick_pose_from_sim()
@@ -1766,6 +1772,8 @@ class ArmControlGUI(QMainWindow):
                 self.speech_window.agent_failed.connect(self._on_speech_agent_failed)
             if hasattr(self.speech_window, "agent_session_changed"):
                 self.speech_window.agent_session_changed.connect(self._on_speech_agent_session_changed)
+            if hasattr(self.speech_window, "tts_failed"):
+                self.speech_window.tts_failed.connect(self._on_speech_tts_failed)
         return self.speech_window
 
     def _on_speech_window_closed(self):
@@ -1800,6 +1808,11 @@ class ArmControlGUI(QMainWindow):
         sid = str(session_id or "").strip()
         if sid:
             self.log(f"[OpenClaw] Session: {sid}", "info")
+
+    def _on_speech_tts_failed(self, message: str):
+        msg = str(message or "").strip() or "TTS playback failed"
+        self.log(f"[Speech:TTS] {msg}", "error")
+        self.statusBar().showMessage(msg)
 
     @staticmethod
     def _tool_to_float(value, default: float) -> float:
@@ -2062,7 +2075,10 @@ class ArmControlGUI(QMainWindow):
             and duration > 1e-4
             and np.linalg.norm(np.asarray(q_target, dtype=float) - np.asarray(q_actual, dtype=float)) > 1e-5
         ):
-            self._sdk_visual_prefer_twin_until_ts = time.time() + duration + 0.5
+            self._sdk_visual_prefer_twin_until_ts = time.time() + max(
+                float(duration) + float(self._sdk_visual_twin_slack_sec),
+                1.0,
+            )
             self._schedule_sim_motion(np.asarray(q_target, dtype=float), duration)
             return
 
@@ -2077,10 +2093,13 @@ class ArmControlGUI(QMainWindow):
             return q_twin
         if q_twin is None:
             return q_actual
-        if np.linalg.norm(np.asarray(q_twin, dtype=float) - np.asarray(q_actual, dtype=float)) <= 1e-5:
+        q_actual_arr = np.asarray(q_actual, dtype=float)
+        q_twin_arr = np.asarray(q_twin, dtype=float)
+        diff = np.abs(q_twin_arr - q_actual_arr)
+        if float(np.max(diff)) <= float(self._sdk_visual_twin_tol_rad):
             return q_actual
         if time.time() < float(self._sdk_visual_prefer_twin_until_ts):
-            return q_twin
+            return q_twin_arr
         return q_actual
 
     def _sync_sim_from_sdk_state(self, state: object):

@@ -2,9 +2,9 @@
   "shoulder_pan": {
     "id": 1,
     "drive_mode": 0,
-    "homing_offset": -1299,
-    "range_min": 807,
-    "range_max": 2844
+    "homing_offset": 767,
+    "range_min": 1029,
+    "range_max": 3158
   },
   "shoulder_lift": {
     "id": 2,
@@ -36,9 +36,9 @@
   "wrist_roll": {
     "id": 5,
     "drive_mode": 0,
-    "homing_offset": 239,
-    "range_min": 135,
-    "range_max": 3250
+    "homing_offset": 1334,
+    "range_min": 1167,
+    "range_max": 2971
   },
   "_meta": {
     "home_joint_deg": {

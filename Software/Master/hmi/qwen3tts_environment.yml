@@ -1,0 +1,9 @@
+name: qwen3tts
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip>=24
+  - pip:
+      - qwen-tts==0.1.1
+      - soundfile>=0.12

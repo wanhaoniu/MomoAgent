@@ -96,7 +96,7 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py home
 
 ### 6) 人脸居中跟随
 
-先启动 `face_loc` 服务，再运行：
+如果用户说开启人脸跟随模式，或者跟随我的脸等请运行：
 
 ```bash
 python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_face_follow.py --face-endpoint http://127.0.0.1:8011
@@ -107,7 +107,7 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_face_follow.py -
 - `shoulder_pan` 做水平居中
 - `shoulder_lift + elbow_flex` 做垂直居中
 - 默认先只做画面内 `x/y` 居中，不主动做前后距离修正
-- 当前默认方向符号固定为最近一次验证通过的组合：`pan=+1`、`tilt_primary=+1`、`tilt_secondary=-1`
+- 当前默认方向符号固定为最近一次验证通过的组合：`pan=-1`、`tilt_primary=-1`、`tilt_secondary=+1`
 - 丢失人脸时不报错，改为自动左右扫描寻找人脸
 - 脚本会持续运行，直到你手动 `Ctrl+C` 停止
 
