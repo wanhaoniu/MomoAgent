@@ -1,0 +1,26 @@
+[
+  {
+    "center": [640, 360],
+    "duration_sec": 1.2,
+    "label": "host_center",
+    "reason": "mock llm picks the speaker in the center"
+  },
+  {
+    "center": [880, 260],
+    "duration_sec": 1.2,
+    "label": "product_right_top",
+    "reason": "mock llm switches to the product in the upper-right area"
+  },
+  {
+    "center": [980, 420],
+    "duration_sec": 1.2,
+    "label": "gesture_right",
+    "reason": "mock llm tracks the active hand gesture"
+  },
+  {
+    "center": [420, 300],
+    "duration_sec": 1.2,
+    "label": "audience_left",
+    "reason": "mock llm shifts to the interesting audience reaction"
+  }
+]

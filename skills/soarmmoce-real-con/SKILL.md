@@ -107,7 +107,7 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_face_follow.py -
 - `shoulder_pan` 做水平居中
 - `shoulder_lift + elbow_flex` 做垂直居中
 - 默认先只做画面内 `x/y` 居中，不主动做前后距离修正
-- 当前默认方向符号固定为最近一次验证通过的组合：`pan=-1`、`tilt_primary=-1`、`tilt_secondary=+1`
+- 当前默认方向符号为 `auto`：优先读取 `calibration/face_follow_signs.json`，必要时可用 `--reprobe-control-signs` 重探测
 - 丢失人脸时不报错，改为自动左右扫描寻找人脸
 - 脚本会持续运行，直到你手动 `Ctrl+C` 停止
 
