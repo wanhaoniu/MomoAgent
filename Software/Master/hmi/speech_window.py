@@ -1,4 +1,4 @@
-"""Floating speech input window with Groq STT/TTS providers."""
+"""Floating speech input window with configurable STT/TTS providers."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -16,17 +18,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import requests
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except Exception:
+    sd = None
 from PyQt5.QtCore import QPoint, QPointF, QRectF, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import QWidget
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-for _dotenv_name in (".env", "env"):
-    _dotenv_path = REPO_ROOT / _dotenv_name
-    if _dotenv_path.exists():
-        load_dotenv(dotenv_path=_dotenv_path, override=False)
+REPO_DOTENV_PATHS = tuple(
+    path for path in (REPO_ROOT / ".env", REPO_ROOT / "env") if path.exists()
+)
+for _dotenv_path in REPO_DOTENV_PATHS:
+    load_dotenv(dotenv_path=_dotenv_path, override=False)
 
 STT_PROVIDER_DEFAULT = "groq"
 TTS_PROVIDER_DEFAULT = "groq"
@@ -61,6 +67,44 @@ def _env_bool(name: str, default: bool) -> bool:
     if val in ("0", "false", "no", "off", "n"):
         return False
     return bool(default)
+
+
+def _runtime_env_values() -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    for dotenv_path in REPO_DOTENV_PATHS:
+        try:
+            payload = dotenv_values(dotenv_path)
+        except Exception:
+            continue
+        for key, value in payload.items():
+            if key and value is not None:
+                values[str(key)] = str(value)
+    return values
+
+
+def _runtime_env_get(name: str, default: Optional[str] = None, env_values: Optional[Dict[str, str]] = None) -> Optional[str]:
+    if env_values is not None and name in env_values:
+        return str(env_values[name])
+    current = os.getenv(name)
+    if current is not None:
+        return str(current)
+    return default
+
+
+def _runtime_env_bool(name: str, default: bool, env_values: Optional[Dict[str, str]] = None) -> bool:
+    raw = _runtime_env_get(name, None, env_values)
+    if raw is None:
+        return bool(default)
+    val = str(raw).strip().lower()
+    if val in ("1", "true", "yes", "on", "y"):
+        return True
+    if val in ("0", "false", "no", "off", "n"):
+        return False
+    return bool(default)
+
+
+def _log_tts(message: str) -> None:
+    print(f"[Speech:TTS] {message}", flush=True)
 
 
 def _extract_text_from_stt_payload(payload: Any) -> str:
@@ -388,6 +432,14 @@ def _is_retryable_stt_request_error(exc: Exception) -> bool:
     )
 
 
+def _build_optional_bearer_headers(api_key: str) -> Dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    token = str(api_key or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _split_text_for_tts(text: str, max_chars: int) -> List[str]:
     raw = re.sub(r"\s+", " ", str(text or "")).strip()
     if not raw:
@@ -430,7 +482,7 @@ def _split_text_for_tts(text: str, max_chars: int) -> List[str]:
 
 def _decode_wav_bytes(wav_bytes: bytes) -> Tuple[np.ndarray, int]:
     if not wav_bytes:
-        raise ValueError("Groq TTS response is empty")
+        raise ValueError("TTS response is empty")
 
     with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
         channels = int(wf.getnchannels())
@@ -474,6 +526,57 @@ def _to_float32_audio_frames(audio: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(frames, dtype=np.float32)
 
 
+def _find_playback_binary(name: str) -> Optional[str]:
+    binary = shutil.which(name)
+    if binary:
+        return binary
+    for candidate in (
+        f"/usr/bin/{name}",
+        f"/bin/{name}",
+        f"/usr/local/bin/{name}",
+    ):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _audio_player_command(backend: str, wav_path: str) -> Optional[List[str]]:
+    backend_name = str(backend or "").strip().lower()
+    if backend_name == "paplay":
+        binary = _find_playback_binary("paplay")
+        if binary:
+            return [binary, wav_path]
+    if backend_name == "aplay":
+        binary = _find_playback_binary("aplay")
+        if binary:
+            return [binary, "-q", wav_path]
+    if backend_name == "ffplay":
+        binary = _find_playback_binary("ffplay")
+        if binary:
+            return [binary, "-nodisp", "-autoexit", "-loglevel", "error", wav_path]
+    return None
+
+
+def _iter_playback_backends(preferred: Optional[str] = None) -> List[str]:
+    backend = str(
+        preferred
+        or _runtime_env_get("SOARMMOCE_TTS_PLAYBACK_BACKEND", "auto", _runtime_env_values())
+        or "auto"
+    ).strip().lower() or "auto"
+    if backend != "auto":
+        return [backend]
+
+    backends: List[str] = []
+    for candidate in ("paplay", "aplay", "ffplay"):
+        if _find_playback_binary(candidate):
+            backends.append(candidate)
+    if backends:
+        return backends
+    if sd is not None:
+        backends.append("sounddevice")
+    return backends
+
+
 def groq_text_to_speech(
     text: str,
     api_key: str,
@@ -486,15 +589,10 @@ def groq_text_to_speech(
     content = str(text or "").strip()
     if not content:
         raise ValueError("Empty TTS text")
-    if not api_key:
-        raise ValueError("Groq API key is empty")
 
     response = requests.post(
         url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=_build_optional_bearer_headers(api_key),
         json={
             "model": str(model or "").strip() or GROQ_TTS_MODEL_DEFAULT,
             "voice": str(voice or "").strip() or GROQ_TTS_VOICE_DEFAULT,
@@ -505,13 +603,69 @@ def groq_text_to_speech(
     )
 
     if not response.ok:
-        raise RuntimeError(_extract_http_error_message(response, "Groq TTS failed"))
+        raise RuntimeError(_extract_http_error_message(response, "TTS failed"))
     if not response.content:
-        raise RuntimeError("Groq TTS response is empty")
+        raise RuntimeError("TTS response is empty")
     return response.content
 
 
-def play_wav_bytes(wav_bytes: bytes, stop_event: Optional[threading.Event] = None):
+def _play_wav_bytes_with_command(wav_bytes: bytes, backend: str, stop_event: Optional[threading.Event] = None):
+    stopper = stop_event or threading.Event()
+    with tempfile.NamedTemporaryFile(prefix="soarmmoce_tts_", suffix=".wav", delete=False) as handle:
+        wav_path = handle.name
+        handle.write(wav_bytes)
+
+    cmd = _audio_player_command(backend, wav_path)
+    if not cmd:
+        try:
+            os.unlink(wav_path)
+        except Exception:
+            pass
+        raise RuntimeError(f"Playback backend `{backend}` is not available")
+
+    proc: Optional[subprocess.Popen] = None
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        while True:
+            if stopper.is_set():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    proc.kill()
+                return
+
+            rc = proc.poll()
+            if rc is not None:
+                if rc != 0:
+                    err = ""
+                    try:
+                        _, err = proc.communicate(timeout=0.2)
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"{backend} playback failed ({rc}): {str(err or '').strip()}")
+                return
+            time.sleep(_AUDIO_PLAYBACK_POLL_MS / 1000.0)
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        try:
+            os.unlink(wav_path)
+        except Exception:
+            pass
+
+
+def _play_wav_bytes_with_sounddevice(wav_bytes: bytes, stop_event: Optional[threading.Event] = None):
+    if sd is None:
+        raise RuntimeError("sounddevice is not available")
     audio, sample_rate = _decode_wav_bytes(wav_bytes)
     frames = _to_float32_audio_frames(audio)
     if frames.size == 0:
@@ -553,6 +707,28 @@ def play_wav_bytes(wav_bytes: bytes, stop_event: Optional[threading.Event] = Non
                         pass
                     break
                 sd.sleep(_AUDIO_PLAYBACK_POLL_MS)
+
+
+def play_wav_bytes(
+    wav_bytes: bytes,
+    stop_event: Optional[threading.Event] = None,
+    backend: Optional[str] = None,
+):
+    errors: List[str] = []
+    with _AUDIO_IO_LOCK:
+        for candidate in _iter_playback_backends(backend):
+            try:
+                _log_tts(f"playback backend try={candidate} bytes={len(wav_bytes)}")
+                if candidate == "sounddevice":
+                    _play_wav_bytes_with_sounddevice(wav_bytes, stop_event)
+                else:
+                    _play_wav_bytes_with_command(wav_bytes, candidate, stop_event)
+                _log_tts(f"playback backend ok={candidate}")
+                return
+            except Exception as exc:
+                _log_tts(f"playback backend failed={candidate} error={exc}")
+                errors.append(f"{candidate}: {exc}")
+        raise RuntimeError("All playback backends failed: " + "; ".join(errors))
 
 
 def openai_compatible_audio_to_text(
@@ -669,6 +845,7 @@ class _GroqTtsWorker(QThread):
         response_format: str,
         timeout_sec: float,
         max_chars: int,
+        playback_backend: str = "auto",
     ):
         super().__init__()
         self._text = str(text or "").strip()
@@ -679,6 +856,7 @@ class _GroqTtsWorker(QThread):
         self._response_format = str(response_format or "").strip() or GROQ_TTS_RESPONSE_FORMAT_DEFAULT
         self._timeout_sec = max(5.0, float(timeout_sec))
         self._max_chars = max(32, int(max_chars))
+        self._playback_backend = str(playback_backend or "auto").strip() or "auto"
         self._stop_event = threading.Event()
 
     def stop(self):
@@ -704,7 +882,7 @@ class _GroqTtsWorker(QThread):
                 )
                 if self.isInterruptionRequested():
                     return
-                play_wav_bytes(wav_bytes, self._stop_event)
+                play_wav_bytes(wav_bytes, self._stop_event, backend=self._playback_backend)
                 if self.isInterruptionRequested():
                     return
         except Exception as exc:
@@ -935,6 +1113,7 @@ class SpeechInputWindow(QWidget):
         self.setWindowTitle(title)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setFixedSize(300, 300)
+        runtime_env = _runtime_env_values()
 
         self._theme = "light"
         self._phase = 0.0
@@ -980,18 +1159,44 @@ class SpeechInputWindow(QWidget):
         self._stt_timeout_sec = max(5.0, self._stt_timeout_sec)
 
         self._tts_provider = TTS_PROVIDER_DEFAULT
-        self._tts_enabled = _env_bool("SOARMMOCE_TTS_ENABLED", True)
-        self._groq_api_key = str(os.getenv("GROQ_API_KEY") or GROQ_API_KEY_FALLBACK or "").strip()
-        self._groq_tts_url = os.getenv("GROQ_TTS_URL", GROQ_TTS_URL_DEFAULT).strip() or GROQ_TTS_URL_DEFAULT
-        self._groq_tts_model = os.getenv("GROQ_TTS_MODEL", GROQ_TTS_MODEL_DEFAULT).strip() or GROQ_TTS_MODEL_DEFAULT
-        self._groq_tts_voice = os.getenv("GROQ_TTS_VOICE", GROQ_TTS_VOICE_DEFAULT).strip() or GROQ_TTS_VOICE_DEFAULT
+        self._tts_enabled = _runtime_env_bool("SOARMMOCE_TTS_ENABLED", True, runtime_env)
+        self._groq_api_key = str(
+            _runtime_env_get("SOARMMOCE_TTS_API_KEY", None, runtime_env)
+            or _runtime_env_get("GROQ_TTS_API_KEY", None, runtime_env)
+            or _runtime_env_get("GROQ_API_KEY", None, runtime_env)
+            or GROQ_API_KEY_FALLBACK
+            or ""
+        ).strip()
+        self._groq_tts_url = (
+            _runtime_env_get("SOARMMOCE_TTS_URL", None, runtime_env)
+            or _runtime_env_get("GROQ_TTS_URL", None, runtime_env)
+            or GROQ_TTS_URL_DEFAULT
+        ).strip() or GROQ_TTS_URL_DEFAULT
+        self._groq_tts_model = (
+            _runtime_env_get("SOARMMOCE_TTS_MODEL", None, runtime_env)
+            or _runtime_env_get("GROQ_TTS_MODEL", None, runtime_env)
+            or GROQ_TTS_MODEL_DEFAULT
+        ).strip() or GROQ_TTS_MODEL_DEFAULT
+        self._groq_tts_voice = (
+            _runtime_env_get("SOARMMOCE_TTS_VOICE", None, runtime_env)
+            or _runtime_env_get("GROQ_TTS_VOICE", None, runtime_env)
+            or GROQ_TTS_VOICE_DEFAULT
+        ).strip() or GROQ_TTS_VOICE_DEFAULT
         self._groq_tts_response_format = (
-            os.getenv("GROQ_TTS_RESPONSE_FORMAT", GROQ_TTS_RESPONSE_FORMAT_DEFAULT).strip()
+            (
+                _runtime_env_get("SOARMMOCE_TTS_RESPONSE_FORMAT", None, runtime_env)
+                or _runtime_env_get("GROQ_TTS_RESPONSE_FORMAT", None, runtime_env)
+                or GROQ_TTS_RESPONSE_FORMAT_DEFAULT
+            ).strip()
             or GROQ_TTS_RESPONSE_FORMAT_DEFAULT
         )
         try:
             self._groq_tts_timeout_sec = float(
-                str(os.getenv("GROQ_TTS_TIMEOUT_SEC", str(GROQ_TTS_TIMEOUT_SEC_DEFAULT))).strip()
+                str(
+                    _runtime_env_get("SOARMMOCE_TTS_TIMEOUT_SEC", None, runtime_env)
+                    or _runtime_env_get("GROQ_TTS_TIMEOUT_SEC", None, runtime_env)
+                    or str(GROQ_TTS_TIMEOUT_SEC_DEFAULT)
+                ).strip()
             )
         except Exception:
             self._groq_tts_timeout_sec = GROQ_TTS_TIMEOUT_SEC_DEFAULT
@@ -999,10 +1204,19 @@ class SpeechInputWindow(QWidget):
         try:
             self._groq_tts_max_chars = max(
                 32,
-                int(str(os.getenv("GROQ_TTS_MAX_CHARS", str(GROQ_TTS_MAX_CHARS_DEFAULT))).strip()),
+                int(
+                    str(
+                        _runtime_env_get("SOARMMOCE_TTS_MAX_CHARS", None, runtime_env)
+                        or _runtime_env_get("GROQ_TTS_MAX_CHARS", None, runtime_env)
+                        or str(GROQ_TTS_MAX_CHARS_DEFAULT)
+                    ).strip()
+                ),
             )
         except Exception:
             self._groq_tts_max_chars = GROQ_TTS_MAX_CHARS_DEFAULT
+        self._tts_playback_backend = (
+            _runtime_env_get("SOARMMOCE_TTS_PLAYBACK_BACKEND", "auto", runtime_env) or "auto"
+        ).strip() or "auto"
 
         self._openclaw_enabled = _env_bool("OPENCLAW_ENABLED", True)
         self._openclaw_bin = str(os.getenv("OPENCLAW_BIN", OPENCLAW_BIN_DEFAULT)).strip() or OPENCLAW_BIN_DEFAULT
@@ -1207,6 +1421,13 @@ class SpeechInputWindow(QWidget):
 
         self._is_tts_running = True
         self._tts_provider = TTS_PROVIDER_DEFAULT
+        _log_tts(
+            "start "
+            f"url={self._groq_tts_url} "
+            f"model={self._groq_tts_model} "
+            f"voice={self._groq_tts_voice} "
+            f"backend={self._tts_playback_backend}"
+        )
         self._tts_worker = _GroqTtsWorker(
             text=text,
             api_key=self._groq_api_key,
@@ -1216,6 +1437,7 @@ class SpeechInputWindow(QWidget):
             response_format=self._groq_tts_response_format,
             timeout_sec=self._groq_tts_timeout_sec,
             max_chars=self._groq_tts_max_chars,
+            playback_backend=self._tts_playback_backend,
         )
         self._tts_worker.failed.connect(self._on_tts_failed)
         self._tts_worker.finished.connect(self._on_tts_finished)
@@ -1448,6 +1670,7 @@ class SpeechInputWindow(QWidget):
     def _on_tts_failed(self, error_text: str):
         self._is_tts_running = False
         msg = str(error_text or "").strip() or "语音播报失败"
+        _log_tts(f"failed {msg}")
         if self._last_agent_reply:
             self._status_text = f"Momo: {self._last_agent_reply}\n语音播报失败"
         else:
@@ -1457,6 +1680,7 @@ class SpeechInputWindow(QWidget):
 
     def _on_tts_finished(self):
         self._is_tts_running = False
+        _log_tts("finished")
         self._tts_worker = None
         self.update()
 

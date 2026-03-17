@@ -1,0 +1,40 @@
+service:
+  endpoint: http://127.0.0.1:8012/latest
+  poll_interval_sec: 0.15
+  request_timeout_sec: 2.0
+
+runner:
+  dry_run: false
+
+actions:
+  Open_Palm:
+    action: stop
+    cooldown_sec: 1.0
+  Closed_Fist:
+    action: home
+    duration: 1.5
+    cooldown_sec: 2.0
+  Thumb_Up:
+    action: move_delta
+    dz: 0.02
+    frame: base
+    duration: 0.8
+    cooldown_sec: 1.0
+  Thumb_Down:
+    action: move_delta
+    dz: -0.02
+    frame: base
+    duration: 0.8
+    cooldown_sec: 1.0
+  Pointing_Up:
+    action: move_joint
+    joint_name: wrist_roll
+    delta_deg: 12.0
+    duration: 0.8
+    cooldown_sec: 1.0
+  Victory:
+    action: move_joint
+    joint_name: wrist_roll
+    delta_deg: -12.0
+    duration: 0.8
+    cooldown_sec: 1.0

@@ -1777,7 +1777,14 @@ class ArmControlGUI(QMainWindow):
         return self.speech_window
 
     def _on_speech_window_closed(self):
+        speech = self.speech_window
+        self.speech_window = None
         self._set_speech_btn_text(False)
+        if speech is not None:
+            try:
+                speech.deleteLater()
+            except Exception:
+                pass
 
     def _on_speech_transcript_ready(self, text: str):
         text = str(text or "").strip()

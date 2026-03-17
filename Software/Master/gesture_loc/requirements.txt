@@ -1,0 +1,6 @@
+mediapipe==0.10.21
+fastapi>=0.115
+uvicorn>=0.30
+opencv-python-headless>=4.10
+PyYAML>=6.0
+pydantic>=2.8
