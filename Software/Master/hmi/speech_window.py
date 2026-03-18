@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import atexit
 import io
 import json
 import os
 import re
+import select
 import shutil
 import subprocess
 import tempfile
@@ -13,6 +15,7 @@ import threading
 import time
 import uuid
 import wave
+import ast
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -77,9 +80,132 @@ OPENCLAW_BIN_DEFAULT = "openclaw"
 OPENCLAW_AGENT_ID_DEFAULT = "main"
 OPENCLAW_TIMEOUT_SEC_DEFAULT = 90.0
 OPENCLAW_SKILL_NAME_DEFAULT = "soarmmoce-control"
+OPENCLAW_LOCAL_DIR = REPO_ROOT / "Software" / "Master" / "openclaw_local"
+OPENCLAW_GATEWAY_BRIDGE_SCRIPT_DEFAULT = OPENCLAW_LOCAL_DIR / "openclaw_gateway_bridge.js"
 SDK_SRC = REPO_ROOT / "sdk" / "src"
 
 OPENCLAW_THINKING_DEFAULT = "minimal"
+
+
+class _OpenClawGatewayBridgeManager:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._proc: Optional[subprocess.Popen[str]] = None
+
+    def _resolve_node_bin(self) -> str:
+        env_bin = str(os.getenv("OPENCLAW_NODE_BIN", "")).strip()
+        if env_bin:
+            return env_bin
+        return shutil.which("node") or shutil.which("nodejs") or ""
+
+    def _resolve_script_path(self) -> Path:
+        raw = str(
+            os.getenv("OPENCLAW_GATEWAY_BRIDGE_SCRIPT", str(OPENCLAW_GATEWAY_BRIDGE_SCRIPT_DEFAULT))
+        ).strip()
+        return Path(raw).expanduser().resolve()
+
+    def available(self) -> bool:
+        node_bin = self._resolve_node_bin()
+        script_path = self._resolve_script_path()
+        return bool(node_bin) and script_path.exists() and script_path.is_file()
+
+    def _stop_locked(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stop_locked()
+
+    def _ensure_proc_locked(self) -> subprocess.Popen[str]:
+        if self._proc is not None and self._proc.poll() is None:
+            return self._proc
+
+        self._stop_locked()
+        node_bin = self._resolve_node_bin()
+        script_path = self._resolve_script_path()
+        if not node_bin:
+            raise RuntimeError("Node.js 不可用，无法启动 OpenClaw Gateway bridge")
+        if not script_path.exists():
+            raise RuntimeError(f"OpenClaw Gateway bridge 不存在: {script_path}")
+
+        env = os.environ.copy()
+        env.setdefault("NODE_NO_WARNINGS", "1")
+        self._proc = subprocess.Popen(
+            [node_bin, str(script_path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            cwd=str(REPO_ROOT),
+            env=env,
+        )
+        return self._proc
+
+    def _readline_locked(self, timeout_sec: float) -> str:
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            raise RuntimeError("OpenClaw Gateway bridge 尚未启动")
+        timeout = max(1.0, float(timeout_sec))
+        ready, _, _ = select.select([proc.stdout], [], [], timeout)
+        if not ready:
+            raise RuntimeError(f"OpenClaw Gateway bridge 超时 ({timeout:.1f}s)")
+        line = proc.stdout.readline()
+        if not line:
+            raise RuntimeError("OpenClaw Gateway bridge 已退出")
+        return line
+
+    def request(self, payload: Dict[str, Any], timeout_sec: float) -> Dict[str, Any]:
+        with self._lock:
+            last_exc: Optional[Exception] = None
+            for _ in range(2):
+                proc = self._ensure_proc_locked()
+                if proc.stdin is None:
+                    self._stop_locked()
+                    raise RuntimeError("OpenClaw Gateway bridge stdin 不可用")
+                try:
+                    proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                    proc.stdin.flush()
+                    raw = self._readline_locked(timeout_sec)
+                    message = json.loads(raw)
+                    if not isinstance(message, dict):
+                        raise RuntimeError("OpenClaw Gateway bridge 返回了非 JSON 对象")
+                    if str(message.get("id", "")) != str(payload.get("id", "")):
+                        raise RuntimeError("OpenClaw Gateway bridge 返回了不匹配的请求 ID")
+                    if not bool(message.get("ok")):
+                        err = str(message.get("error", "")).strip() or "OpenClaw Gateway bridge 请求失败"
+                        raise RuntimeError(err)
+                    body = message.get("payload")
+                    if not isinstance(body, dict):
+                        raise RuntimeError("OpenClaw Gateway bridge payload 格式无效")
+                    return body
+                except Exception as exc:
+                    last_exc = exc
+                    self._stop_locked()
+            if last_exc is not None:
+                raise RuntimeError(f"OpenClaw Gateway bridge 调用失败: {last_exc}") from last_exc
+            raise RuntimeError("OpenClaw Gateway bridge 调用失败")
+
+
+_OPENCLAW_GATEWAY_BRIDGE = _OpenClawGatewayBridgeManager()
+atexit.register(_OPENCLAW_GATEWAY_BRIDGE.stop)
 
 
 def _audio_input_unavailable_message() -> str:
@@ -267,12 +393,23 @@ def _extract_openclaw_session_id(payload: Any) -> str:
         return ""
     meta = payload.get("meta")
     if not isinstance(meta, dict):
+        for key in ("result", "data", "payload", "output"):
+            sid = _extract_openclaw_session_id(payload.get(key))
+            if sid:
+                return sid
         return ""
     agent_meta = meta.get("agentMeta")
-    if not isinstance(agent_meta, dict):
-        return ""
-    sid = agent_meta.get("sessionId")
-    return str(sid).strip() if sid is not None else ""
+    if isinstance(agent_meta, dict):
+        sid = agent_meta.get("sessionId")
+        if sid is not None:
+            text = str(sid).strip()
+            if text:
+                return text
+    for key in ("result", "data", "payload", "output"):
+        sid = _extract_openclaw_session_id(payload.get(key))
+        if sid:
+            return sid
+    return ""
 
 
 def _looks_like_node_request(text: str) -> bool:
@@ -647,6 +784,13 @@ def _default_input_device_index() -> Optional[int]:
         if not device:
             return None
         device = device[0]
+    elif not isinstance(device, (int, float, str)):
+        try:
+            parsed = ast.literal_eval(str(device))
+        except Exception:
+            parsed = None
+        if isinstance(parsed, (list, tuple)) and parsed:
+            device = parsed[0]
     try:
         device_index = int(device)
     except Exception:
@@ -1280,6 +1424,47 @@ class _OpenClawAgentWorker(QThread):
         self._skill_name = str(skill_name or OPENCLAW_SKILL_NAME_DEFAULT).strip() or OPENCLAW_SKILL_NAME_DEFAULT
         self._robot_mode = bool(robot_mode)
         self._node_retry_count = max(0, int(node_retry_count))
+        self._gateway_bridge_enabled = _env_bool("OPENCLAW_GATEWAY_BRIDGE_ENABLED", True)
+
+    def _should_use_gateway_bridge(self) -> bool:
+        if self._local_mode:
+            return False
+        if not self._gateway_bridge_enabled:
+            return False
+        return _OPENCLAW_GATEWAY_BRIDGE.available()
+
+    def _build_bridge_payload(self, message: str) -> Dict[str, Any]:
+        return {
+            "id": str(uuid.uuid4()),
+            "op": "agent_turn",
+            "message": str(message or ""),
+            "agent_id": self._agent_id,
+            "thinking": self._thinking,
+            "timeout_sec": self._timeout_sec,
+        }
+
+    def _invoke_openclaw_bridge_once(self, message: str) -> Dict[str, Any]:
+        result = _OPENCLAW_GATEWAY_BRIDGE.request(
+            self._build_bridge_payload(message),
+            timeout_sec=self._timeout_sec + 5.0,
+        )
+        reply = str(result.get("reply", "")).strip()
+        session_id = str(result.get("session_id", "")).strip()
+        payload = {
+            "text": reply,
+            "meta": {"agentMeta": {"sessionId": session_id}},
+            "result": {"meta": {"agentMeta": {"sessionId": session_id}}},
+            "bridge": {
+                "runId": str(result.get("run_id", "")).strip(),
+                "sessionKey": str(result.get("session_key", "")).strip(),
+                "timing": result.get("timing", {}),
+            },
+        }
+        return {
+            "payload": payload,
+            "stdout": "",
+            "stderr": "",
+        }
 
     def _build_subprocess_env(self) -> Dict[str, str]:
         env = os.environ.copy()
@@ -1313,6 +1498,14 @@ class _OpenClawAgentWorker(QThread):
         return cmd
 
     def _invoke_openclaw_once(self, message: str, session_id: str) -> Dict[str, Any]:
+        if self._should_use_gateway_bridge():
+            try:
+                return self._invoke_openclaw_bridge_once(message)
+            except Exception as exc:
+                print(
+                    f"[Speech][OpenClawBridge] fallback_to_cli reason={exc}",
+                    flush=True,
+                )
         cmd = self._build_agent_cmd(message=message, session_id=session_id)
         cwd = None
         env = self._build_subprocess_env()
@@ -2190,9 +2383,9 @@ class SpeechInputWindow(QWidget):
 
     def _on_stt_done(self, text: str):
         self._last_text = str(text).strip()
-        self.transcript_ready.emit(self._last_text)
         if not self._last_text:
             self._status_text = "未识别到有效文本"
+            self.transcript_ready.emit(self._last_text)
             self.update()
             return
 
@@ -2200,6 +2393,7 @@ class SpeechInputWindow(QWidget):
             self._start_openclaw(self._last_text)
         else:
             self._status_text = self._last_text
+        self.transcript_ready.emit(self._last_text)
         self.update()
 
     def _on_stt_failed(self, error_text: str):
