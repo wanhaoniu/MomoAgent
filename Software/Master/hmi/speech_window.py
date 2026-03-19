@@ -1698,6 +1698,7 @@ class SpeechInputWindow(QWidget):
         self._stt_worker: Optional[_SttWorker] = None
         self._openclaw_worker: Optional[_OpenClawAgentWorker] = None
         self._tts_worker: Optional[QThread] = None
+        self._pending_tts_text = ""
 
         self._stt_provider = _normalize_stt_provider(
             _runtime_env_get("SOARMMOCE_STT_PROVIDER", STT_PROVIDER_DEFAULT, runtime_env)
@@ -2080,7 +2081,9 @@ class SpeechInputWindow(QWidget):
     def set_minimax_config(self, api_key: str, stt_url: Optional[str] = None, model: Optional[str] = None):
         self.set_groq_config(api_key=api_key, stt_url=stt_url, model=model)
 
-    def _stop_tts_playback(self, wait_ms: int = 1000):
+    def _stop_tts_playback(self, wait_ms: int = 1000, clear_pending: bool = False):
+        if clear_pending:
+            self._pending_tts_text = ""
         worker = self._tts_worker
         if worker is None:
             self._is_tts_running = False
@@ -2105,18 +2108,7 @@ class SpeechInputWindow(QWidget):
         else:
             self._is_tts_running = True
 
-    def _start_tts(self, reply_text: str):
-        text = str(reply_text or "").strip()
-        if not text or not self._tts_enabled:
-            return
-
-        self._stop_tts_playback(wait_ms=500)
-        if self._tts_worker is not None and self._tts_worker.isRunning():
-            msg = "语音播报仍在停止中，已跳过本次播报"
-            self.tts_failed.emit(msg)
-            return
-
-        self._is_tts_running = True
+    def _build_tts_worker(self, text: str) -> QThread:
         provider = _normalize_tts_provider(self._tts_provider)
         self._tts_provider = provider
         if provider == "cosyvoice":
@@ -2128,7 +2120,7 @@ class SpeechInputWindow(QWidget):
                 f"prompt_wav={self._cosyvoice_tts_prompt_wav} "
                 f"backend={self._tts_playback_backend}"
             )
-            self._tts_worker = _CosyVoiceTtsWorker(
+            worker: QThread = _CosyVoiceTtsWorker(
                 text=text,
                 base_url=self._cosyvoice_tts_url,
                 mode=self._cosyvoice_tts_mode,
@@ -2149,7 +2141,7 @@ class SpeechInputWindow(QWidget):
                 f"voice={self._groq_tts_voice} "
                 f"backend={self._tts_playback_backend}"
             )
-            self._tts_worker = _GroqTtsWorker(
+            worker = _GroqTtsWorker(
                 text=text,
                 api_key=self._groq_api_key,
                 url=self._groq_tts_url,
@@ -2160,8 +2152,23 @@ class SpeechInputWindow(QWidget):
                 max_chars=self._groq_tts_max_chars,
                 playback_backend=self._tts_playback_backend,
             )
-        self._tts_worker.failed.connect(self._on_tts_failed)
-        self._tts_worker.finished.connect(self._on_tts_finished)
+        worker.failed.connect(self._on_tts_failed)
+        worker.finished.connect(self._on_tts_finished)
+        return worker
+
+    def _start_tts(self, reply_text: str):
+        text = str(reply_text or "").strip()
+        if not text or not self._tts_enabled:
+            return
+
+        self._pending_tts_text = ""
+        self._stop_tts_playback(wait_ms=0)
+        if self._tts_worker is not None and self._tts_worker.isRunning():
+            self._pending_tts_text = text
+            return
+
+        self._is_tts_running = True
+        self._tts_worker = self._build_tts_worker(text)
         self._tts_worker.start()
 
     def _on_anim_tick(self):
@@ -2210,7 +2217,7 @@ class SpeechInputWindow(QWidget):
     def _start_listening(self):
         if self._is_listening or self._is_transcribing:
             return
-        self._stop_tts_playback(wait_ms=1500)
+        self._stop_tts_playback(wait_ms=1500, clear_pending=True)
         if self._tts_worker is not None and self._tts_worker.isRunning():
             self._status_text = "语音播报停止中，请稍候再说"
             self.update()
@@ -2424,6 +2431,10 @@ class SpeechInputWindow(QWidget):
         _log_tts("finished")
         self._tts_worker = None
         self.update()
+        pending_text = str(self._pending_tts_text or "").strip()
+        self._pending_tts_text = ""
+        if pending_text and self._tts_enabled:
+            QTimer.singleShot(0, lambda text=pending_text: self._start_tts(text))
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -2546,6 +2557,6 @@ class SpeechInputWindow(QWidget):
             except Exception:
                 pass
             self._openclaw_worker = None
-        self._stop_tts_playback(wait_ms=1000)
+        self._stop_tts_playback(wait_ms=1000, clear_pending=True)
         self.closed.emit()
         super().closeEvent(event)
