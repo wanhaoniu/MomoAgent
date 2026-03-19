@@ -2,7 +2,7 @@ app_name: smart-mirror-face-tracking-usb
 
 source:
   type: capture
-  capture_uri: ${FACE_TRACK_CAMERA_DEVICE:/dev/video0}
+  capture_uri: ${FACE_TRACK_CAMERA_DEVICE:/dev/video2}
   width: 1280
   height: 720
   fps: 30

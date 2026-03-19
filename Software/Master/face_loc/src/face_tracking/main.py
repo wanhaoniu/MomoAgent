@@ -94,6 +94,8 @@ def run_gui_service(config: AppConfig) -> None:
         while not getattr(server, "started", False) and server_thread.is_alive():
             time.sleep(0.05)
         service.run_visualizer_loop()
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received; stopping GUI mode")
     finally:
         server.should_exit = True
         server_thread.join(timeout=5.0)

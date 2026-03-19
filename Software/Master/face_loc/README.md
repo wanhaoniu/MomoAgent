@@ -33,31 +33,39 @@
 
 ## 环境安装
 
-推荐使用项目内虚拟环境：
+Ubuntu 上如果需要本地 OpenCV 预览窗口，推荐优先使用 conda 环境。当前仓库已经提供了 GUI 友好的 `environment.yml`，可直接创建：
 
 ```bash
-cd /Users/niuwanhao/Desktop/Intern/pp_skills/face_loc
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -r requirements.txt
+cd /home/ubuntu/Code/MoceClaw/Software/Master/face_loc
+source /home/ubuntu/miniconda3/etc/profile.d/conda.sh
+conda env create -f environment.yml -n moce-face-loc
+conda activate moce-face-loc
 ```
+
+说明：
+
+- 这个 conda 配置会安装 conda-forge 的 `opencv`，支持 `cv2.imshow()`。
+- 如果系统存在 `~/.local/lib/python*/site-packages` 里的用户级 `opencv-python-headless`，请确保环境里设置了 `PYTHONNOUSERSITE=1`，避免串包。
+
+如果你只跑服务接口、不需要本地窗口，也可以继续使用普通 venv 或 `--headless` 模式。
 
 ## 直接启动
 
 有窗口调试模式：
 
 ```bash
-cd /Users/niuwanhao/Desktop/Intern/pp_skills/face_loc
-source .venv/bin/activate
+cd /home/ubuntu/Code/MoceClaw/Software/Master/face_loc
+source /home/ubuntu/miniconda3/etc/profile.d/conda.sh
+conda activate moce-face-loc
 python main.py --config configs/default.yaml
 ```
 
 无窗口模式：
 
 ```bash
-cd /Users/niuwanhao/Desktop/Intern/pp_skills/face_loc
-source .venv/bin/activate
+cd /home/ubuntu/Code/MoceClaw/Software/Master/face_loc
+source /home/ubuntu/miniconda3/etc/profile.d/conda.sh
+conda activate moce-face-loc
 python main.py --config configs/default.yaml --headless
 ```
 

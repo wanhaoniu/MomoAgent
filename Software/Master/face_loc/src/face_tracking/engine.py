@@ -312,7 +312,7 @@ class TrackingEngine:
         with self._display_lock:
             return self._latest_display_frame, self._latest_display_frame_id
 
-    def run_visualizer_loop(self, poll_interval_sec: float = 0.01) -> None:
+    def run_visualizer_loop(self, poll_interval_sec: float = 0.02) -> None:
         if not self.visualizer:
             return
 
@@ -331,7 +331,6 @@ class TrackingEngine:
                     if not keep_running:
                         self._stop_event.set()
                         break
-                else:
-                    time.sleep(poll_interval_sec)
+                time.sleep(poll_interval_sec)
         finally:
             self.visualizer.close()
