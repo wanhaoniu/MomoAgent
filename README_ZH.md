@@ -1,4 +1,6 @@
-# SOARM-Moce 🤖
+# MomoAgent 🤖
+> 🏆 **荣获清华大学黑客松二等奖！**（[查看证书](images/prize.pdf)）
+>
 > 基于 SOARM101 的二次开发增强版机械臂：更高负载、更大工作空间、同等控制方式与精度体验  
 
 <p align="center">
@@ -15,13 +17,13 @@
 
 [English](README.md) | [中文](README_ZH.md)
 
-![SOARM-Moce Model Overview](images/1.JPG)
+![MomoAgent Model Overview](images/1.JPG)
 <!-- TODO: 替换为你的“模型总览”图片路径，例如 docs/media/overview.jpg -->
 
 ---
 
 ## 1. 项目简介
-**SOARM-Moce** 是我们在 **SOARM101** 基础上进行的二次开发版本：在保持 **相同 5 自由度（DOF）架构** 与 **Python + ROS 控制方式** 不变的前提下，通过对关键关节引入**金属减速模组强化**，显著提升了承载能力与结构刚度，同时扩大了工作空间覆盖范围。
+**MomoAgent** 是我们在 **SOARM101** 基础上进行的二次开发版本：在保持 **相同 5 自由度（DOF）架构** 与 **Python + ROS 控制方式** 不变的前提下，通过对关键关节引入**金属减速模组强化**，显著提升了承载能力与结构刚度，同时扩大了工作空间覆盖范围。
 
 ### 研发初衷
 我们最初是想给自己的 "mystery robot" 做一个 **affordable portable robotic arm**（经济实惠的便携式机械臂），但发现市场上没有可以满足的产品。因此，**MoceAI** 在 SO-ARM 舵机供应商 **飞特 (Feetech)** 的支持下，联合发布了这款开源机械臂。
@@ -38,8 +40,8 @@
 ![Model Overview](images/4.JPG)
 <!-- TODO: 模型总览图 -->
 
-### 2.2 SOARM101 vs SOARM-Moce 对比图
-![SOARM101 vs SOARM-Moce Comparison](images/3.JPG)
+### 2.2 SOARM101 vs MomoAgent 对比图
+![SOARM101 vs MomoAgent Comparison](images/3.JPG)
 <!-- TODO: 对比图（建议包含：负载/工作空间/结构强化点） -->
 
 ### 2.3 核心部位特写（关键关节金属减速模组）
@@ -57,10 +59,10 @@
 
 ---
 
-## 4. 核心指标对比（SOARM101 vs SOARM-Moce）
+## 4. 核心指标对比（SOARM101 vs MomoAgent）
 > 以下数据整理自项目对比材料：负载为实验结果，工作空间相关为 URDF 仿真结果。
 
-| 核心指标 | SOARM101 | SOARM-Moce | 变化 |
+| 核心指标 | SOARM101 | MomoAgent | 变化 |
 |---|---:|---:|---:|
 | 额定最大负载 (kg) | 0.3 | 1.5 | **3×** 提升 |
 | 极限负载 (kg) | – | 2.0 | 更高承载冗余 |
