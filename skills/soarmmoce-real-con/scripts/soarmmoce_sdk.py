@@ -327,7 +327,7 @@ def _resolve_model_offsets() -> Dict[str, float]:
 
 
 def resolve_config() -> SoArmMoceConfig:
-    port = _env_value("SOARMMOCE_PORT", default="/dev/tty.usbmodem5B141116301")
+    port = _env_value("SOARMMOCE_PORT", default="/dev/ttyACM0")
     urdf_path = _resolve_urdf_path()
     target_frame = _env_value("SOARMMOCE_TARGET_FRAME", default=DEFAULT_TARGET_FRAME)
     robot_id, chosen_dir = _resolve_calibration_target()

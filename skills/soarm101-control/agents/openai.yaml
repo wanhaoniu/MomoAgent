@@ -1,4 +1,0 @@
-interface:
-  display_name: "Soarm101 Control"
-  short_description: "本地脚本或 SDK 控制 soarm101，默认只回复文本"
-  default_prompt: "Use $soarm101-control by calling its local helper scripts (`soarm101_state.py`, `soarm101_move.py`, `soarm101_gripper.py`) or by writing a short Python script that imports `SoArm101Controller` from `soarm101_sdk.py`; the SDK now interpolates motions for smoother movement without software step caps, and you should treat returned JSON as internal only and answer the user in concise natural language unless they explicitly ask for raw output."
