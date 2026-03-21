@@ -61,6 +61,8 @@ def main() -> None:
     p_home.add_argument("--timeout", type=float, default=None)
     p_home.add_argument("--trace", action="store_true")
 
+    sub.add_parser("init_home", help="Initialize the multi-turn runtime session from the calibrated home pose")
+    sub.add_parser("zero", help="Deprecated alias for init_home")
     sub.add_parser("stop", help="Hold current pose")
 
     args = parser.parse_args()
@@ -112,6 +114,8 @@ def main() -> None:
             )
         elif args.cmd == "home":
             result = arm.home(duration=args.duration, wait=args.wait, timeout=args.timeout, trace=args.trace)
+        elif args.cmd in {"init_home", "zero"}:
+            result = arm.init_multi_turn_home()
         else:
             result = arm.stop()
         print_success(result)

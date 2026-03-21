@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "valid": true,
+  "robot_id": "soarmmoce",
+  "source": "init_home",
+  "initialized_at": 1774110126.359008,
+  "updated_at": 1774110377.431126,
+  "joints": {
+    "shoulder_lift": {
+      "zero_raw_mod": 2735.0,
+      "last_raw_mod": 2732.0,
+      "continuous_raw": -3.0
+    },
+    "elbow_flex": {
+      "zero_raw_mod": 1522.0,
+      "last_raw_mod": 1528.0,
+      "continuous_raw": 6.0
+    }
+  }
+}

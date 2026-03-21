@@ -91,11 +91,21 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py joint --
 
 ### 5) 回零
 
+多圈关节在每次机械臂重新上电后，先执行一次 `init_home`，把当前标定好的 home 姿态登记成这次运行的有效 session：
+
+```bash
+python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py init_home
+```
+
+只有执行过这一步，后面的 `home` / `delta` / `xyz` 和多圈关节控制才会生效。
+
+### 6) 回零
+
 ```bash
 python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py home
 ```
 
-### 6) 人脸居中跟随
+### 7) 人脸居中跟随
 
 如果用户说开启人脸跟随模式，或者跟随我的脸等请运行：
 
@@ -122,6 +132,7 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_face_follow.py -
 from soarmmoce_sdk import SoArmMoceController
 
 arm = SoArmMoceController()
+arm.init_multi_turn_home()
 arm.move_delta(dz=0.01, frame="base")
 print(arm.get_state())
 ```
@@ -136,6 +147,7 @@ PYTHONPATH=~/.openclaw/skills/soarmmoce-real-con/scripts python3 /tmp/soarmmoce_
 
 - `SoArmMoceController().read()`
 - `SoArmMoceController().get_state()`
+- `SoArmMoceController().init_multi_turn_home()`
 - `SoArmMoceController().move_delta(...)`
 - `SoArmMoceController().move_to(...)`
 - `SoArmMoceController().move_joint(...)`

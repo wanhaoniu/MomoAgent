@@ -41,6 +41,7 @@ CALIBRATION_META_KEY = "_meta"
 MULTI_TURN_SETTLE_TOL_DEG = 0.5
 MULTI_TURN_SETTLE_MAX_ITERS = 6
 MULTI_TURN_SETTLE_WAIT_S = 0.08
+STARTUP_POSE_FILE_SUFFIX = ".startup_pose.json"
 PRESENT_POSITION_READ_ATTEMPTS = 3
 PRESENT_POSITION_READ_RETRY = 1
 PRESENT_POSITION_READ_WAIT_S = 0.05
@@ -439,6 +440,8 @@ class SoArmMoceController:
         self._bus: Optional[FeetechMotorsBus] = None
         self._kin_chain = None
         self._multi_turn_state: Dict[str, Dict[str, float]] = {}
+        self._startup_joint_deg: Optional[Dict[str, float]] = None
+        self._startup_multi_turn_raw_mod: Optional[Dict[str, float]] = None
         self._calibration_payload = self._load_calibration_payload()
         self._home_joint_deg = self._resolve_calibration_home_joint_deg(self._calibration_payload)
         self._joint_limits_deg = self._compute_joint_limits_deg(self._calibration_payload)
@@ -460,6 +463,8 @@ class SoArmMoceController:
                 pass
         self._bus = None
         self._multi_turn_state = {}
+        self._startup_joint_deg = None
+        self._startup_multi_turn_raw_mod = None
 
     @staticmethod
     def _is_valid_present_position(value: Any) -> bool:
@@ -533,6 +538,40 @@ class SoArmMoceController:
                 "continuous_raw": 0.0,
             }
 
+    def _startup_pose_path(self) -> Path:
+        return (self.config.calib_dir / f"{self.config.robot_id}{STARTUP_POSE_FILE_SUFFIX}").resolve()
+
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def _capture_multi_turn_raw_mod(self, bus: FeetechMotorsBus) -> Dict[str, float]:
+        raw_motor = self._safe_read_present_position(bus, list(MULTI_TURN_JOINTS))
+        return {
+            name: float(raw_motor.get(name, 0.0) % RAW_COUNTS_PER_REV)
+            for name in MULTI_TURN_JOINTS
+        }
+
+    def _write_startup_pose_snapshot(self, payload: Dict[str, Any], *, overwrite: bool) -> Path:
+        path = self._startup_pose_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and not overwrite:
+            raise FileExistsError(f"Startup pose snapshot already exists: {path}")
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
+
+    def _load_startup_pose_snapshot(self) -> Dict[str, Any]:
+        path = self._startup_pose_path()
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Startup pose snapshot not found: {path}. "
+                "Capture it once right after power-on using capture_startup_pose()."
+            )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Startup pose snapshot must contain a JSON object: {path}")
+        return payload
+
     def meta(self) -> Dict[str, Any]:
         return {
             "connected": True,
@@ -553,6 +592,7 @@ class SoArmMoceController:
                 "user": "user-facing frame: x=forward, y=left, z=up",
                 "tool": "current tool frame",
             },
+            "startup_pose_path": str(self._startup_pose_path()),
             "gripper_available": False,
             "torque_on_connect": bool(self.config.torque_on_connect),
         }
@@ -932,6 +972,168 @@ class SoArmMoceController:
             trace_steps=trace_steps,
         )
         result = {"action": "home", "target_joints": target_home, "state": state}
+        if trace_steps is not None:
+            result["trace"] = self._finalize_trace(trace_steps)
+        return result
+
+    def reset_multi_turn_reference(self) -> Dict[str, Any]:
+        bus = self._ensure_bus()
+        self._prime_multi_turn_state_from_current_pose(bus)
+        state = self.get_state()
+        return {
+            "action": "reset_multi_turn_reference",
+            "multi_turn_state": self._snapshot_multi_turn_state(),
+            "state": state,
+        }
+
+    def capture_startup_pose(self, *, overwrite: bool = True) -> Dict[str, Any]:
+        bus = self._ensure_bus()
+        state = self.get_state()
+        joint_state = {name: float(state["joint_state"][name]) for name in JOINTS}
+        multi_turn_raw_mod = self._capture_multi_turn_raw_mod(bus)
+        self._startup_joint_deg = dict(joint_state)
+        self._startup_multi_turn_raw_mod = dict(multi_turn_raw_mod)
+        payload = {
+            "kind": "soarmmoce_startup_pose",
+            "created_at": self._utc_now_iso(),
+            "robot_id": self.config.robot_id,
+            "port": self.config.port,
+            "calibration_path": str((self.config.calib_dir / f"{self.config.robot_id}.json").resolve()),
+            "joint_state": joint_state,
+            "multi_turn_raw_mod": multi_turn_raw_mod,
+            "tool_offset_m": [float(v) for v in self.config.tool_offset_m],
+            "state": state,
+        }
+        path = self._write_startup_pose_snapshot(payload, overwrite=overwrite)
+        return {
+            "action": "capture_startup_pose",
+            "startup_pose_path": str(path),
+            "joint_state": joint_state,
+            "multi_turn_raw_mod": multi_turn_raw_mod,
+            "state": state,
+        }
+
+    def capture_pose_reference(self) -> Dict[str, Any]:
+        bus = self._ensure_bus()
+        state = self.get_state()
+        return {
+            "kind": "soarmmoce_pose_reference",
+            "created_at": self._utc_now_iso(),
+            "robot_id": self.config.robot_id,
+            "port": self.config.port,
+            "joint_state": {name: float(state["joint_state"][name]) for name in JOINTS},
+            "multi_turn_raw_mod": self._capture_multi_turn_raw_mod(bus),
+            "tool_offset_m": [float(v) for v in self.config.tool_offset_m],
+            "state": state,
+        }
+
+    def _restore_multi_turn_targets_from_snapshot(
+        self,
+        *,
+        bus: FeetechMotorsBus,
+        snapshot: Dict[str, Any],
+    ) -> Dict[str, float]:
+        snapshot_joint_state = snapshot.get("joint_state")
+        snapshot_multi_turn_raw_mod = snapshot.get("multi_turn_raw_mod")
+        if not isinstance(snapshot_joint_state, dict):
+            raise ValueError("Startup pose snapshot is missing joint_state")
+        if not isinstance(snapshot_multi_turn_raw_mod, dict):
+            raise ValueError("Startup pose snapshot is missing multi_turn_raw_mod")
+        current_joint_state = self._read_joint_state_from_bus(bus)
+
+        target: Dict[str, float] = {}
+        for name in JOINTS:
+            if name in MULTI_TURN_JOINTS:
+                continue
+            if name not in snapshot_joint_state:
+                raise ValueError(f"Startup pose snapshot is missing single-turn joint '{name}'")
+            target[name] = float(snapshot_joint_state[name])
+
+        current_raw_mod = self._capture_multi_turn_raw_mod(bus)
+        for name in MULTI_TURN_JOINTS:
+            if name not in snapshot_multi_turn_raw_mod:
+                raise ValueError(f"Startup pose snapshot is missing multi-turn raw mod for '{name}'")
+            saved_raw_mod = float(snapshot_multi_turn_raw_mod[name]) % RAW_COUNTS_PER_REV
+            now_raw_mod = float(current_raw_mod[name]) % RAW_COUNTS_PER_REV
+            delta_raw = saved_raw_mod - now_raw_mod
+            if delta_raw > HALF_RAW_COUNTS_PER_REV:
+                delta_raw -= RAW_COUNTS_PER_REV
+            elif delta_raw < -HALF_RAW_COUNTS_PER_REV:
+                delta_raw += RAW_COUNTS_PER_REV
+            motor_deg = delta_raw * 360.0 / RAW_COUNTS_PER_REV
+            target[name] = float(current_joint_state[name]) + self._motor_to_joint_deg(name, motor_deg)
+        return target
+
+    def restore_pose_reference(
+        self,
+        reference: Dict[str, Any],
+        *,
+        duration: float = 1.5,
+        wait: bool = True,
+        timeout: Optional[float] = None,
+        trace: bool = False,
+    ) -> Dict[str, Any]:
+        before = self.get_state()
+        trace_steps: Optional[list[Dict[str, Any]]] = [] if trace else None
+        target_pose = self._restore_multi_turn_targets_from_snapshot(
+            bus=self._ensure_bus(),
+            snapshot=reference,
+        )
+        state = self._move_joint_targets_smooth(
+            start_state=before,
+            target_cmd=target_pose,
+            duration=duration,
+            wait=wait,
+            timeout=timeout,
+            trace_steps=trace_steps,
+        )
+        result = {
+            "action": "restore_pose_reference",
+            "target_joints": target_pose,
+            "reference": reference,
+            "state": state,
+        }
+        if trace_steps is not None:
+            result["trace"] = self._finalize_trace(trace_steps)
+        return result
+
+    def restore_startup_pose(
+        self,
+        *,
+        duration: float = 1.5,
+        wait: bool = True,
+        timeout: Optional[float] = None,
+        trace: bool = False,
+    ) -> Dict[str, Any]:
+        before = self.get_state()
+        trace_steps: Optional[list[Dict[str, Any]]] = [] if trace else None
+        source = "memory"
+        if self._startup_joint_deg is not None and self._startup_multi_turn_raw_mod is not None:
+            target_startup = {name: float(self._startup_joint_deg[name]) for name in JOINTS}
+            startup_pose_path = self._startup_pose_path()
+        else:
+            source = "file"
+            snapshot = self._load_startup_pose_snapshot()
+            target_startup = self._restore_multi_turn_targets_from_snapshot(
+                bus=self._ensure_bus(),
+                snapshot=snapshot,
+            )
+            startup_pose_path = self._startup_pose_path()
+        state = self._move_joint_targets_smooth(
+            start_state=before,
+            target_cmd=target_startup,
+            duration=duration,
+            wait=wait,
+            timeout=timeout,
+            trace_steps=trace_steps,
+        )
+        result = {
+            "action": "restore_startup_pose",
+            "source": source,
+            "startup_pose_path": str(startup_pose_path),
+            "target_joints": target_startup,
+            "state": state,
+        }
         if trace_steps is not None:
             result["trace"] = self._finalize_trace(trace_steps)
         return result
