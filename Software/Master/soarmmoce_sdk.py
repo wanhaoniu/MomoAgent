@@ -41,6 +41,9 @@ CALIBRATION_META_KEY = "_meta"
 MULTI_TURN_SETTLE_TOL_DEG = 0.5
 MULTI_TURN_SETTLE_MAX_ITERS = 6
 MULTI_TURN_SETTLE_WAIT_S = 0.08
+PRESENT_POSITION_READ_ATTEMPTS = 3
+PRESENT_POSITION_READ_RETRY = 1
+PRESENT_POSITION_READ_WAIT_S = 0.05
 DEFAULT_HOME_JOINTS = {
     "shoulder_pan": 0.0,
     "shoulder_lift": 0.0,
@@ -112,6 +115,7 @@ class SoArmMoceConfig:
     home_joints: Dict[str, float]
     joint_scales: Dict[str, float]
     model_offsets_deg: Dict[str, float]
+    tool_offset_m: tuple[float, float, float]
     arm_p_coefficient: int
     arm_d_coefficient: int
     max_ee_pos_err_m: float
@@ -126,6 +130,7 @@ class SoArmMoceConfig:
     ik_step_scale: float
     ik_joint_step_deg: float
     ik_seed_bias: float
+    torque_on_connect: bool = True
 
 
 def _env_value(*keys: str, default: str = "") -> str:
@@ -137,6 +142,18 @@ def _env_value(*keys: str, default: str = "") -> str:
         if value:
             return value
     return default
+
+
+def _env_flag(*keys: str, default: bool) -> bool:
+    raw = _env_value(*keys, default="")
+    if not raw:
+        return bool(default)
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValidationError(f"Invalid boolean value for {'/'.join(keys)}: {raw}")
 
 
 def _load_calibration(robot_name: str, calib_dir: Path) -> dict[str, MotorCalibration]:
@@ -331,6 +348,25 @@ def _resolve_model_offsets() -> Dict[str, float]:
     return offsets
 
 
+def _resolve_tool_offset_m() -> tuple[float, float, float]:
+    raw = _env_value("SOARMMOCE_TOOL_OFFSET_M", default="0,0,0")
+    text = str(raw).strip()
+    if not text:
+        return (0.0, 0.0, 0.0)
+    try:
+        if text.startswith("["):
+            payload = json.loads(text)
+            if not isinstance(payload, list) or len(payload) != 3:
+                raise ValidationError("SOARMMOCE_TOOL_OFFSET_M JSON form must be a 3-element list")
+            return tuple(float(value) for value in payload)
+        parts = [part for part in text.replace(";", ",").replace(" ", ",").split(",") if part]
+        if len(parts) != 3:
+            raise ValidationError("SOARMMOCE_TOOL_OFFSET_M must contain exactly 3 numbers")
+        return tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise ValidationError(f"Invalid numeric value in SOARMMOCE_TOOL_OFFSET_M: {raw}") from exc
+
+
 def resolve_config() -> SoArmMoceConfig:
     port = _env_value("SOARMMOCE_PORT", default="/dev/ttyACM0")
     urdf_path = _resolve_urdf_path()
@@ -346,6 +382,7 @@ def resolve_config() -> SoArmMoceConfig:
         home_joints=_resolve_home_joints(),
         joint_scales=_resolve_joint_scales(),
         model_offsets_deg=_resolve_model_offsets(),
+        tool_offset_m=_resolve_tool_offset_m(),
         arm_p_coefficient=int(_env_value("SOARMMOCE_ARM_P_COEFFICIENT", default="16")),
         arm_d_coefficient=int(_env_value("SOARMMOCE_ARM_D_COEFFICIENT", default="8")),
         max_ee_pos_err_m=float(_env_value("SOARMMOCE_MAX_EE_POS_ERR_M", default="0.02")),
@@ -360,6 +397,7 @@ def resolve_config() -> SoArmMoceConfig:
         ik_step_scale=float(_env_value("SOARMMOCE_IK_STEP_SCALE", default="0.8")),
         ik_joint_step_deg=float(_env_value("SOARMMOCE_IK_JOINT_STEP_DEG", default="8.0")),
         ik_seed_bias=float(_env_value("SOARMMOCE_IK_SEED_BIAS", default="0.02")),
+        torque_on_connect=_env_flag("SOARMMOCE_TORQUE_ON_CONNECT", default=True),
     )
 
 
@@ -423,8 +461,71 @@ class SoArmMoceController:
         self._bus = None
         self._multi_turn_state = {}
 
+    @staticmethod
+    def _is_valid_present_position(value: Any) -> bool:
+        if isinstance(value, bool):
+            return False
+        try:
+            return bool(np.isfinite(float(value)))
+        except (TypeError, ValueError):
+            return False
+
+    def _safe_read_present_position(
+        self,
+        bus: FeetechMotorsBus,
+        joints: Optional[list[str] | tuple[str, ...]] = None,
+    ) -> Dict[str, float]:
+        selected = [self._validate_joint_name(name) for name in (joints or JOINTS)]
+        requested_ids = [bus.motors[name].id for name in selected if name in bus.motors]
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, PRESENT_POSITION_READ_ATTEMPTS + 1):
+            try:
+                raw_motor = bus.sync_read(
+                    "Present_Position",
+                    selected,
+                    normalize=False,
+                    num_retry=PRESENT_POSITION_READ_RETRY,
+                )
+                if not isinstance(raw_motor, dict):
+                    raise RuntimeError(f"unexpected sync_read return type: {type(raw_motor).__name__}")
+                invalid = [
+                    name
+                    for name in selected
+                    if name not in raw_motor or not self._is_valid_present_position(raw_motor[name])
+                ]
+                if not invalid:
+                    return {name: float(raw_motor[name]) for name in selected}
+                raise RuntimeError(f"incomplete sync_read result for joints={invalid}")
+            except Exception as exc:
+                last_error = exc
+
+            try:
+                fallback: Dict[str, float] = {}
+                for name in selected:
+                    value = bus.read(
+                        "Present_Position",
+                        name,
+                        normalize=False,
+                        num_retry=PRESENT_POSITION_READ_RETRY,
+                    )
+                    if not self._is_valid_present_position(value):
+                        raise RuntimeError(f"invalid single read for {name}: {value!r}")
+                    fallback[name] = float(value)
+                return fallback
+            except Exception as exc:
+                last_error = exc
+
+            if attempt < PRESENT_POSITION_READ_ATTEMPTS:
+                time.sleep(PRESENT_POSITION_READ_WAIT_S)
+
+        detail = f"Failed to read Present_Position for joints={selected} ids={requested_ids}"
+        if last_error is not None:
+            raise HardwareError(f"{detail}: {type(last_error).__name__}: {last_error}") from last_error
+        raise HardwareError(detail)
+
     def _prime_multi_turn_state_from_current_pose(self, bus: FeetechMotorsBus) -> None:
-        raw_motor = bus.sync_read("Present_Position", normalize=False)
+        raw_motor = self._safe_read_present_position(bus, list(MULTI_TURN_JOINTS))
         for name in MULTI_TURN_JOINTS:
             raw_mod = float(raw_motor.get(name, 0.0) % RAW_COUNTS_PER_REV)
             self._multi_turn_state[name] = {
@@ -453,6 +554,7 @@ class SoArmMoceController:
                 "tool": "current tool frame",
             },
             "gripper_available": False,
+            "torque_on_connect": bool(self.config.torque_on_connect),
         }
 
     def _load_calibration_payload(self) -> Dict[str, Any]:
@@ -519,16 +621,20 @@ class SoArmMoceController:
         bus = self._ensure_bus()
         joints = self._read_joint_state_from_bus(bus)
         tf = self._forward_kinematics_from_arm_deg(np.array([joints[name] for name in ARM_JOINTS], dtype=float))
-        pose = self._transform_to_pose_dict(tf)
+        pose = self._tcp_pose_dict_from_ee_tf(tf)
         pose.pop("rot_matrix", None)
+        flange_pose = self._transform_to_pose_dict(tf)
+        flange_pose.pop("rot_matrix", None)
         return {
             "joint_state": joints,
             "tcp_pose": pose,
+            "flange_pose": flange_pose,
             "gripper": {
                 "available": False,
                 "installed": False,
                 "message": "gripper servo is not installed on this soarmMoce arm",
             },
+            "tool_offset_m": [float(value) for value in self.config.tool_offset_m],
             "timestamp": time.time(),
         }
 
@@ -556,7 +662,8 @@ class SoArmMoceController:
         current_tf = self._forward_kinematics_from_arm_deg(q_seed_deg)
         delta = np.array([float(dx), float(dy), float(dz)], dtype=float)
         resolved_delta = self._resolve_delta_in_model_frame(delta, frame=frame, current_tf=current_tf)
-        target_pos = np.asarray(current_tf.pos, dtype=float) + resolved_delta
+        current_tcp_pos = self._tcp_position_from_ee_tf(current_tf)
+        target_pos = current_tcp_pos + resolved_delta
 
         locked_joint_targets_deg = {
             joint_name: float(state["joint_state"][joint_name]) for joint_name in LOCKED_CARTESIAN_JOINTS
@@ -590,7 +697,7 @@ class SoArmMoceController:
             )
             q_target_deg = np.asarray(ik["q_target_deg"], dtype=float)
             achieved_tf = self._forward_kinematics_from_arm_deg(q_target_deg)
-            achieved_delta = np.asarray(achieved_tf.pos, dtype=float) - np.asarray(current_tf.pos, dtype=float)
+            achieved_delta = self._tcp_position_from_ee_tf(achieved_tf) - current_tcp_pos
             q_delta_deg = q_target_deg - q_seed_deg
             run_joint_targets.append(q_target_deg)
             run_tcp_deltas.append(achieved_delta)
@@ -651,17 +758,19 @@ class SoArmMoceController:
         wait: bool = True,
         timeout: Optional[float] = None,
         trace: bool = False,
+        lock_cartesian_joints: bool = True,
     ) -> Dict[str, Any]:
         if x is None and y is None and z is None:
             raise ValidationError("At least one of x/y/z is required")
         before = self.get_state()
         q_seed_deg = self._state_to_arm_q_deg(before)
         current_tf = self._forward_kinematics_from_arm_deg(q_seed_deg)
+        current_tcp_pos = self._tcp_position_from_ee_tf(current_tf)
         target_pos = np.array(
             [
-                float(current_tf.pos[0]) if x is None else float(x),
-                float(current_tf.pos[1]) if y is None else float(y),
-                float(current_tf.pos[2]) if z is None else float(z),
+                float(current_tcp_pos[0]) if x is None else float(x),
+                float(current_tcp_pos[1]) if y is None else float(y),
+                float(current_tcp_pos[2]) if z is None else float(z),
             ],
             dtype=float,
         )
@@ -673,6 +782,7 @@ class SoArmMoceController:
             wait=wait,
             timeout=timeout,
             trace_steps=trace_steps,
+            lock_cartesian_joints=lock_cartesian_joints,
         )
         result = {
             "action": "move_to",
@@ -706,7 +816,7 @@ class SoArmMoceController:
         q_seed_deg = self._state_to_arm_q_deg(before)
         current_tf = self._forward_kinematics_from_arm_deg(q_seed_deg)
         resolved_delta = self._resolve_delta_in_model_frame(delta, frame=frame, current_tf=current_tf)
-        target_pos = np.asarray(current_tf.pos, dtype=float) + resolved_delta
+        target_pos = self._tcp_position_from_ee_tf(current_tf) + resolved_delta
         trace_steps: Optional[list[Dict[str, Any]]] = [] if trace else None
         state = self._move_tcp_smooth(
             start_state=before,
@@ -872,32 +982,48 @@ class SoArmMoceController:
             passthrough_ids = {bus.motors[name].id for name in JOINTS if name in bus.motors}
             bus._unnormalize = types.MethodType(_make_passthrough_unnormalize(bus._unnormalize, passthrough_ids), bus)
 
-            bus.connect()
-            with bus.torque_disabled():
-                bus.configure_motors()
-                _sync_single_turn_calibration_registers(bus, calib)
-                for name in JOINTS:
-                    if name in MULTI_TURN_JOINTS:
-                        bus.write("Lock", name, 0)
-                        time.sleep(0.02)
-                        bus.write("Min_Position_Limit", name, 0)
-                        bus.write("Max_Position_Limit", name, 0)
-                        bus.write("Operating_Mode", name, 3)
-                        time.sleep(0.02)
-                        bus.write("Lock", name, 1)
+            try:
+                bus.connect()
+                bus.disable_torque()
+                try:
+                    bus.configure_motors()
+                    _sync_single_turn_calibration_registers(bus, calib)
+                    for name in JOINTS:
+                        if name in MULTI_TURN_JOINTS:
+                            bus.write("Lock", name, 0)
+                            time.sleep(0.02)
+                            bus.write("Min_Position_Limit", name, 0)
+                            bus.write("Max_Position_Limit", name, 0)
+                            bus.write("Operating_Mode", name, 3)
+                            time.sleep(0.02)
+                            bus.write("Lock", name, 1)
+                        else:
+                            bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
+                            bus.write("P_Coefficient", name, self.config.arm_p_coefficient)
+                            bus.write("I_Coefficient", name, 0)
+                            bus.write("D_Coefficient", name, self.config.arm_d_coefficient)
+                finally:
+                    if self.config.torque_on_connect:
+                        bus.enable_torque()
                     else:
-                        bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
-                        bus.write("P_Coefficient", name, self.config.arm_p_coefficient)
-                        bus.write("I_Coefficient", name, 0)
-                        bus.write("D_Coefficient", name, self.config.arm_d_coefficient)
+                        bus.disable_torque()
 
-            bus.enable_torque()
-            self._prime_multi_turn_state_from_current_pose(bus)
-            hold_cmd = self._build_single_turn_raw_hold_command(bus)
-            if hold_cmd:
-                bus.sync_write("Goal_Position", hold_cmd)
-            self._bus = bus
-            return bus
+                time.sleep(PRESENT_POSITION_READ_WAIT_S)
+                self._prime_multi_turn_state_from_current_pose(bus)
+                if self.config.torque_on_connect:
+                    hold_cmd = self._build_single_turn_raw_hold_command(bus)
+                    if hold_cmd:
+                        bus.sync_write("Goal_Position", hold_cmd)
+                self._bus = bus
+                return bus
+            except Exception:
+                disconnect = getattr(bus, "disconnect", None)
+                if callable(disconnect):
+                    try:
+                        disconnect()
+                    except Exception:
+                        pass
+                raise
 
     def _ensure_kin_chain(self):
         if self._kin_chain is not None:
@@ -941,6 +1067,37 @@ class SoArmMoceController:
             "quat_wxyz": quat_wxyz,
             "rot_matrix": np.asarray(tf.rot_mat, dtype=float),
         }
+
+    def _tool_offset_vector(self) -> np.ndarray:
+        return np.asarray(self.config.tool_offset_m, dtype=float).reshape(3)
+
+    def _tcp_position_from_ee_tf(self, ee_tf: kp.Transform) -> np.ndarray:
+        offset = self._tool_offset_vector()
+        if np.linalg.norm(offset) < 1e-12:
+            return np.asarray(ee_tf.pos, dtype=float)
+        return np.asarray(ee_tf.pos, dtype=float) + np.asarray(ee_tf.rot_mat, dtype=float) @ offset
+
+    def _tcp_pose_dict_from_ee_tf(self, ee_tf: kp.Transform) -> Dict[str, Any]:
+        pose = self._transform_to_pose_dict(ee_tf)
+        pose["xyz"] = self._tcp_position_from_ee_tf(ee_tf)
+        return pose
+
+    def _tcp_position_jacobian(self, chain: Any, q_current: np.ndarray, current_tf: kp.Transform) -> np.ndarray:
+        jacobian_full = np.asarray(chain.jacobian(q_current), dtype=float)
+        jacobian_pos = jacobian_full[:3, :]
+        if jacobian_pos.shape != (3, len(ARM_JOINTS)):
+            raise IKError(f"Unexpected Jacobian shape: {jacobian_pos.shape}")
+        offset = self._tool_offset_vector()
+        if np.linalg.norm(offset) < 1e-12:
+            return jacobian_pos
+        if jacobian_full.shape[0] < 6:
+            raise IKError(f"Unexpected Jacobian shape: {jacobian_full.shape}")
+        jacobian_rot = jacobian_full[3:6, :]
+        offset_world = np.asarray(current_tf.rot_mat, dtype=float) @ offset
+        correction = np.column_stack(
+            [np.cross(jacobian_rot[:, idx], offset_world) for idx in range(jacobian_rot.shape[1])]
+        )
+        return jacobian_pos + correction
 
     def _forward_kinematics_from_arm_deg(self, q_arm_deg: np.ndarray) -> kp.Transform:
         chain = self._ensure_kin_chain()
@@ -1000,7 +1157,7 @@ class SoArmMoceController:
 
         for iteration in range(1, max(1, int(self.config.ik_max_iters)) + 1):
             current_tf = chain.forward_kinematics(q_current)
-            current_pos = np.asarray(current_tf.pos, dtype=float)
+            current_pos = self._tcp_position_from_ee_tf(current_tf)
             pos_err_vec = target_pos - current_pos
             pos_err = float(np.linalg.norm(pos_err_vec))
             if pos_err < best_err:
@@ -1013,9 +1170,7 @@ class SoArmMoceController:
                     "iterations": iteration,
                 }
 
-            jacobian_full = np.asarray(chain.jacobian(q_current), dtype=float)[:3, :]
-            if jacobian_full.shape != (3, len(ARM_JOINTS)):
-                raise IKError(f"Unexpected Jacobian shape: {jacobian_full.shape}")
+            jacobian_full = self._tcp_position_jacobian(chain, q_current, current_tf)
             jacobian_pos = jacobian_full[:, active_indices]
             if jacobian_pos.shape != (3, len(active_indices)):
                 raise IKError(f"Unexpected Jacobian shape: {jacobian_pos.shape}")
@@ -1155,7 +1310,7 @@ class SoArmMoceController:
         }
 
     def _read_joint_state_from_bus(self, bus: FeetechMotorsBus) -> Dict[str, float]:
-        raw_motor = bus.sync_read("Present_Position", normalize=False)
+        raw_motor = self._safe_read_present_position(bus)
         joints: Dict[str, float] = {}
         for name in JOINTS:
             if name in MULTI_TURN_JOINTS:
@@ -1167,9 +1322,8 @@ class SoArmMoceController:
     def _get_current_joint_state(self) -> Dict[str, float]:
         return self._read_joint_state_from_bus(self._ensure_bus())
 
-    @staticmethod
-    def _read_raw_present_position(bus: FeetechMotorsBus) -> Dict[str, int]:
-        raw_motor = bus.sync_read("Present_Position", normalize=False)
+    def _read_raw_present_position(self, bus: FeetechMotorsBus) -> Dict[str, int]:
+        raw_motor = self._safe_read_present_position(bus)
         return {name: int(raw_motor.get(name, 0)) for name in JOINTS}
 
     def _build_single_turn_raw_hold_command(
@@ -1347,18 +1501,27 @@ class SoArmMoceController:
         wait: bool,
         timeout: Optional[float],
         trace_steps: Optional[list[Dict[str, Any]]] = None,
+        lock_cartesian_joints: bool = True,
     ) -> Dict[str, Any]:
         start_xyz = np.asarray(start_state["tcp_pose"]["xyz"], dtype=float)
         q_seed_deg = self._state_to_arm_q_deg(start_state)
         command_reference_joint_deg = {name: float(start_state["joint_state"][name]) for name in JOINTS}
-        locked_joint_targets_deg = {
-            joint_name: float(start_state["joint_state"][joint_name]) for joint_name in LOCKED_CARTESIAN_JOINTS
-        }
-        locked_single_turn_raw = {
-            name: int(value)
-            for name, value in self._read_raw_present_position(self._ensure_bus()).items()
-            if name in LOCKED_CARTESIAN_JOINTS and name not in MULTI_TURN_JOINTS
-        }
+        locked_joint_targets_deg = (
+            {
+                joint_name: float(start_state["joint_state"][joint_name]) for joint_name in LOCKED_CARTESIAN_JOINTS
+            }
+            if lock_cartesian_joints
+            else {}
+        )
+        locked_single_turn_raw = (
+            {
+                name: int(value)
+                for name, value in self._read_raw_present_position(self._ensure_bus()).items()
+                if name in LOCKED_CARTESIAN_JOINTS and name not in MULTI_TURN_JOINTS
+            }
+            if lock_cartesian_joints
+            else {}
+        )
         # Reject cartesian requests that cannot meet the configured final-position tolerance
         # before sending any waypoint to the bus. The incremental path can otherwise start
         # moving and only fail after the arm has already drifted toward an unreachable target.
@@ -1367,6 +1530,11 @@ class SoArmMoceController:
             q_seed_deg,
             locked_joint_targets_deg=locked_joint_targets_deg,
         )
+        final_target_joint_deg = {
+            name: float(final_target_ik["q_target_deg"][idx])
+            for idx, name in enumerate(ARM_JOINTS)
+        }
+        final_waypoint_joint_deg = dict(final_target_joint_deg)
         state = start_state
         deadline = None if timeout is None else time.monotonic() + float(timeout)
         try:
@@ -1374,7 +1542,7 @@ class SoArmMoceController:
                 cmd = {
                     name: float(final_target_ik["q_target_deg"][idx])
                     for idx, name in enumerate(ARM_JOINTS)
-                    if name not in LOCKED_CARTESIAN_JOINTS
+                    if not lock_cartesian_joints or name not in LOCKED_CARTESIAN_JOINTS
                 }
                 trace_entry = None
                 if trace_steps is not None:
@@ -1420,7 +1588,10 @@ class SoArmMoceController:
                 cmd = {
                     name: float(ik["q_target_deg"][idx])
                     for idx, name in enumerate(ARM_JOINTS)
-                    if name not in LOCKED_CARTESIAN_JOINTS
+                    if not lock_cartesian_joints or name not in LOCKED_CARTESIAN_JOINTS
+                }
+                final_waypoint_joint_deg = {
+                    name: float(ik["q_target_deg"][idx]) for idx, name in enumerate(ARM_JOINTS)
                 }
                 remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
                 trace_entry = None
@@ -1459,6 +1630,24 @@ class SoArmMoceController:
                 if settle_time > 0.0:
                     time.sleep(settle_time)
                     final_state = self.get_state()
+            final_state, final_multi_turn_corrections = self._refine_multi_turn_targets(
+                bus=self._ensure_bus(),
+                target_joint_deg=final_waypoint_joint_deg,
+                state=final_state,
+                deadline=deadline,
+            )
+            if trace_steps is not None and final_multi_turn_corrections:
+                trace_steps.append(
+                    {
+                        "mode": "cartesian_finalize",
+                        "step_index": int(len(trace_steps) + 1),
+                        "steps_total": int(len(trace_steps) + 1),
+                        "after_tcp_pose": self._xyz_dict(final_state["tcp_pose"]["xyz"]),
+                        "final_target_tcp": self._xyz_dict(target_pos),
+                        "multi_turn_settle_corrections": final_multi_turn_corrections,
+                        "joint_error_deg": self._joint_error_deg(final_waypoint_joint_deg, final_state["joint_state"]),
+                    }
+                )
             final_err = self._tcp_position_error_m(final_state, target_pos)
             if final_err > self.config.max_ee_pos_err_m:
                 raise IKError(
