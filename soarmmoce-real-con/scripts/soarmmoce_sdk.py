@@ -22,11 +22,9 @@ from lerobot.motors.feetech import FeetechMotorsBus, OperatingMode
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = SKILL_ROOT.parents[1]
 RESOURCE_ROOT = SKILL_ROOT / "resources"
 DEFAULT_CALIB_DIR = SKILL_ROOT / "calibration"
 DEFAULT_URDF_PATH = RESOURCE_ROOT / "urdf" / "soarmoce_urdf.urdf"
-LEGACY_SDK_URDF_PATH = REPO_ROOT / "sdk" / "src" / "soarmmoce_sdk" / "resources" / "urdf" / "soarmoce_urdf.urdf"
 DEFAULT_RUNTIME_DIR = SKILL_ROOT / "workspace" / "runtime"
 JOINTS = [
     "shoulder_pan",
@@ -133,8 +131,6 @@ class SoArmMoceConfig:
     ik_step_scale: float
     ik_joint_step_deg: float
     ik_seed_bias: float
-    disable_soft_joint_limits: bool
-    soft_joint_limit_margin_deg: Dict[str, float]
 
 
 def _env_value(*keys: str, default: str = "") -> str:
@@ -146,13 +142,6 @@ def _env_value(*keys: str, default: str = "") -> str:
         if value:
             return value
     return default
-
-
-def _env_flag(*keys: str, default: bool = False) -> bool:
-    raw = _env_value(*keys, default="")
-    if not raw:
-        return bool(default)
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_calibration(robot_name: str, calib_dir: Path) -> dict[str, MotorCalibration]:
@@ -260,16 +249,7 @@ def _candidate_urdf_paths() -> list[Path]:
     env = _env_value("SOARMMOCE_URDF_PATH")
     candidates: list[Path] = []
     if env:
-        env_path = Path(env).expanduser()
-        try:
-            env_is_legacy_sdk_path = env_path.resolve() == LEGACY_SDK_URDF_PATH.resolve()
-        except Exception:
-            env_is_legacy_sdk_path = False
-        if env_is_legacy_sdk_path and DEFAULT_URDF_PATH.exists():
-            # Older shell setup exported the packaged SDK URDF path by default. The skill-local
-            # URDF is now the control source of truth, so prefer it even if the stale env var lingers.
-            candidates.append(DEFAULT_URDF_PATH)
-        candidates.append(env_path)
+        candidates.append(Path(env).expanduser())
     candidates.append(DEFAULT_URDF_PATH)
     unique: list[Path] = []
     seen: set[str] = set()
@@ -301,38 +281,9 @@ def _resolve_runtime_dir() -> Path:
     return Path(env).expanduser() if env else DEFAULT_RUNTIME_DIR
 
 
-def _load_calibration_meta(calib_dir: Path, robot_id: str) -> Dict[str, Any]:
-    fpath = Path(calib_dir).expanduser() / f"{robot_id}.json"
-    if not fpath.exists():
-        return {}
-    try:
-        payload = json.loads(fpath.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    meta = payload.get(CALIBRATION_META_KEY)
-    return meta if isinstance(meta, dict) else {}
-
-
-def _resolve_joint_scales(*, calib_dir: Optional[Path] = None, robot_id: str = "") -> Dict[str, float]:
+def _resolve_joint_scales() -> Dict[str, float]:
     raw = _env_value("SOARMMOCE_JOINT_SCALE_JSON")
     scales = {name: float(value) for name, value in DEFAULT_JOINT_SCALES.items()}
-    calib_meta = (
-        _load_calibration_meta(Path(calib_dir), str(robot_id))
-        if calib_dir is not None and str(robot_id).strip()
-        else {}
-    )
-    raw_meta_scales = calib_meta.get("joint_scales")
-    if isinstance(raw_meta_scales, dict):
-        for joint_name, joint_value in raw_meta_scales.items():
-            joint = str(joint_name).strip()
-            if joint not in JOINTS or not isinstance(joint_value, (int, float)):
-                continue
-            scale = float(joint_value)
-            if abs(scale) < 1e-9:
-                continue
-            scales[joint] = scale
     if not raw:
         return scales
     try:
@@ -375,37 +326,8 @@ def _resolve_model_offsets() -> Dict[str, float]:
     return offsets
 
 
-def _resolve_soft_joint_limit_margin_deg() -> Dict[str, float]:
-    margins = {name: 0.0 for name in JOINTS}
-    raw_margin = _env_value("SOARMMOCE_SOFT_LIMIT_MARGIN_DEG")
-    if raw_margin:
-        try:
-            margin = max(0.0, float(raw_margin))
-        except ValueError as exc:
-            raise ValidationError(f"SOARMMOCE_SOFT_LIMIT_MARGIN_DEG must be numeric, got {raw_margin!r}") from exc
-        margins = {name: float(margin) for name in JOINTS}
-
-    raw_json = _env_value("SOARMMOCE_SOFT_LIMIT_MARGIN_DEG_JSON")
-    if not raw_json:
-        return margins
-    try:
-        payload = json.loads(raw_json)
-    except json.JSONDecodeError as exc:
-        raise ValidationError(f"Invalid JSON in SOARMMOCE_SOFT_LIMIT_MARGIN_DEG_JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValidationError("SOARMMOCE_SOFT_LIMIT_MARGIN_DEG_JSON must be a JSON object")
-    for joint_name, joint_value in payload.items():
-        joint = str(joint_name).strip()
-        if joint not in JOINTS:
-            raise ValidationError(f"Unknown joint in SOARMMOCE_SOFT_LIMIT_MARGIN_DEG_JSON: {joint}")
-        if not isinstance(joint_value, (int, float)):
-            raise ValidationError(f"Soft joint limit margin for {joint} must be numeric")
-        margins[joint] = max(0.0, float(joint_value))
-    return margins
-
-
 def resolve_config() -> SoArmMoceConfig:
-    port = _env_value("SOARMMOCE_PORT", default="/dev/ttyACM0")
+    port = _env_value("SOARMMOCE_PORT", default="/dev/tty.usbmodem5B141116301")
     urdf_path = _resolve_urdf_path()
     target_frame = _env_value("SOARMMOCE_TARGET_FRAME", default=DEFAULT_TARGET_FRAME)
     robot_id, chosen_dir = _resolve_calibration_target()
@@ -418,7 +340,7 @@ def resolve_config() -> SoArmMoceConfig:
         runtime_dir=_resolve_runtime_dir(),
         target_frame=target_frame,
         home_joints=_resolve_home_joints(),
-        joint_scales=_resolve_joint_scales(calib_dir=chosen_dir, robot_id=robot_id),
+        joint_scales=_resolve_joint_scales(),
         model_offsets_deg=_resolve_model_offsets(),
         arm_p_coefficient=int(_env_value("SOARMMOCE_ARM_P_COEFFICIENT", default="16")),
         arm_d_coefficient=int(_env_value("SOARMMOCE_ARM_D_COEFFICIENT", default="8")),
@@ -434,8 +356,6 @@ def resolve_config() -> SoArmMoceConfig:
         ik_step_scale=float(_env_value("SOARMMOCE_IK_STEP_SCALE", default="0.8")),
         ik_joint_step_deg=float(_env_value("SOARMMOCE_IK_JOINT_STEP_DEG", default="8.0")),
         ik_seed_bias=float(_env_value("SOARMMOCE_IK_SEED_BIAS", default="0.02")),
-        disable_soft_joint_limits=_env_flag("SOARMMOCE_DISABLE_SOFT_LIMITS", default=False),
-        soft_joint_limit_margin_deg=_resolve_soft_joint_limit_margin_deg(),
     )
 
 
@@ -556,15 +476,10 @@ class SoArmMoceController:
             "robot_type": "soarmmoce",
             "robot_id": self.config.robot_id,
             "port": self.config.port,
-            "calib_dir": str(self.config.calib_dir),
-            "urdf_path": str(self.config.urdf_path),
-            "target_frame": self.config.target_frame,
             "joint_names": list(JOINTS),
             "multi_turn_joints": list(MULTI_TURN_JOINTS),
             "joint_scales": dict(self.config.joint_scales),
             "model_offsets_deg": dict(self.config.model_offsets_deg),
-            "disable_soft_joint_limits": bool(self.config.disable_soft_joint_limits),
-            "soft_joint_limit_margin_deg": dict(self.config.soft_joint_limit_margin_deg),
             "home_joint_deg": dict(self._home_joint_deg),
             "joint_limits_deg": dict(self._joint_limits_deg),
             "multi_turn_session": self._multi_turn_session_info(),
@@ -1463,17 +1378,14 @@ class SoArmMoceController:
         *,
         current_joint_deg: Optional[Dict[str, float]] = None,
     ) -> None:
-        if bool(self.config.disable_soft_joint_limits):
-            return
         violations = []
         for name, target in target_joint_deg.items():
             if name not in self._joint_limits_deg:
                 continue
             limit = self._joint_limits_deg[name]
             target_deg = float(target)
-            margin_deg = max(0.0, float(self.config.soft_joint_limit_margin_deg.get(name, 0.0)))
-            min_deg = float(limit["min_deg"]) - margin_deg
-            max_deg = float(limit["max_deg"]) + margin_deg
+            min_deg = float(limit["min_deg"])
+            max_deg = float(limit["max_deg"])
             target_violation = self._joint_limit_violation_deg(target_deg, min_deg, max_deg)
             if target_violation <= 0.0:
                 continue

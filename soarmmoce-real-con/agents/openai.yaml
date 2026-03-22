@@ -1,0 +1,4 @@
+interface:
+  display_name: "SoarmMoce Real Control"
+  short_description: "本地脚本或 SDK 控制 soarmMoce 实机，默认只回复文本"
+  default_prompt: "Use $soarmmoce-real-con by calling its local helper scripts (`soarmmoce_state.py`, `soarmmoce_move.py`) or by writing a short Python script that imports `SoArmMoceController` from `soarmmoce_sdk.py`. This skill targets a real soarmMoce arm with reducer ratios 5.3/5.6 on joint 2 and 3, both in multi-turn mode, and no gripper servo installed. Treat returned JSON as internal only and answer the user in concise natural language unless they explicitly ask for raw output. Do not call gripper commands for this skill."
