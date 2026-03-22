@@ -118,13 +118,15 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_face_follow.py -
 - `shoulder_pan` 做水平居中
 - `shoulder_lift + elbow_flex` 做垂直居中
 - 默认先只做画面内 `x/y` 居中，不主动做前后距离修正
-- 当前默认方向符号为 `auto`：优先读取 `calibration/face_follow_signs.json`，必要时可用 `--reprobe-control-signs` 重探测
+- 如果显式开启 `--enable-depth true`，当前默认会用 `shoulder_lift + elbow_flex` 做基于人脸框面积的前后距离保持
+- 前后距离的参考值默认不是固定阈值，而是启动后前几帧人脸框面积的中位数
 - 丢失人脸时不报错，改为自动左右扫描寻找人脸
 - 脚本会持续运行，直到你手动 `Ctrl+C` 停止
 
 如果你还想额外叠加整体升降修正，再显式加 `--enable-lift true`。
 如果你只想保留单个垂直关节，可以显式加 `--tilt-secondary-joint none`。
 如果你还想恢复前后距离跟随，再显式加 `--enable-depth true`。
+如果你想改前后跟随的关节映射，可以再调 `--depth-joint` / `--depth-secondary-joint`。
 
 ## SDK 直接调用
 

@@ -25,6 +25,7 @@ from soarmmoce_sdk import (
 
 
 RAW_COUNTS_PER_REV = 4096
+DEFAULT_MULTI_TURN_HOME_TOLERANCE_RAW = 96
 HALF_RAW_COUNTS_PER_REV = RAW_COUNTS_PER_REV / 2.0
 DEFAULT_CONNECT_TIMEOUT_S = 8.0
 CALIBRATION_META_KEY = "_meta"
@@ -498,6 +499,7 @@ def _build_multi_turn_calibration_entry(
         "range_min": 0,
         "range_max": int(RAW_COUNTS_PER_REV - 1),
         "home_wrapped_raw": int(home_wrapped_raw),
+        "home_tolerance_raw": int(DEFAULT_MULTI_TURN_HOME_TOLERANCE_RAW),
         "min_relative_raw": int(min_relative_raw),
         "max_relative_raw": int(max_relative_raw),
     }
@@ -505,6 +507,7 @@ def _build_multi_turn_calibration_entry(
         "calibration_mode": "multi_turn_mode0_relative_tracking",
         "home_present_raw": int(home_present_raw),
         "home_present_wrapped_raw": int(home_wrapped_raw),
+        "home_tolerance_raw": int(DEFAULT_MULTI_TURN_HOME_TOLERANCE_RAW),
         "observed_range_min_raw": int(min_present_raw),
         "observed_range_max_raw": int(max_present_raw),
         "min_relative_raw": int(min_relative_raw),

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 import sys
 import time
 from dataclasses import dataclass
@@ -40,6 +41,10 @@ def _normalize_optional_joint(raw: str | None) -> Optional[str]:
     if value not in JOINTS:
         raise ValidationError(f"Unknown joint: {raw}")
     return value
+
+
+def _parse_bool(raw: Any) -> bool:
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _apply_joint_sign(
@@ -189,6 +194,61 @@ def _extract_face_metric(payload: dict[str, Any], metric_key: str) -> float:
     return float(offset[metric_key])
 
 
+def _merge_joint_target(
+    *,
+    targets: Dict[str, float],
+    axis: JointAxis,
+    current_joint_deg: float,
+    next_target: Optional[float],
+    min_command_deg: float,
+) -> bool:
+    if next_target is None:
+        return False
+    delta_deg = float(next_target) - float(current_joint_deg)
+    if abs(delta_deg) < float(min_command_deg):
+        return False
+    merged_target = float(targets.get(axis.joint_name, current_joint_deg)) + delta_deg
+    merged_target = _clamp(merged_target, axis.min_deg, axis.max_deg)
+    if abs(merged_target - float(targets.get(axis.joint_name, current_joint_deg))) < 1e-9:
+        return False
+    targets[axis.joint_name] = merged_target
+    return True
+
+
+def _observe_depth_reference(
+    *,
+    args: argparse.Namespace,
+    area_ratio: float,
+    samples: list[float],
+    locked_reference: Optional[float],
+) -> tuple[Optional[float], bool]:
+    if args.depth_target_area_ratio is not None:
+        return float(args.depth_target_area_ratio), False
+    if str(args.depth_reference_mode).strip().lower() == "midpoint":
+        midpoint = 0.5 * (float(args.depth_min_area_ratio) + float(args.depth_max_area_ratio))
+        return float(midpoint), False
+    if locked_reference is not None:
+        return float(locked_reference), False
+
+    samples.append(float(area_ratio))
+    warmup = max(1, int(args.depth_reference_warmup_frames))
+    if len(samples) < warmup:
+        return None, False
+
+    reference = float(statistics.median(samples[-warmup:]))
+    reference = _clamp(reference, float(args.depth_min_area_ratio), float(args.depth_max_area_ratio))
+    return reference, True
+
+
+def _cartesian_depth_delta(component: str, delta_value: float) -> Dict[str, float]:
+    comp = str(component).strip().lower() or "y"
+    return {
+        "dx": float(delta_value) if comp == "x" else 0.0,
+        "dy": float(delta_value) if comp == "y" else 0.0,
+        "dz": float(delta_value) if comp == "z" else 0.0,
+    }
+
+
 def _build_axis(
     *,
     joint_name: Optional[str],
@@ -274,12 +334,17 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
     active_joints = [joint for joint in [args.pan_joint, args.tilt_joint, args.tilt_secondary_joint] if joint is not None]
     if len(active_joints) != len(set(active_joints)):
         raise ValidationError("pan/tilt joints must be different")
+    depth_joints = [joint for joint in [args.depth_joint, args.depth_secondary_joint] if joint is not None]
+    if len(depth_joints) != len(set(depth_joints)):
+        raise ValidationError("depth joints must be different")
     if float(args.poll_interval_sec) < 0.0:
         raise ValidationError("--poll-interval-sec must be >= 0")
     if float(args.move_duration_sec) <= 0.0:
         raise ValidationError("--move-duration-sec must be > 0")
     if float(args.depth_area_dead_zone) < 0.0:
         raise ValidationError("--depth-area-dead-zone must be >= 0")
+    if int(args.depth_reference_warmup_frames) <= 0:
+        raise ValidationError("--depth-reference-warmup-frames must be >= 1")
     if args.command_interval_sec is not None and float(args.command_interval_sec) < 0.0:
         raise ValidationError("--command-interval-sec must be >= 0")
 
@@ -330,6 +395,24 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
         current_joint_deg=float(current_joint_state[args.tilt_secondary_joint]) if args.tilt_secondary_joint else 0.0,
         range_deg=args.tilt_secondary_range_deg,
     )
+    depth_joint_axis = _build_axis(
+        joint_name=args.depth_joint if args.enable_depth and args.depth_control_mode == "joint" else None,
+        metric_key="area_ratio",
+        gain_deg_per_norm=args.depth_gain_deg_per_area,
+        max_step_deg=args.depth_max_step_deg,
+        dead_zone_norm=args.depth_area_dead_zone,
+        current_joint_deg=float(current_joint_state[args.depth_joint]) if args.depth_joint else 0.0,
+        range_deg=args.depth_range_deg_joint,
+    )
+    depth_secondary_joint_axis = _build_axis(
+        joint_name=args.depth_secondary_joint if args.enable_depth and args.depth_control_mode == "joint" else None,
+        metric_key="area_ratio",
+        gain_deg_per_norm=args.depth_secondary_gain_deg_per_area,
+        max_step_deg=args.depth_secondary_max_step_deg,
+        dead_zone_norm=args.depth_area_dead_zone,
+        current_joint_deg=float(current_joint_state[args.depth_secondary_joint]) if args.depth_secondary_joint else 0.0,
+        range_deg=args.depth_secondary_range_deg_joint,
+    )
     lift_axis = CartesianAxis(
         name="lift_z",
         metric_key="ndy",
@@ -340,19 +423,16 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
         max_value=float(start_tcp["z"]) + float(args.lift_range_m),
     )
     depth_axis = CartesianAxis(
-        name="depth_x",
+        name=f"depth_{args.depth_component}",
         metric_key="area_ratio",
-        component="x",
+        component=str(args.depth_component),
         gain_per_metric=float(args.depth_gain_m_per_area),
         max_step=float(args.depth_max_step_m),
-        min_value=float(start_tcp["x"]) - float(args.depth_range_m),
-        max_value=float(start_tcp["x"]) + float(args.depth_range_m),
+        min_value=float(start_tcp[str(args.depth_component)]) - float(args.depth_range_m),
+        max_value=float(start_tcp[str(args.depth_component)]) + float(args.depth_range_m),
     )
-    depth_target_area_ratio = (
-        float(args.depth_target_area_ratio)
-        if args.depth_target_area_ratio is not None
-        else 0.5 * (float(args.depth_min_area_ratio) + float(args.depth_max_area_ratio))
-    )
+    depth_reference_area_ratio: Optional[float] = None
+    depth_reference_samples: list[float] = []
     wait_for_motion = bool(args.wait_for_motion)
     command_interval_sec = (
         float(args.command_interval_sec)
@@ -360,8 +440,16 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
         else max(float(args.move_duration_sec), float(args.poll_interval_sec))
     )
 
-    if pan_axis is None and tilt_axis is None and tilt_secondary_axis is None and not args.enable_lift and not args.enable_depth:
+    if (
+        pan_axis is None
+        and tilt_axis is None
+        and tilt_secondary_axis is None
+        and not args.enable_lift
+        and not args.enable_depth
+    ):
         raise ValidationError("At least one of pan/tilt/lift/depth control axes must be enabled")
+    if args.enable_depth and args.depth_control_mode == "joint" and depth_joint_axis is None and depth_secondary_joint_axis is None:
+        raise ValidationError("Joint depth mode requires --depth-joint or --depth-secondary-joint")
 
     calibration: list[dict[str, Any]] = []
     try:
@@ -396,12 +484,28 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
             explicit_sign=args.lift_effect_sign,
             calibration=calibration,
         )
-        depth_ready = (not args.enable_depth) or _apply_cartesian_sign(
-            axis=depth_axis,
-            axis_key="depth",
-            explicit_sign=args.depth_effect_sign,
-            calibration=calibration,
-        )
+        depth_ready = True
+        if args.enable_depth and args.depth_control_mode == "joint":
+            depth_ready = _apply_joint_sign(
+                axis=depth_joint_axis,
+                axis_key="depth_primary",
+                explicit_sign=args.depth_control_sign,
+                calibration=calibration,
+            )
+            depth_secondary_ready = _apply_joint_sign(
+                axis=depth_secondary_joint_axis,
+                axis_key="depth_secondary",
+                explicit_sign=args.depth_secondary_control_sign,
+                calibration=calibration,
+            )
+            depth_ready = depth_ready and depth_secondary_ready
+        elif args.enable_depth:
+            depth_ready = _apply_cartesian_sign(
+                axis=depth_axis,
+                axis_key="depth",
+                explicit_sign=args.depth_effect_sign,
+                calibration=calibration,
+            )
         next_motion_at = 0.0
         preferred_motion_mode = "joint"
         search_state = {
@@ -491,24 +595,36 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                 area_ratio = _extract_face_metric(payload, "area_ratio")
                 if pan_axis is not None:
                     next_target = pan_axis.compute_next_target(float(current_joint_state[pan_axis.joint_name]), ndx)
-                    if next_target is not None and abs(next_target - float(current_joint_state[pan_axis.joint_name])) >= args.min_command_deg:
-                        targets[pan_axis.joint_name] = next_target
+                    _merge_joint_target(
+                        targets=targets,
+                        axis=pan_axis,
+                        current_joint_deg=float(current_joint_state[pan_axis.joint_name]),
+                        next_target=next_target,
+                        min_command_deg=args.min_command_deg,
+                    )
                 if tilt_axis is not None:
                     next_target = tilt_axis.compute_next_target(float(current_joint_state[tilt_axis.joint_name]), ndy)
-                    if next_target is not None and abs(next_target - float(current_joint_state[tilt_axis.joint_name])) >= args.min_command_deg:
-                        targets[tilt_axis.joint_name] = next_target
+                    _merge_joint_target(
+                        targets=targets,
+                        axis=tilt_axis,
+                        current_joint_deg=float(current_joint_state[tilt_axis.joint_name]),
+                        next_target=next_target,
+                        min_command_deg=args.min_command_deg,
+                    )
                 if tilt_secondary_axis is not None:
                     next_target = tilt_secondary_axis.compute_next_target(
                         float(current_joint_state[tilt_secondary_axis.joint_name]),
                         ndy,
                     )
-                    if (
-                        next_target is not None
-                        and abs(next_target - float(current_joint_state[tilt_secondary_axis.joint_name])) >= args.min_command_deg
-                    ):
-                        targets[tilt_secondary_axis.joint_name] = next_target
+                    _merge_joint_target(
+                        targets=targets,
+                        axis=tilt_secondary_axis,
+                        current_joint_deg=float(current_joint_state[tilt_secondary_axis.joint_name]),
+                        next_target=next_target,
+                        min_command_deg=args.min_command_deg,
+                    )
 
-                delta_dx = 0.0
+                delta_depth = 0.0
                 delta_dz = 0.0
                 if args.enable_lift:
                     current_z = lift_axis.current_value(current_state)
@@ -519,22 +635,66 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         delta_dz = 0.0
 
                 if args.enable_depth:
-                    area_error = depth_target_area_ratio - area_ratio
-                    if abs(area_error) <= float(args.depth_area_dead_zone):
-                        area_error = 0.0
-                    current_x = depth_axis.current_value(current_state)
-                    depth_step = (
-                        depth_axis.compute_step(area_ratio, target_value=depth_target_area_ratio)
-                        if abs(area_error) > 1e-9
-                        else 0.0
+                    depth_target_area_ratio, depth_reference_locked = _observe_depth_reference(
+                        args=args,
+                        area_ratio=area_ratio,
+                        samples=depth_reference_samples,
+                        locked_reference=depth_reference_area_ratio,
                     )
-                    target_x = _clamp(current_x + depth_step, depth_axis.min_value, depth_axis.max_value)
-                    delta_dx = target_x - current_x
-                    if abs(delta_dx) < args.min_cartesian_step_m:
-                        delta_dx = 0.0
+                    if depth_reference_locked:
+                        depth_reference_area_ratio = depth_target_area_ratio
+                        _log(
+                            f"depth reference locked: area={depth_reference_area_ratio:.4f} "
+                            f"samples={max(1, int(args.depth_reference_warmup_frames))}"
+                        )
+                    if depth_target_area_ratio is None:
+                        _log(
+                            f"depth reference collecting: samples={len(depth_reference_samples)}/"
+                            f"{max(1, int(args.depth_reference_warmup_frames))} area={area_ratio:.4f}"
+                        )
+                    else:
+                        area_error = depth_target_area_ratio - area_ratio
+                        if abs(area_error) <= float(args.depth_area_dead_zone):
+                            area_error = 0.0
+                        if args.depth_control_mode == "joint":
+                            if depth_joint_axis is not None:
+                                next_target = depth_joint_axis.compute_next_target(
+                                    float(current_joint_state[depth_joint_axis.joint_name]),
+                                    area_error,
+                                )
+                                _merge_joint_target(
+                                    targets=targets,
+                                    axis=depth_joint_axis,
+                                    current_joint_deg=float(current_joint_state[depth_joint_axis.joint_name]),
+                                    next_target=next_target,
+                                    min_command_deg=args.min_command_deg,
+                                )
+                            if depth_secondary_joint_axis is not None:
+                                next_target = depth_secondary_joint_axis.compute_next_target(
+                                    float(current_joint_state[depth_secondary_joint_axis.joint_name]),
+                                    area_error,
+                                )
+                                _merge_joint_target(
+                                    targets=targets,
+                                    axis=depth_secondary_joint_axis,
+                                    current_joint_deg=float(current_joint_state[depth_secondary_joint_axis.joint_name]),
+                                    next_target=next_target,
+                                    min_command_deg=args.min_command_deg,
+                                )
+                        else:
+                            current_depth = depth_axis.current_value(current_state)
+                            depth_step = (
+                                depth_axis.compute_step(area_ratio, target_value=depth_target_area_ratio)
+                                if abs(area_error) > 1e-9
+                                else 0.0
+                            )
+                            target_depth = _clamp(current_depth + depth_step, depth_axis.min_value, depth_axis.max_value)
+                            delta_depth = target_depth - current_depth
+                            if abs(delta_depth) < args.min_cartesian_step_m:
+                                delta_depth = 0.0
 
                 iterations += 1
-                if not targets and abs(delta_dx) < 1e-12 and abs(delta_dz) < 1e-12:
+                if not targets and abs(delta_depth) < 1e-12 and abs(delta_dz) < 1e-12:
                     _log(
                         f"hold iter={iterations} frame={payload.get('frame_id')} "
                         f"ndx={ndx:+.4f} ndy={ndy:+.4f} area={area_ratio:.4f}"
@@ -554,9 +714,9 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         current_joint_state = dict(result["state"]["joint_state"])
                         commands_sent += 1
                         log_parts.append(f"targets={json.dumps(targets, ensure_ascii=False, sort_keys=True)}")
-                    if abs(delta_dx) >= 1e-12 or abs(delta_dz) >= 1e-12:
+                    if abs(delta_depth) >= 1e-12 or abs(delta_dz) >= 1e-12:
                         result = arm.move_delta(
-                            dx=delta_dx,
+                            **_cartesian_depth_delta(args.depth_component, delta_depth),
                             dz=delta_dz,
                             frame="urdf",
                             duration=args.move_duration_sec,
@@ -565,11 +725,13 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         current_state = result["state"]
                         current_joint_state = dict(result["state"]["joint_state"])
                         commands_sent += 1
-                        log_parts.append(f"delta={{\"dx\": {delta_dx:+.4f}, \"dz\": {delta_dz:+.4f}}}")
+                        log_parts.append(
+                            f"delta={{\"d{args.depth_component}\": {delta_depth:+.4f}, \"dz\": {delta_dz:+.4f}}}"
+                        )
                 else:
                     mode, preferred_motion_mode = _select_motion_mode(
                         has_joint_targets=bool(targets),
-                        has_cartesian_delta=abs(delta_dx) >= 1e-12 or abs(delta_dz) >= 1e-12,
+                        has_cartesian_delta=abs(delta_depth) >= 1e-12 or abs(delta_dz) >= 1e-12,
                         preferred_mode=preferred_motion_mode,
                     )
                     if mode == "joint":
@@ -582,11 +744,11 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         next_motion_at = time.monotonic() + command_interval_sec
                         log_parts.append(f"mode={mode}")
                         log_parts.append(f"targets={json.dumps(targets, ensure_ascii=False, sort_keys=True)}")
-                        if abs(delta_dx) >= 1e-12 or abs(delta_dz) >= 1e-12:
+                        if abs(delta_depth) >= 1e-12 or abs(delta_dz) >= 1e-12:
                             log_parts.append("deferred=cartesian")
                     elif mode == "cartesian":
                         arm.move_delta(
-                            dx=delta_dx,
+                            **_cartesian_depth_delta(args.depth_component, delta_depth),
                             dz=delta_dz,
                             frame="urdf",
                             duration=args.move_duration_sec,
@@ -595,7 +757,9 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         commands_sent += 1
                         next_motion_at = time.monotonic() + command_interval_sec
                         log_parts.append(f"mode={mode}")
-                        log_parts.append(f"delta={{\"dx\": {delta_dx:+.4f}, \"dz\": {delta_dz:+.4f}}}")
+                        log_parts.append(
+                            f"delta={{\"d{args.depth_component}\": {delta_depth:+.4f}, \"dz\": {delta_dz:+.4f}}}"
+                        )
                         if targets:
                             log_parts.append("deferred=joint")
                 _log(
@@ -676,20 +840,64 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                 },
                 "depth": None
                 if not args.enable_depth
-                else {
-                    "axis": depth_axis.name,
-                    "metric": depth_axis.metric_key,
-                    "effect_sign": depth_axis.effect_sign,
-                    "component": depth_axis.component,
-                    "gain_per_metric": depth_axis.gain_per_metric,
-                    "max_step": depth_axis.max_step,
-                    "min_value": depth_axis.min_value,
-                    "max_value": depth_axis.max_value,
-                    "min_area_ratio": args.depth_min_area_ratio,
-                    "max_area_ratio": args.depth_max_area_ratio,
-                    "target_area_ratio": depth_target_area_ratio,
-                    "area_dead_zone": args.depth_area_dead_zone,
-                },
+                else (
+                    {
+                        "mode": "joint",
+                        "reference_mode": args.depth_reference_mode,
+                        "reference_area_ratio": depth_reference_area_ratio,
+                        "metric": "area_ratio",
+                        "min_area_ratio": args.depth_min_area_ratio,
+                        "max_area_ratio": args.depth_max_area_ratio,
+                        "target_area_ratio": (
+                            float(args.depth_target_area_ratio)
+                            if args.depth_target_area_ratio is not None
+                            else depth_reference_area_ratio
+                        ),
+                        "area_dead_zone": args.depth_area_dead_zone,
+                        "primary_joint": None
+                        if depth_joint_axis is None
+                        else {
+                            "joint": depth_joint_axis.joint_name,
+                            "control_sign": depth_joint_axis.control_sign,
+                            "gain_deg_per_area": depth_joint_axis.gain_deg_per_norm,
+                            "max_step_deg": depth_joint_axis.max_step_deg,
+                            "min_deg": depth_joint_axis.min_deg,
+                            "max_deg": depth_joint_axis.max_deg,
+                        },
+                        "secondary_joint": None
+                        if depth_secondary_joint_axis is None
+                        else {
+                            "joint": depth_secondary_joint_axis.joint_name,
+                            "control_sign": depth_secondary_joint_axis.control_sign,
+                            "gain_deg_per_area": depth_secondary_joint_axis.gain_deg_per_norm,
+                            "max_step_deg": depth_secondary_joint_axis.max_step_deg,
+                            "min_deg": depth_secondary_joint_axis.min_deg,
+                            "max_deg": depth_secondary_joint_axis.max_deg,
+                        },
+                    }
+                    if args.depth_control_mode == "joint"
+                    else {
+                        "mode": "cartesian",
+                        "reference_mode": args.depth_reference_mode,
+                        "reference_area_ratio": depth_reference_area_ratio,
+                        "axis": depth_axis.name,
+                        "metric": depth_axis.metric_key,
+                        "effect_sign": depth_axis.effect_sign,
+                        "component": depth_axis.component,
+                        "gain_per_metric": depth_axis.gain_per_metric,
+                        "max_step": depth_axis.max_step,
+                        "min_value": depth_axis.min_value,
+                        "max_value": depth_axis.max_value,
+                        "min_area_ratio": args.depth_min_area_ratio,
+                        "max_area_ratio": args.depth_max_area_ratio,
+                        "target_area_ratio": (
+                            float(args.depth_target_area_ratio)
+                            if args.depth_target_area_ratio is not None
+                            else depth_reference_area_ratio
+                        ),
+                        "area_dead_zone": args.depth_area_dead_zone,
+                    }
+                ),
             },
         }
     finally:
@@ -704,52 +912,68 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--move-duration-sec", type=float, default=0.12)
     parser.add_argument(
         "--home-on-start",
-        type=lambda raw: str(raw).strip().lower() not in {"0", "false", "no"},
+        type=_parse_bool,
         default=True,
         help="Move to configured home pose before follow control",
     )
     parser.add_argument("--home-duration-sec", type=float, default=1.5)
-    parser.set_defaults(
-        max_face_staleness_sec=1.5,
-        pan_control_sign=FIXED_PAN_CONTROL_SIGN,
-        tilt_control_sign=FIXED_TILT_CONTROL_SIGN,
-        tilt_secondary_control_sign=FIXED_TILT_SECONDARY_CONTROL_SIGN,
-        lift_effect_sign=None,
-        depth_effect_sign=None,
-        pan_joint="shoulder_pan",
-        tilt_joint="shoulder_lift",
-        tilt_secondary_joint="elbow_flex",
-        pan_range_deg=40.0,
-        tilt_range_deg=18.0,
-        tilt_secondary_range_deg=18.0,
-        pan_gain_deg_per_norm=10.0,
-        tilt_gain_deg_per_norm=4.5,
-        tilt_secondary_gain_deg_per_norm=3.5,
-        pan_max_step_deg=2.4,
-        tilt_max_step_deg=1.2,
-        tilt_secondary_max_step_deg=1.0,
-        dead_zone_ndx=0.06,
-        dead_zone_ndy=0.12,
-        min_command_deg=0.12,
-        enable_lift=False,
-        enable_depth=False,
-        lift_range_m=0.03,
-        depth_range_m=0.04,
-        lift_gain_m_per_norm=0.028,
-        depth_gain_m_per_area=0.14,
-        lift_max_step_m=0.008,
-        depth_max_step_m=0.012,
-        min_cartesian_step_m=0.0010,
-        depth_min_area_ratio=0.10,
-        depth_max_area_ratio=0.28,
-        depth_target_area_ratio=None,
-        depth_area_dead_zone=0.025,
-        search_miss_threshold=1,
-        search_pan_step_deg=1.6,
-        wait_for_motion=False,
-        command_interval_sec=None,
-        hold_on_exit=True,
+    parser.add_argument("--max-face-staleness-sec", type=float, default=1.5)
+    parser.add_argument("--pan-joint", default="shoulder_pan")
+    parser.add_argument("--tilt-joint", default="shoulder_lift")
+    parser.add_argument("--tilt-secondary-joint", default="elbow_flex")
+    parser.add_argument("--pan-control-sign", type=float, default=FIXED_PAN_CONTROL_SIGN)
+    parser.add_argument("--tilt-control-sign", type=float, default=FIXED_TILT_CONTROL_SIGN)
+    parser.add_argument("--tilt-secondary-control-sign", type=float, default=FIXED_TILT_SECONDARY_CONTROL_SIGN)
+    parser.add_argument("--pan-range-deg", type=float, default=40.0)
+    parser.add_argument("--tilt-range-deg", type=float, default=18.0)
+    parser.add_argument("--tilt-secondary-range-deg", type=float, default=18.0)
+    parser.add_argument("--pan-gain-deg-per-norm", type=float, default=10.0)
+    parser.add_argument("--tilt-gain-deg-per-norm", type=float, default=4.5)
+    parser.add_argument("--tilt-secondary-gain-deg-per-norm", type=float, default=3.5)
+    parser.add_argument("--pan-max-step-deg", type=float, default=2.4)
+    parser.add_argument("--tilt-max-step-deg", type=float, default=1.2)
+    parser.add_argument("--tilt-secondary-max-step-deg", type=float, default=1.0)
+    parser.add_argument("--dead-zone-ndx", type=float, default=0.06)
+    parser.add_argument("--dead-zone-ndy", type=float, default=0.12)
+    parser.add_argument("--min-command-deg", type=float, default=0.12)
+    parser.add_argument("--enable-lift", type=_parse_bool, default=False)
+    parser.add_argument("--lift-effect-sign", type=float, default=None)
+    parser.add_argument("--lift-range-m", type=float, default=0.03)
+    parser.add_argument("--lift-gain-m-per-norm", type=float, default=0.028)
+    parser.add_argument("--lift-max-step-m", type=float, default=0.008)
+    parser.add_argument("--min-cartesian-step-m", type=float, default=0.0010)
+    parser.add_argument("--enable-depth", type=_parse_bool, default=False)
+    parser.add_argument("--depth-control-mode", choices=["joint", "cartesian"], default="joint")
+    parser.add_argument("--depth-joint", default="shoulder_lift")
+    parser.add_argument("--depth-secondary-joint", default="elbow_flex")
+    parser.add_argument("--depth-control-sign", type=float, default=-1.0)
+    parser.add_argument("--depth-secondary-control-sign", type=float, default=-1.0)
+    parser.add_argument("--depth-range-deg-joint", type=float, default=18.0)
+    parser.add_argument("--depth-secondary-range-deg-joint", type=float, default=18.0)
+    parser.add_argument("--depth-gain-deg-per-area", type=float, default=16.0)
+    parser.add_argument("--depth-secondary-gain-deg-per-area", type=float, default=12.0)
+    parser.add_argument("--depth-max-step-deg", type=float, default=0.9)
+    parser.add_argument("--depth-secondary-max-step-deg", type=float, default=0.8)
+    parser.add_argument("--depth-component", choices=["x", "y", "z"], default="y")
+    parser.add_argument("--depth-effect-sign", type=float, default=-1.0)
+    parser.add_argument("--depth-range-m", type=float, default=0.04)
+    parser.add_argument("--depth-gain-m-per-area", type=float, default=0.14)
+    parser.add_argument("--depth-max-step-m", type=float, default=0.012)
+    parser.add_argument("--depth-min-area-ratio", type=float, default=0.10)
+    parser.add_argument("--depth-max-area-ratio", type=float, default=0.28)
+    parser.add_argument("--depth-target-area-ratio", type=float, default=None)
+    parser.add_argument("--depth-reference-mode", choices=["initial", "midpoint"], default="initial")
+    parser.add_argument("--depth-reference-warmup-frames", type=int, default=5)
+    parser.add_argument("--depth-area-dead-zone", type=float, default=0.025)
+    parser.add_argument("--search-miss-threshold", type=int, default=1)
+    parser.add_argument("--search-pan-step-deg", type=float, default=1.6)
+    parser.add_argument(
+        "--wait-for-motion",
+        type=lambda raw: str(raw).strip().lower() in {"1", "true", "yes", "on"},
+        default=False,
     )
+    parser.add_argument("--command-interval-sec", type=float, default=None)
+    parser.add_argument("--hold-on-exit", type=_parse_bool, default=True)
     return parser
 
 
@@ -757,8 +981,11 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     try:
+        args.pan_joint = _normalize_optional_joint(args.pan_joint)
         args.tilt_joint = _normalize_optional_joint(args.tilt_joint)
         args.tilt_secondary_joint = _normalize_optional_joint(args.tilt_secondary_joint)
+        args.depth_joint = _normalize_optional_joint(args.depth_joint)
+        args.depth_secondary_joint = _normalize_optional_joint(args.depth_secondary_joint)
         print_success(run_face_follow(args))
     except KeyboardInterrupt as exc:
         print_error(exc)
