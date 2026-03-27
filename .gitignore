@@ -20,3 +20,5 @@ cosyvoice_local/
 *.jpg
 autograsp/
 __MACOSX/
+*.mp4
+*.png
