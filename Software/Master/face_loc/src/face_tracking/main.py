@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import time
+from pathlib import Path
 
 import uvicorn
 
@@ -13,6 +14,8 @@ from face_tracking.logging_utils import setup_logging
 from face_tracking.service import SkillService, create_app
 
 SOURCE_API_PREFERENCES = ["auto", "v4l2", "gstreamer", "ffmpeg", "images", "avfoundation", "dshow", "msmf"]
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 
 
 def apply_cli_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:
@@ -51,7 +54,7 @@ def apply_cli_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfi
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Smart mirror face tracking service")
-    parser.add_argument("--config", default="configs/default.yaml", help="Path to YAML config file")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to YAML config file")
     parser.add_argument("--source-type", choices=["camera", "rtsp", "video_file", "capture"])
     parser.add_argument("--camera-index", type=int)
     parser.add_argument("--camera-name")
@@ -69,6 +72,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--print-config", action="store_true")
     return parser
+
+
+def resolve_cli_config_path(config_path: str | Path) -> Path:
+    candidate = Path(config_path).expanduser()
+    if candidate.is_absolute():
+        return candidate
+
+    cwd_candidate = candidate.resolve()
+    if cwd_candidate.exists():
+        return cwd_candidate
+
+    return (REPO_ROOT / candidate).resolve()
 
 
 def run_headless_service(config: AppConfig) -> None:
@@ -111,7 +126,7 @@ def run_gui_service(config: AppConfig) -> None:
 
 def cli_main() -> None:
     args = build_parser().parse_args()
-    config = apply_cli_overrides(load_config(args.config), args)
+    config = apply_cli_overrides(load_config(resolve_cli_config_path(args.config)), args)
     log_file = setup_logging(config.logging)
     logger = logging.getLogger("face_tracking.main")
     logger.info("Logging to %s", log_file)
