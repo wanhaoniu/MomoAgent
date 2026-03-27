@@ -90,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     start_parser.add_argument("--source-type", choices=["camera", "rtsp", "video_file", "capture"])
     start_parser.add_argument("--camera-index", type=int)
+    start_parser.add_argument("--camera-name")
     start_parser.add_argument("--rtsp-url")
     start_parser.add_argument("--video-path")
     start_parser.add_argument("--capture-uri")
@@ -147,6 +148,7 @@ def action_start(args: argparse.Namespace) -> None:
     for key, value in [
         ("--source-type", args.source_type),
         ("--camera-index", args.camera_index),
+        ("--camera-name", args.camera_name),
         ("--rtsp-url", args.rtsp_url),
         ("--video-path", args.video_path),
         ("--capture-uri", args.capture_uri),

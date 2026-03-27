@@ -5,7 +5,6 @@ import json
 import logging
 import threading
 import time
-from pathlib import Path
 
 import uvicorn
 
@@ -13,8 +12,7 @@ from face_tracking.config import AppConfig, load_config
 from face_tracking.logging_utils import setup_logging
 from face_tracking.service import SkillService, create_app
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
+SOURCE_API_PREFERENCES = ["auto", "v4l2", "gstreamer", "ffmpeg", "images", "avfoundation", "dshow", "msmf"]
 
 
 def apply_cli_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:
@@ -22,12 +20,16 @@ def apply_cli_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfi
         config.source.type = args.source_type
     if args.camera_index is not None:
         config.source.camera_index = args.camera_index
+    if args.camera_name:
+        config.source.camera_name = args.camera_name
     if args.rtsp_url:
         config.source.rtsp_url = args.rtsp_url
     if args.video_path:
         config.source.video_path = args.video_path
     if args.capture_uri:
         config.source.capture_uri = args.capture_uri
+    if args.api_preference:
+        config.source.api_preference = args.api_preference
     if args.model_backend:
         config.detector.backend = args.model_backend
     if args.model_path:
@@ -42,25 +44,27 @@ def apply_cli_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfi
         config.visualizer.enabled = False
     if args.host:
         config.service.host = args.host
-    if args.port is not None:
+    if args.port:
         config.service.port = args.port
     return config
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Smart mirror face tracking service")
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to YAML config file")
+    parser.add_argument("--config", default="configs/default.yaml", help="Path to YAML config file")
     parser.add_argument("--source-type", choices=["camera", "rtsp", "video_file", "capture"])
     parser.add_argument("--camera-index", type=int)
+    parser.add_argument("--camera-name")
     parser.add_argument("--rtsp-url")
     parser.add_argument("--video-path")
     parser.add_argument("--capture-uri")
+    parser.add_argument("--api-preference", choices=SOURCE_API_PREFERENCES)
     parser.add_argument("--model-backend", choices=["insightface_onnx", "insightface_faceanalysis", "opencv_yunet"])
     parser.add_argument("--model-path")
     parser.add_argument("--model-name")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--host")
-    parser.add_argument("--port", type=int, default=8011)
+    parser.add_argument("--port", type=int)
     parser.add_argument("--show-gui", action="store_true")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--print-config", action="store_true")
@@ -98,8 +102,6 @@ def run_gui_service(config: AppConfig) -> None:
         while not getattr(server, "started", False) and server_thread.is_alive():
             time.sleep(0.05)
         service.run_visualizer_loop()
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received; stopping GUI mode")
     finally:
         server.should_exit = True
         server_thread.join(timeout=5.0)

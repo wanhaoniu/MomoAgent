@@ -2,10 +2,11 @@ app_name: smart-mirror-face-tracking
 
 source:
   type: capture
-  capture_uri: ${FACE_TRACK_CAMERA_DEVICE:/dev/video2}
-  width: 640
-  height: 480
-  fps: 15
+  capture_uri: ${FACE_TRACK_CAMERA_DEVICE:/dev/video0}
+  camera_name: ${FACE_TRACK_CAMERA_NAME:}
+  width: 1280
+  height: 720
+  fps: 30
   rotation_deg: ${FACE_TRACK_CAMERA_ROTATION:0}
   buffer_size: 1
   reconnect_interval_sec: 2.0

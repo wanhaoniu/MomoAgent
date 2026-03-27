@@ -15,6 +15,7 @@ ENV_PATTERN = re.compile(r"\$\{([^}:]+)(?::([^}]*))?\}")
 class SourceConfig(BaseModel):
     type: Literal["camera", "rtsp", "video_file", "capture"] = "camera"
     camera_index: int = 0
+    camera_name: str | None = None
     rtsp_url: str | None = None
     video_path: str | None = None
     capture_uri: str | None = None

@@ -11,6 +11,7 @@
         "properties": {
           "source_type": { "type": "string", "enum": ["camera", "rtsp", "video_file", "capture"] },
           "camera_index": { "type": "integer" },
+          "camera_name": { "type": "string" },
           "rtsp_url": { "type": "string" },
           "video_path": { "type": "string" },
           "capture_uri": { "type": "string" },

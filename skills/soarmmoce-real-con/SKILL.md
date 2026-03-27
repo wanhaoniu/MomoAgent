@@ -118,23 +118,17 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py home
 如果用户说开启人脸跟随模式，或者跟随我的脸等请运行：
 
 ```bash
-python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_face_follow.py --face-endpoint http://127.0.0.1:8011
+/Users/moce/miniforge3/bin/conda run -n soarmmoce python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_face_follow.py --face-endpoint http://127.0.0.1:8000
 ```
 
 当前默认行为：
 
 - `shoulder_pan` 做水平居中
-- `shoulder_lift + elbow_flex` 做垂直居中
-- 默认先只做画面内 `x/y` 居中，不主动做前后距离修正
-- 如果显式开启 `--enable-depth true`，当前默认会用 `shoulder_lift + elbow_flex` 做基于人脸框面积的前后距离保持
-- 前后距离的参考值默认不是固定阈值，而是启动后前几帧人脸框面积的中位数
+- `shoulder_lift` 做垂直居中
+- 现在只做画面内 `x/y` 居中，不再做前后距离修正
+- 同一帧不会重复下指令，默认会做轻量平滑，减少抽搐
 - 丢失人脸时不报错，改为自动左右扫描寻找人脸
 - 脚本会持续运行，直到你手动 `Ctrl+C` 停止
-
-如果你还想额外叠加整体升降修正，再显式加 `--enable-lift true`。
-如果你只想保留单个垂直关节，可以显式加 `--tilt-secondary-joint none`。
-如果你还想恢复前后距离跟随，再显式加 `--enable-depth true`。
-如果你想改前后跟随的关节映射，可以再调 `--depth-joint` / `--depth-secondary-joint`。
 
 ## SDK 直接调用
 
