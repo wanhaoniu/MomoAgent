@@ -22,3 +22,5 @@ autograsp/
 __MACOSX/
 *.mp4
 *.png
+*.py.patch
+*.env
