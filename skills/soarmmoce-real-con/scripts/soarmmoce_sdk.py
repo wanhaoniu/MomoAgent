@@ -402,6 +402,8 @@ class SoArmMoceController:
         self._multi_turn_session_valid = False
         self._multi_turn_session_source: Optional[str] = None
         self._multi_turn_session_initialized_at: Optional[float] = None
+        self._last_multi_turn_goal_raw_mod: Dict[str, float] = {}
+        self._last_multi_turn_goal_joint_deg: Dict[str, float] = {}
         self._calibration_payload = self._load_calibration_payload()
         self._home_joint_deg = self._resolve_calibration_home_joint_deg(self._calibration_payload)
         self._joint_limits_deg = self._compute_joint_limits_deg(self._calibration_payload)
@@ -427,6 +429,29 @@ class SoArmMoceController:
         self._multi_turn_session_valid = False
         self._multi_turn_session_source = None
         self._multi_turn_session_initialized_at = None
+        self._last_multi_turn_goal_raw_mod = {}
+        self._last_multi_turn_goal_joint_deg = {}
+
+    def _append_sdk_debug_log(self, level: str, message: str) -> None:
+        path = self.config.runtime_dir / "sdk_multi_turn_debug.log"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{level}] {message}\n")
+        except Exception:
+            pass
+
+    def _record_multi_turn_goal(
+        self,
+        *,
+        bus_cmd: Dict[str, float],
+        target_joint_deg: Dict[str, float],
+    ) -> None:
+        for joint_name in MULTI_TURN_JOINTS:
+            if joint_name not in bus_cmd or joint_name not in target_joint_deg:
+                continue
+            self._last_multi_turn_goal_raw_mod[joint_name] = self._normalize_raw_mod(float(bus_cmd[joint_name]))
+            self._last_multi_turn_goal_joint_deg[joint_name] = float(target_joint_deg[joint_name])
 
     def _prime_multi_turn_state_from_current_pose(self, bus: FeetechMotorsBus) -> None:
         raw_motor = self._read_present_position_raw_map(bus)
@@ -1426,8 +1451,24 @@ class SoArmMoceController:
         if state is None:
             continuous_raw = 0.0
         else:
+            continuous_before = float(state["continuous_raw"])
             delta = self._raw_mod_delta(raw_mod, float(state["last_raw_mod"]))
-            continuous_raw = float(state["continuous_raw"]) + delta
+            goal_raw_mod = self._last_multi_turn_goal_raw_mod.get(joint_name)
+            if goal_raw_mod is not None:
+                prev_dist_to_goal = abs(self._raw_mod_delta(float(state["last_raw_mod"]), goal_raw_mod))
+                curr_dist_to_goal = abs(self._raw_mod_delta(raw_mod, goal_raw_mod))
+                if abs(delta) > 256.0 and curr_dist_to_goal > (prev_dist_to_goal + 128.0):
+                    self._append_sdk_debug_log(
+                        "WARN",
+                        "reject multi-turn unwrap jump: "
+                        f"joint={joint_name} raw_mod={raw_mod:.1f} last_raw_mod={float(state['last_raw_mod']):.1f} "
+                        f"delta={delta:.1f} goal_raw_mod={goal_raw_mod:.1f} "
+                        f"prev_goal_dist={prev_dist_to_goal:.1f} curr_goal_dist={curr_dist_to_goal:.1f} "
+                        f"continuous_before={continuous_before:.1f} goal_joint_deg="
+                        f"{self._last_multi_turn_goal_joint_deg.get(joint_name)}"
+                    )
+                    return continuous_before
+            continuous_raw = continuous_before + delta
         self._multi_turn_state[joint_name] = {
             "last_raw_mod": raw_mod,
             "continuous_raw": continuous_raw,
@@ -1548,7 +1589,10 @@ class SoArmMoceController:
         zero_raw_mod = float(self._multi_turn_zero_raw_mod[joint_name])
         motor_deg = self._joint_to_motor_deg(joint_name, float(joint_deg))
         relative_raw = motor_deg * RAW_COUNTS_PER_REV / 360.0
-        return int(round(self._normalize_raw_mod(zero_raw_mod + relative_raw)))
+        # Goal_Position on these Feetech joints is sign-magnitude encoded. Keeping the
+        # signed branch avoids turning a small cross-zero correction (for example -13)
+        # into a wrapped long-path command (for example 4083).
+        return int(round(zero_raw_mod + relative_raw))
 
     @staticmethod
     def _joint_error_deg(target_joint_deg: Dict[str, float], actual_joint_deg: Dict[str, float]) -> Dict[str, float]:
@@ -1650,6 +1694,7 @@ class SoArmMoceController:
             current_joint_deg=current_joint_deg,
             locked_single_turn_raw=locked_single_turn_raw,
         )
+        self._record_multi_turn_goal(bus_cmd=bus_cmd, target_joint_deg=cmd)
         if bus_cmd:
             bus.sync_write("Goal_Position", bus_cmd)
         self._wait(duration, wait, timeout)

@@ -8,7 +8,9 @@ import ipaddress
 import json
 import sys
 import time
+import traceback
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, urlunparse
@@ -18,20 +20,33 @@ from soarmmoce_cli_common import cli_bool, print_error, print_success
 from soarmmoce_sdk import JOINTS, SoArmMoceController, ValidationError
 
 
-FIXED_PAN_CONTROL_SIGN = -1.0
-FIXED_TILT_CONTROL_SIGN = 1.0
+FIXED_PAN_CONTROL_SIGN = 1.0
+FIXED_TILT_CONTROL_SIGN = -1.0
 FIXED_TILT_SECONDARY_CONTROL_SIGN = -1.0
 DEFAULT_FACE_ENDPOINT = "http://127.0.0.1:8000"
 LEGACY_FACE_ENDPOINT_PORT = 8011
 CURRENT_FACE_ENDPOINT_PORT = 8000
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+DEBUG_LOG_PATH = SKILL_ROOT / "workspace" / "runtime" / "face_follow_debug.log"
+
+
+def _append_debug_log(level: str, message: str) -> None:
+    try:
+        DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{level}] {message}\n")
+    except Exception:
+        pass
 
 
 def _log(message: str) -> None:
     print(f"[face-follow] {message}", file=sys.stderr, flush=True)
+    _append_debug_log("INFO", message)
 
 
 def _warn(message: str) -> None:
     print(f"[face-follow][warn] {message}", file=sys.stderr, flush=True)
+    _append_debug_log("WARN", message)
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -286,6 +301,43 @@ def _apply_joint_limit_margin(
         )
 
 
+def _move_pushes_further_into_limit(
+    *,
+    axis: JointAxis | None,
+    current_joint_deg: float,
+    target_joint_deg: float | None,
+    edge_margin_deg: float,
+) -> bool:
+    if axis is None or target_joint_deg is None:
+        return False
+    margin = max(0.0, float(edge_margin_deg))
+    moving_negative = float(target_joint_deg) < float(current_joint_deg)
+    moving_positive = float(target_joint_deg) > float(current_joint_deg)
+    near_min = float(current_joint_deg) <= (float(axis.min_deg) + margin)
+    near_max = float(current_joint_deg) >= (float(axis.max_deg) - margin)
+    return (near_min and moving_negative) or (near_max and moving_positive)
+
+
+def _format_axis_debug(
+    *,
+    axis: JointAxis | None,
+    current_joint_deg: float | None,
+    target_joint_deg: float | None,
+    metric_value: float | None,
+    blocked_by_limit: bool,
+) -> str | None:
+    if axis is None or current_joint_deg is None:
+        return None
+    target_text = "--" if target_joint_deg is None else f"{float(target_joint_deg):+.2f}"
+    metric_text = "--" if metric_value is None else f"{float(metric_value):+.4f}"
+    blocked_text = " limit-blocked" if blocked_by_limit else ""
+    return (
+        f"{axis.joint_name}={float(current_joint_deg):+.2f}->{target_text} "
+        f"err={metric_text} lim=[{float(axis.min_deg):+.2f},{float(axis.max_deg):+.2f}]"
+        f"{blocked_text}"
+    )
+
+
 def _stabilize_axis_error(
     raw_error: float,
     *,
@@ -421,6 +473,38 @@ def _select_motion_mode(
     return None, "joint"
 
 
+def _move_joint_targets_with_snapshot(
+    arm: SoArmMoceController,
+    *,
+    start_state: dict[str, Any],
+    targets_deg: dict[str, float],
+    duration: float,
+    wait: bool,
+) -> dict[str, Any]:
+    if hasattr(arm, "_move_joint_targets_smooth"):
+        state = arm._move_joint_targets_smooth(
+            start_state={
+                **start_state,
+                "joint_state": dict(start_state["joint_state"]),
+            },
+            target_cmd=dict(targets_deg),
+            duration=duration,
+            wait=wait,
+            timeout=None,
+        )
+        return {
+            "action": "move_joints",
+            "targets_deg": dict(targets_deg),
+            "state": state,
+            "used_snapshot_start_state": True,
+        }
+    return arm.move_joints(
+        targets_deg=targets_deg,
+        duration=duration,
+        wait=wait,
+    )
+
+
 def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
     active_joints = [joint for joint in [args.pan_joint, args.tilt_joint, args.tilt_secondary_joint] if joint is not None]
     if len(active_joints) != len(set(active_joints)):
@@ -546,6 +630,14 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
             joint_limits_deg=joint_limits_deg,
             limit_margin_deg=args.safe_limit_margin_deg,
         )
+        for axis in [pan_axis, tilt_axis, tilt_secondary_axis]:
+            if axis is None:
+                continue
+            current_joint_deg = float(current_joint_state[axis.joint_name])
+            _log(
+                f"axis ready: joint={axis.joint_name} current={current_joint_deg:+.2f} "
+                f"limits=[{axis.min_deg:+.2f},{axis.max_deg:+.2f}]"
+            )
 
         pan_metric_state = AxisMetricState()
         tilt_metric_state = AxisMetricState()
@@ -593,6 +685,7 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
             "runtime motion mode="
             + ("blocking" if wait_for_motion else f"non-blocking interval={command_interval_sec:.3f}s")
         )
+        _log(f"debug log path: {DEBUG_LOG_PATH}")
 
         try:
             while True:
@@ -670,8 +763,12 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
 
                     targets: Dict[str, float] = {}
                     axis_command_signs: list[tuple[AxisMetricState, float]] = []
-                    raw_ndx = float((payload.get("smoothed_offset") or {}).get("ndx", 0.0))
-                    raw_ndy = float((payload.get("smoothed_offset") or {}).get("ndy", 0.0))
+                    debug_notes: list[str] = []
+                    # Let this script own the smoothing once so control stays responsive
+                    # without stacking multiple smoothing stages from the face tracker.
+                    control_offset = payload.get("offset") or payload.get("smoothed_offset") or {}
+                    raw_ndx = float(control_offset.get("ndx", 0.0))
+                    raw_ndy = float(control_offset.get("ndy", 0.0))
                     ndx = (
                         _stabilize_axis_error(
                             raw_ndx,
@@ -709,27 +806,76 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         else raw_ndy
                     )
                     area_ratio = _extract_face_metric(payload, "area_ratio")
+                    current_pan = None
+                    current_tilt = None
+                    current_tilt_secondary = None
+                    pan_target = None
+                    tilt_target = None
+                    tilt_secondary_target = None
+                    tilt_blocked_by_limit = False
+                    tilt_secondary_blocked_by_limit = False
                     if pan_axis is not None:
                         current_pan = float(current_joint_state[pan_axis.joint_name])
-                        next_target = pan_axis.compute_next_target(current_pan, ndx)
-                        if next_target is not None and abs(next_target - current_pan) >= args.min_command_deg:
-                            targets[pan_axis.joint_name] = next_target
+                        pan_target = pan_axis.compute_next_target(current_pan, ndx)
+                        if pan_target is not None and abs(pan_target - current_pan) >= args.min_command_deg:
+                            targets[pan_axis.joint_name] = pan_target
                             axis_command_signs.append((pan_metric_state, _sign(ndx)))
                     if tilt_axis is not None:
                         current_tilt = float(current_joint_state[tilt_axis.joint_name])
-                        next_target = tilt_axis.compute_next_target(current_tilt, ndy_for_primary)
-                        if next_target is not None and abs(next_target - current_tilt) >= args.min_command_deg:
-                            targets[tilt_axis.joint_name] = next_target
+                        tilt_target = tilt_axis.compute_next_target(current_tilt, ndy_for_primary)
+                        if _move_pushes_further_into_limit(
+                            axis=tilt_axis,
+                            current_joint_deg=current_tilt,
+                            target_joint_deg=tilt_target,
+                            edge_margin_deg=args.limit_edge_margin_deg,
+                        ):
+                            tilt_blocked_by_limit = True
+                            tilt_target = None
+                        if tilt_target is not None and abs(tilt_target - current_tilt) >= args.min_command_deg:
+                            targets[tilt_axis.joint_name] = tilt_target
                             axis_command_signs.append((tilt_metric_state, _sign(ndy_for_primary)))
                     if tilt_secondary_axis is not None:
                         current_tilt_secondary = float(current_joint_state[tilt_secondary_axis.joint_name])
-                        next_target = tilt_secondary_axis.compute_next_target(
+                        tilt_secondary_target = tilt_secondary_axis.compute_next_target(
                             current_tilt_secondary,
                             ndy_for_secondary,
                         )
-                        if next_target is not None and abs(next_target - current_tilt_secondary) >= args.min_command_deg:
-                            targets[tilt_secondary_axis.joint_name] = next_target
+                        if _move_pushes_further_into_limit(
+                            axis=tilt_secondary_axis,
+                            current_joint_deg=current_tilt_secondary,
+                            target_joint_deg=tilt_secondary_target,
+                            edge_margin_deg=args.limit_edge_margin_deg,
+                        ):
+                            tilt_secondary_blocked_by_limit = True
+                            tilt_secondary_target = None
+                        if tilt_secondary_target is not None and abs(tilt_secondary_target - current_tilt_secondary) >= args.min_command_deg:
+                            targets[tilt_secondary_axis.joint_name] = tilt_secondary_target
                             axis_command_signs.append((tilt_secondary_metric_state, _sign(ndy_for_secondary)))
+
+                    pan_debug = _format_axis_debug(
+                        axis=pan_axis,
+                        current_joint_deg=current_pan,
+                        target_joint_deg=pan_target,
+                        metric_value=ndx,
+                        blocked_by_limit=False,
+                    )
+                    tilt_debug = _format_axis_debug(
+                        axis=tilt_axis,
+                        current_joint_deg=current_tilt,
+                        target_joint_deg=tilt_target,
+                        metric_value=ndy_for_primary,
+                        blocked_by_limit=tilt_blocked_by_limit,
+                    )
+                    tilt_secondary_debug = _format_axis_debug(
+                        axis=tilt_secondary_axis,
+                        current_joint_deg=current_tilt_secondary,
+                        target_joint_deg=tilt_secondary_target,
+                        metric_value=ndy_for_secondary,
+                        blocked_by_limit=tilt_secondary_blocked_by_limit,
+                    )
+                    for debug_text in [pan_debug, tilt_debug, tilt_secondary_debug]:
+                        if debug_text:
+                            debug_notes.append(debug_text)
 
                     delta_dx = 0.0
                     delta_dz = 0.0
@@ -765,15 +911,18 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         _log(
                             f"hold iter={iterations} frame={payload.get('frame_id')} "
                             f"raw_ndx={raw_ndx:+.4f} raw_ndy={raw_ndy:+.4f} "
-                            f"ndx={ndx:+.4f} ndy={ndy_for_primary:+.4f} area={area_ratio:.4f}"
+                            f"ndx={ndx:+.4f} ndy={ndy_for_primary:+.4f} area={area_ratio:.4f} "
+                            + " ".join(debug_notes)
                         )
                         time.sleep(args.poll_interval_sec)
                         continue
 
-                    log_parts = []
+                    log_parts = list(debug_notes)
                     if wait_for_motion:
                         if targets:
-                            result = arm.move_joints(
+                            result = _move_joint_targets_with_snapshot(
+                                arm,
+                                start_state=current_state,
                                 targets_deg=targets,
                                 duration=args.move_duration_sec,
                                 wait=True,
@@ -801,7 +950,9 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                             preferred_mode=preferred_motion_mode,
                         )
                         if mode == "joint":
-                            arm.move_joints(
+                            _move_joint_targets_with_snapshot(
+                                arm,
+                                start_state=current_state,
                                 targets_deg=targets,
                                 duration=args.move_duration_sec,
                                 wait=False,
@@ -844,13 +995,19 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                     if not bool(args.continue_on_motion_error):
                         raise
                     next_motion_at = time.monotonic() + max(float(args.motion_error_backoff_sec), command_interval_sec)
-                    _warn(f"motion validation error #{motion_errors}: {exc}")
+                    _warn(f"motion validation error #{motion_errors}: {type(exc).__name__}: {exc}")
+                    trace_text = traceback.format_exc()
+                    print(trace_text, file=sys.stderr, end="", flush=True)
+                    _append_debug_log("TRACE", trace_text.rstrip())
                     time.sleep(max(float(args.motion_error_backoff_sec), float(args.poll_interval_sec)))
                     continue
                 except Exception as exc:
                     runtime_errors += 1
                     next_motion_at = time.monotonic() + max(float(args.runtime_error_backoff_sec), command_interval_sec)
-                    _warn(f"runtime error #{runtime_errors}: {exc}")
+                    _warn(f"runtime error #{runtime_errors}: {type(exc).__name__}: {exc}")
+                    trace_text = traceback.format_exc()
+                    print(trace_text, file=sys.stderr, end="", flush=True)
+                    _append_debug_log("TRACE", trace_text.rstrip())
                     time.sleep(max(float(args.runtime_error_backoff_sec), float(args.poll_interval_sec)))
                     continue
         except KeyboardInterrupt:
@@ -954,7 +1111,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--face-endpoint", default=DEFAULT_FACE_ENDPOINT, help="Face tracking service base URL or /latest URL")
     parser.add_argument("--http-timeout-sec", type=float, default=1.5)
     parser.add_argument("--poll-interval-sec", type=float, default=0.02)
-    parser.add_argument("--move-duration-sec", type=float, default=0.15)
+    parser.add_argument("--move-duration-sec", type=float, default=0.10)
     parser.add_argument(
         "--home-on-start",
         type=cli_bool,
@@ -968,24 +1125,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pan-range-deg", type=float, default=40.0)
     parser.add_argument("--tilt-range-deg", type=float, default=18.0)
     parser.add_argument("--tilt-secondary-range-deg", type=float, default=18.0)
-    parser.add_argument("--pan-gain-deg-per-norm", type=float, default=6.6)
-    parser.add_argument("--tilt-gain-deg-per-norm", type=float, default=3.1)
-    parser.add_argument("--tilt-secondary-gain-deg-per-norm", type=float, default=2.2)
-    parser.add_argument("--pan-max-step-deg", type=float, default=1.45)
-    parser.add_argument("--tilt-max-step-deg", type=float, default=0.85)
-    parser.add_argument("--tilt-secondary-max-step-deg", type=float, default=0.72)
-    parser.add_argument("--dead-zone-ndx", type=float, default=0.10)
-    parser.add_argument("--dead-zone-ndy", type=float, default=0.16)
-    parser.add_argument("--min-command-deg", type=float, default=0.25)
+    parser.add_argument("--pan-gain-deg-per-norm", type=float, default=10.0)
+    parser.add_argument("--tilt-gain-deg-per-norm", type=float, default=4.2)
+    parser.add_argument("--tilt-secondary-gain-deg-per-norm", type=float, default=2.0)
+    parser.add_argument("--pan-max-step-deg", type=float, default=2.4)
+    parser.add_argument("--tilt-max-step-deg", type=float, default=0.75)
+    parser.add_argument("--tilt-secondary-max-step-deg", type=float, default=0.65)
+    parser.add_argument("--dead-zone-ndx", type=float, default=0.03)
+    parser.add_argument("--dead-zone-ndy", type=float, default=0.04)
+    parser.add_argument("--min-command-deg", type=float, default=0.08)
     parser.add_argument("--search-miss-threshold", type=int, default=8)
     parser.add_argument("--search-pan-step-deg", type=float, default=0.9)
-    parser.add_argument("--wait-for-motion", type=cli_bool, default=False)
+    parser.add_argument("--wait-for-motion", type=cli_bool, default=True)
     parser.add_argument("--command-interval-sec", type=float, default=None)
     parser.add_argument("--hold-on-exit", type=cli_bool, default=True)
     parser.add_argument("--safe-limit-margin-deg", type=float, default=0.5)
-    parser.add_argument("--error-filter-alpha", type=float, default=0.35)
-    parser.add_argument("--engage-threshold-scale", type=float, default=1.4)
-    parser.add_argument("--reverse-threshold-scale", type=float, default=2.2)
+    parser.add_argument("--limit-edge-margin-deg", type=float, default=1.0)
+    parser.add_argument("--error-filter-alpha", type=float, default=0.65)
+    parser.add_argument("--engage-threshold-scale", type=float, default=1.05)
+    parser.add_argument("--reverse-threshold-scale", type=float, default=1.6)
     parser.add_argument("--continue-on-motion-error", type=cli_bool, default=True)
     parser.add_argument("--motion-error-backoff-sec", type=float, default=0.35)
     parser.add_argument("--runtime-error-backoff-sec", type=float, default=0.35)
@@ -1002,15 +1160,15 @@ def build_parser() -> argparse.ArgumentParser:
         pan_range_deg=40.0,
         tilt_range_deg=18.0,
         tilt_secondary_range_deg=18.0,
-        pan_gain_deg_per_norm=6.0,
-        tilt_gain_deg_per_norm=2.8,
-        tilt_secondary_gain_deg_per_norm=2.0,
-        pan_max_step_deg=1.2,
+        pan_gain_deg_per_norm=9.0,
+        tilt_gain_deg_per_norm=3.2,
+        tilt_secondary_gain_deg_per_norm=1.8,
+        pan_max_step_deg=2.1,
         tilt_max_step_deg=0.7,
-        tilt_secondary_max_step_deg=0.6,
-        dead_zone_ndx=0.10,
-        dead_zone_ndy=0.16,
-        min_command_deg=0.25,
+        tilt_secondary_max_step_deg=0.55,
+        dead_zone_ndx=0.03,
+        dead_zone_ndy=0.04,
+        min_command_deg=0.08,
         enable_lift=False,
         enable_depth=False,
         lift_range_m=0.03,
@@ -1026,13 +1184,14 @@ def build_parser() -> argparse.ArgumentParser:
         depth_area_dead_zone=0.025,
         search_miss_threshold=8,
         search_pan_step_deg=0.9,
-        wait_for_motion=False,
+        wait_for_motion=True,
         command_interval_sec=None,
         hold_on_exit=True,
         safe_limit_margin_deg=0.5,
-        error_filter_alpha=0.35,
-        engage_threshold_scale=1.4,
-        reverse_threshold_scale=2.2,
+        limit_edge_margin_deg=1.0,
+        error_filter_alpha=0.65,
+        engage_threshold_scale=1.05,
+        reverse_threshold_scale=1.6,
         continue_on_motion_error=True,
         motion_error_backoff_sec=0.35,
         runtime_error_backoff_sec=0.35,
