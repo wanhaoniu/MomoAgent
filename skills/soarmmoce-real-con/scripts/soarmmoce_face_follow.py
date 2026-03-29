@@ -252,6 +252,7 @@ class AxisMetricState:
     filtered_error: float = 0.0
     engaged: bool = False
     last_command_sign: float = 0.0
+    last_target_deg: float | None = None
 
 
 def _sign(value: float) -> float:
@@ -336,6 +337,24 @@ def _format_axis_debug(
         f"err={metric_text} lim=[{float(axis.min_deg):+.2f},{float(axis.max_deg):+.2f}]"
         f"{blocked_text}"
     )
+
+
+def _axis_command_base(
+    *,
+    axis: JointAxis,
+    state: AxisMetricState,
+    current_joint_deg: float,
+    normalized_error: float,
+) -> float:
+    desired_sign = _sign(float(axis.control_sign) * float(normalized_error))
+    if desired_sign == 0.0 or state.last_target_deg is None:
+        return float(current_joint_deg)
+    last_target_deg = float(state.last_target_deg)
+    if desired_sign > 0.0 and last_target_deg > float(current_joint_deg):
+        return last_target_deg
+    if desired_sign < 0.0 and last_target_deg < float(current_joint_deg):
+        return last_target_deg
+    return float(current_joint_deg)
 
 
 def _stabilize_axis_error(
@@ -816,13 +835,32 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                     tilt_secondary_blocked_by_limit = False
                     if pan_axis is not None:
                         current_pan = float(current_joint_state[pan_axis.joint_name])
-                        pan_target = pan_axis.compute_next_target(current_pan, ndx)
+                        pan_target = pan_axis.compute_next_target(
+                            _axis_command_base(
+                                axis=pan_axis,
+                                state=pan_metric_state,
+                                current_joint_deg=current_pan,
+                                normalized_error=ndx,
+                            ),
+                            ndx,
+                        )
                         if pan_target is not None and abs(pan_target - current_pan) >= args.min_command_deg:
                             targets[pan_axis.joint_name] = pan_target
+                            pan_metric_state.last_target_deg = float(pan_target)
                             axis_command_signs.append((pan_metric_state, _sign(ndx)))
+                        else:
+                            pan_metric_state.last_target_deg = None
                     if tilt_axis is not None:
                         current_tilt = float(current_joint_state[tilt_axis.joint_name])
-                        tilt_target = tilt_axis.compute_next_target(current_tilt, ndy_for_primary)
+                        tilt_target = tilt_axis.compute_next_target(
+                            _axis_command_base(
+                                axis=tilt_axis,
+                                state=tilt_metric_state,
+                                current_joint_deg=current_tilt,
+                                normalized_error=ndy_for_primary,
+                            ),
+                            ndy_for_primary,
+                        )
                         if _move_pushes_further_into_limit(
                             axis=tilt_axis,
                             current_joint_deg=current_tilt,
@@ -833,11 +871,19 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                             tilt_target = None
                         if tilt_target is not None and abs(tilt_target - current_tilt) >= args.min_command_deg:
                             targets[tilt_axis.joint_name] = tilt_target
+                            tilt_metric_state.last_target_deg = float(tilt_target)
                             axis_command_signs.append((tilt_metric_state, _sign(ndy_for_primary)))
+                        else:
+                            tilt_metric_state.last_target_deg = None
                     if tilt_secondary_axis is not None:
                         current_tilt_secondary = float(current_joint_state[tilt_secondary_axis.joint_name])
                         tilt_secondary_target = tilt_secondary_axis.compute_next_target(
-                            current_tilt_secondary,
+                            _axis_command_base(
+                                axis=tilt_secondary_axis,
+                                state=tilt_secondary_metric_state,
+                                current_joint_deg=current_tilt_secondary,
+                                normalized_error=ndy_for_secondary,
+                            ),
                             ndy_for_secondary,
                         )
                         if _move_pushes_further_into_limit(
@@ -850,7 +896,10 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                             tilt_secondary_target = None
                         if tilt_secondary_target is not None and abs(tilt_secondary_target - current_tilt_secondary) >= args.min_command_deg:
                             targets[tilt_secondary_axis.joint_name] = tilt_secondary_target
+                            tilt_secondary_metric_state.last_target_deg = float(tilt_secondary_target)
                             axis_command_signs.append((tilt_secondary_metric_state, _sign(ndy_for_secondary)))
+                        else:
+                            tilt_secondary_metric_state.last_target_deg = None
 
                     pan_debug = _format_axis_debug(
                         axis=pan_axis,
@@ -1140,7 +1189,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--command-interval-sec", type=float, default=None)
     parser.add_argument("--hold-on-exit", type=cli_bool, default=True)
     parser.add_argument("--safe-limit-margin-deg", type=float, default=0.5)
-    parser.add_argument("--limit-edge-margin-deg", type=float, default=1.0)
+    parser.add_argument("--limit-edge-margin-deg", type=float, default=0.25)
     parser.add_argument("--error-filter-alpha", type=float, default=0.65)
     parser.add_argument("--engage-threshold-scale", type=float, default=1.05)
     parser.add_argument("--reverse-threshold-scale", type=float, default=1.6)
@@ -1188,7 +1237,7 @@ def build_parser() -> argparse.ArgumentParser:
         command_interval_sec=None,
         hold_on_exit=True,
         safe_limit_margin_deg=0.5,
-        limit_edge_margin_deg=1.0,
+        limit_edge_margin_deg=0.25,
         error_filter_alpha=0.65,
         engage_threshold_scale=1.05,
         reverse_threshold_scale=1.6,

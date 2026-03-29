@@ -1581,7 +1581,13 @@ class SoArmMoceController:
             if name in raw_present
         }
 
-    def _joint_deg_to_multi_turn_goal_raw(self, joint_name: str, joint_deg: float) -> int:
+    def _joint_deg_to_multi_turn_goal_raw(
+        self,
+        joint_name: str,
+        joint_deg: float,
+        *,
+        current_joint_deg: Optional[float] = None,
+    ) -> int:
         if joint_name not in self._multi_turn_zero_raw_mod:
             raise ValidationError(
                 f"Multi-turn runtime zero is missing for '{joint_name}'. Run 'init_home' after power-on first."
@@ -1625,7 +1631,13 @@ class SoArmMoceController:
             if name in locked_single_turn_raw and name not in MULTI_TURN_JOINTS:
                 continue
             if name in MULTI_TURN_JOINTS:
-                cmd[name] = float(self._joint_deg_to_multi_turn_goal_raw(name, float(target)))
+                cmd[name] = float(
+                    self._joint_deg_to_multi_turn_goal_raw(
+                        name,
+                        float(target),
+                        current_joint_deg=float(current_joint_deg[name]),
+                    )
+                )
             else:
                 cmd[name] = float(self._joint_deg_to_single_turn_present_raw(name, float(target)))
         return cmd
