@@ -45,6 +45,21 @@ robot.move_pose([0.1, 0.0, 0.15], [0.0, 0.0, 0.0])
 robot.disconnect()
 ```
 
+## Real Arm Controller
+
+The mature real-hardware controller now lives inside the package as
+`soarmmoce_sdk.real_arm`.
+
+```python
+from soarmmoce_sdk.real_arm import SoArmMoceController
+
+with SoArmMoceController() as arm:
+    print(arm.get_state())
+```
+
+The repo skill wrapper at `skills/soarmmoce-real-con/scripts/soarmmoce_sdk.py`
+re-exports this module so the skill scripts and package SDK share one implementation.
+
 ## Optional Dependencies
 
 ```bash

@@ -17,6 +17,13 @@ ROOT = Path(__file__).resolve().parents[1]
 MASTER_ROOT = ROOT.parent
 if str(MASTER_ROOT) not in sys.path:
     sys.path.insert(0, str(MASTER_ROOT))
+SDK_SRC = MASTER_ROOT.parent / "sdk" / "src"
+if not SDK_SRC.exists():
+    SDK_SRC = MASTER_ROOT.parent.parent / "sdk" / "src"
+if SDK_SRC.exists():
+    sdk_src_str = str(SDK_SRC)
+    if sdk_src_str not in sys.path:
+        sys.path.insert(0, sdk_src_str)
 
 from soarmmoce_sdk import SoArmMoceController
 
