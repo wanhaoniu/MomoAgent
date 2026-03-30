@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import base64
 import io
 import json
 import os
@@ -49,12 +50,20 @@ for _dotenv_path in REPO_DOTENV_PATHS:
 
 STT_PROVIDER_DEFAULT = "faster-whisper"
 STT_PROVIDER_SUPPORTED = ("groq", "faster-whisper", "openai-compatible", "local")
-TTS_PROVIDER_DEFAULT = "cosyvoice"
-TTS_PROVIDER_SUPPORTED = ("groq", "cosyvoice")
+TTS_PROVIDER_DEFAULT = "mimo"
+TTS_PROVIDER_SUPPORTED = ("mimo", "groq", "cosyvoice")
 
 GROQ_API_KEY_FALLBACK = os.getenv("GROQ_API_KEY")
 GROQ_STT_URL_DEFAULT = "https://api.groq.com/openai/v1/audio/transcriptions"
 GROQ_STT_MODEL_DEFAULT = "whisper-large-v3"
+
+MIMO_API_KEY_FALLBACK = os.getenv("MIMO_API_KEY")
+MIMO_TTS_URL_DEFAULT = "https://api.xiaomimimo.com/v1/chat/completions"
+MIMO_TTS_MODEL_DEFAULT = "mimo-v2-audio-tts"
+MIMO_TTS_VOICE_DEFAULT = "default_zh"
+MIMO_TTS_RESPONSE_FORMAT_DEFAULT = "wav"
+MIMO_TTS_TIMEOUT_SEC_DEFAULT = 45.0
+MIMO_TTS_MAX_CHARS_DEFAULT = 180
 
 GROQ_TTS_URL_DEFAULT = "https://api.groq.com/openai/v1/audio/speech"
 GROQ_TTS_MODEL_DEFAULT = "canopylabs/orpheus-v1-english"
@@ -163,7 +172,7 @@ class _OpenClawGatewayBridgeManager:
         proc = self._proc
         if proc is None or proc.stdout is None:
             raise RuntimeError("OpenClaw Gateway bridge 尚未启动")
-        timeout = max(1.0, float(timeout_sec))
+        timeout = max(0.1, float(timeout_sec))
         ready, _, _ = select.select([proc.stdout], [], [], timeout)
         if not ready:
             raise RuntimeError(f"OpenClaw Gateway bridge 超时 ({timeout:.1f}s)")
@@ -171,6 +180,28 @@ class _OpenClawGatewayBridgeManager:
         if not line:
             raise RuntimeError("OpenClaw Gateway bridge 已退出")
         return line
+
+    def _read_json_message_locked(self, timeout_sec: float) -> Dict[str, Any]:
+        deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("OpenClaw Gateway bridge 等待 JSON 响应超时")
+            raw = self._readline_locked(remaining)
+            stripped = str(raw or "").strip()
+            if not stripped:
+                continue
+            try:
+                message = json.loads(stripped)
+            except json.JSONDecodeError:
+                print(
+                    f"[Speech][OpenClawBridge] ignored_non_json line={stripped[:200]}",
+                    flush=True,
+                )
+                continue
+            if not isinstance(message, dict):
+                raise RuntimeError("OpenClaw Gateway bridge 返回了非 JSON 对象")
+            return message
 
     def request(self, payload: Dict[str, Any], timeout_sec: float) -> Dict[str, Any]:
         with self._lock:
@@ -183,10 +214,7 @@ class _OpenClawGatewayBridgeManager:
                 try:
                     proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
                     proc.stdin.flush()
-                    raw = self._readline_locked(timeout_sec)
-                    message = json.loads(raw)
-                    if not isinstance(message, dict):
-                        raise RuntimeError("OpenClaw Gateway bridge 返回了非 JSON 对象")
+                    message = self._read_json_message_locked(timeout_sec)
                     if str(message.get("id", "")) != str(payload.get("id", "")):
                         raise RuntimeError("OpenClaw Gateway bridge 返回了不匹配的请求 ID")
                     if not bool(message.get("ok")):
@@ -610,9 +638,15 @@ def _extract_http_error_message(response: requests.Response, fallback: str) -> s
     if isinstance(payload, dict):
         err = payload.get("error")
         if isinstance(err, dict):
+            parts: List[str] = []
             msg = str(err.get("message", "")).strip()
+            param = str(err.get("param", "")).strip()
             if msg:
-                return msg
+                parts.append(msg)
+            if param and param not in parts:
+                parts.append(param)
+            if parts:
+                return ": ".join(parts)
         msg = str(payload.get("message", "")).strip()
         if msg:
             return msg
@@ -662,6 +696,46 @@ def _build_optional_bearer_headers(api_key: str) -> Dict[str, str]:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
+
+
+def _extract_mimo_audio_bytes(
+    payload: Any,
+    *,
+    response_format: str,
+) -> bytes:
+    if not isinstance(payload, dict):
+        raise RuntimeError("MIMO TTS returned an unexpected payload")
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("MIMO TTS response is missing choices")
+
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        raise RuntimeError("MIMO TTS response is missing message")
+
+    audio = message.get("audio")
+    if not isinstance(audio, dict):
+        raise RuntimeError("MIMO TTS response is missing audio data")
+
+    encoded = str(audio.get("data", "")).strip()
+    if not encoded:
+        raise RuntimeError("MIMO TTS audio data is empty")
+
+    try:
+        audio_bytes = base64.b64decode(encoded)
+    except Exception as exc:
+        raise RuntimeError(f"MIMO TTS audio decode failed: {exc}") from exc
+
+    if not audio_bytes:
+        raise RuntimeError("MIMO TTS audio data is empty")
+
+    format_name = str(response_format or "").strip().lower() or MIMO_TTS_RESPONSE_FORMAT_DEFAULT
+    if _looks_like_wav_bytes(audio_bytes):
+        return audio_bytes
+    if format_name in {"pcm", "pcm16", "pcm16le", "raw"}:
+        return _wrap_pcm16le_to_wav_bytes(audio_bytes, sample_rate=24000)
+    raise RuntimeError(f"MIMO TTS returned unsupported audio format: {format_name}")
 
 
 def _split_text_for_tts(text: str, max_chars: int) -> List[str]:
@@ -966,24 +1040,100 @@ def groq_text_to_speech(
     response_format: str = GROQ_TTS_RESPONSE_FORMAT_DEFAULT,
     timeout_sec: float = GROQ_TTS_TIMEOUT_SEC_DEFAULT,
 ) -> bytes:
+    return openai_compatible_text_to_speech(
+        text=text,
+        api_key=api_key,
+        url=url,
+        model=model,
+        voice=voice,
+        response_format=response_format,
+        timeout_sec=timeout_sec,
+        fallback_model=GROQ_TTS_MODEL_DEFAULT,
+        fallback_voice=GROQ_TTS_VOICE_DEFAULT,
+        fallback_response_format=GROQ_TTS_RESPONSE_FORMAT_DEFAULT,
+        error_label="TTS failed",
+    )
+
+
+def mimo_text_to_speech(
+    text: str,
+    api_key: str,
+    url: str,
+    model: str,
+    voice: str,
+    response_format: str = MIMO_TTS_RESPONSE_FORMAT_DEFAULT,
+    timeout_sec: float = MIMO_TTS_TIMEOUT_SEC_DEFAULT,
+) -> bytes:
     content = str(text or "").strip()
     if not content:
         raise ValueError("Empty TTS text")
 
+    payload = {
+        "model": str(model or "").strip() or MIMO_TTS_MODEL_DEFAULT,
+        # MIMO 的 TTS 模型会朗读 assistant 消息内容，而不是 input 字段。
+        "messages": [{"role": "assistant", "content": content}],
+        "response_format": str(response_format or "").strip() or MIMO_TTS_RESPONSE_FORMAT_DEFAULT,
+    }
+    voice_value = str(voice or "").strip() or MIMO_TTS_VOICE_DEFAULT
+    if voice_value:
+        payload["voice"] = voice_value
+
     response = requests.post(
         url,
         headers=_build_optional_bearer_headers(api_key),
-        json={
-            "model": str(model or "").strip() or GROQ_TTS_MODEL_DEFAULT,
-            "voice": str(voice or "").strip() or GROQ_TTS_VOICE_DEFAULT,
-            "input": content,
-            "response_format": str(response_format or "").strip() or GROQ_TTS_RESPONSE_FORMAT_DEFAULT,
-        },
+        json=payload,
         timeout=float(timeout_sec),
     )
 
     if not response.ok:
-        raise RuntimeError(_extract_http_error_message(response, "TTS failed"))
+        raise RuntimeError(_extract_http_error_message(response, "MIMO TTS failed"))
+
+    try:
+        response_payload = response.json()
+    except Exception as exc:
+        raise RuntimeError(f"MIMO TTS returned non-JSON response: {exc}") from exc
+    return _extract_mimo_audio_bytes(
+        response_payload,
+        response_format=payload["response_format"],
+    )
+
+
+def openai_compatible_text_to_speech(
+    text: str,
+    api_key: str,
+    url: str,
+    model: str,
+    voice: str,
+    response_format: str,
+    timeout_sec: float,
+    *,
+    fallback_model: str,
+    fallback_voice: str,
+    fallback_response_format: str,
+    error_label: str,
+) -> bytes:
+    content = str(text or "").strip()
+    if not content:
+        raise ValueError("Empty TTS text")
+
+    payload = {
+        "model": str(model or "").strip() or fallback_model,
+        "input": content,
+        "response_format": str(response_format or "").strip() or fallback_response_format,
+    }
+    voice_value = str(voice or "").strip() or fallback_voice
+    if voice_value:
+        payload["voice"] = voice_value
+
+    response = requests.post(
+        url,
+        headers=_build_optional_bearer_headers(api_key),
+        json=payload,
+        timeout=float(timeout_sec),
+    )
+
+    if not response.ok:
+        raise RuntimeError(_extract_http_error_message(response, error_label))
     if not response.content:
         raise RuntimeError("TTS response is empty")
     return response.content
@@ -1333,6 +1483,64 @@ class _GroqTtsWorker(QThread):
         except Exception as exc:
             if not self.isInterruptionRequested():
                 self.failed.emit(str(exc))
+
+
+class _MimoTtsWorker(QThread):
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        text: str,
+        api_key: str,
+        url: str,
+        model: str,
+        voice: str,
+        response_format: str,
+        timeout_sec: float,
+        max_chars: int,
+        playback_backend: str = "auto",
+    ):
+        super().__init__()
+        self._text = str(text or "").strip()
+        self._api_key = str(api_key or "").strip()
+        self._url = str(url or "").strip() or MIMO_TTS_URL_DEFAULT
+        self._model = str(model or "").strip() or MIMO_TTS_MODEL_DEFAULT
+        self._voice = str(voice or "").strip() or MIMO_TTS_VOICE_DEFAULT
+        self._response_format = str(response_format or "").strip() or MIMO_TTS_RESPONSE_FORMAT_DEFAULT
+        self._timeout_sec = max(5.0, float(timeout_sec))
+        self._max_chars = max(32, int(max_chars))
+        self._playback_backend = str(playback_backend or "auto").strip() or "auto"
+        self._stop_event = threading.Event()
+
+    def stop(self):
+        self.requestInterruption()
+        self._stop_event.set()
+
+    def run(self):
+        try:
+            chunks = _split_text_for_tts(self._text, self._max_chars)
+            if not chunks:
+                raise ValueError("Empty TTS text")
+            for chunk in chunks:
+                if self.isInterruptionRequested():
+                    return
+                wav_bytes = mimo_text_to_speech(
+                    text=chunk,
+                    api_key=self._api_key,
+                    url=self._url,
+                    model=self._model,
+                    voice=self._voice,
+                    response_format=self._response_format,
+                    timeout_sec=self._timeout_sec,
+                )
+                if self.isInterruptionRequested():
+                    return
+                play_wav_bytes(wav_bytes, self._stop_event, backend=self._playback_backend)
+                if self.isInterruptionRequested():
+                    return
+        except Exception as exc:
+            if not self.isInterruptionRequested():
+                self.failed.emit(_format_tts_exception("MIMO", self._url, exc))
 
 
 class _CosyVoiceTtsWorker(QThread):
@@ -1742,6 +1950,60 @@ class SpeechInputWindow(QWidget):
             _runtime_env_get("SOARMMOCE_TTS_PROVIDER", TTS_PROVIDER_DEFAULT, runtime_env)
         )
         self._tts_enabled = _runtime_env_bool("SOARMMOCE_TTS_ENABLED", True, runtime_env)
+        self._mimo_api_key = str(
+            _runtime_env_get("SOARMMOCE_TTS_API_KEY", None, runtime_env)
+            or _runtime_env_get("MIMO_TTS_API_KEY", None, runtime_env)
+            or _runtime_env_get("MIMO_API_KEY", None, runtime_env)
+            or MIMO_API_KEY_FALLBACK
+            or ""
+        ).strip()
+        self._mimo_tts_url = (
+            _runtime_env_get("SOARMMOCE_TTS_URL", None, runtime_env)
+            or _runtime_env_get("MIMO_TTS_URL", None, runtime_env)
+            or MIMO_TTS_URL_DEFAULT
+        ).strip() or MIMO_TTS_URL_DEFAULT
+        self._mimo_tts_model = (
+            _runtime_env_get("SOARMMOCE_TTS_MODEL", None, runtime_env)
+            or _runtime_env_get("MIMO_TTS_MODEL", None, runtime_env)
+            or MIMO_TTS_MODEL_DEFAULT
+        ).strip() or MIMO_TTS_MODEL_DEFAULT
+        self._mimo_tts_voice = (
+            _runtime_env_get("SOARMMOCE_TTS_VOICE", None, runtime_env)
+            or _runtime_env_get("MIMO_TTS_VOICE", None, runtime_env)
+            or MIMO_TTS_VOICE_DEFAULT
+        ).strip() or MIMO_TTS_VOICE_DEFAULT
+        self._mimo_tts_response_format = (
+            (
+                _runtime_env_get("SOARMMOCE_TTS_RESPONSE_FORMAT", None, runtime_env)
+                or _runtime_env_get("MIMO_TTS_RESPONSE_FORMAT", None, runtime_env)
+                or MIMO_TTS_RESPONSE_FORMAT_DEFAULT
+            ).strip()
+            or MIMO_TTS_RESPONSE_FORMAT_DEFAULT
+        )
+        try:
+            self._mimo_tts_timeout_sec = float(
+                str(
+                    _runtime_env_get("SOARMMOCE_TTS_TIMEOUT_SEC", None, runtime_env)
+                    or _runtime_env_get("MIMO_TTS_TIMEOUT_SEC", None, runtime_env)
+                    or str(MIMO_TTS_TIMEOUT_SEC_DEFAULT)
+                ).strip()
+            )
+        except Exception:
+            self._mimo_tts_timeout_sec = MIMO_TTS_TIMEOUT_SEC_DEFAULT
+        self._mimo_tts_timeout_sec = max(5.0, self._mimo_tts_timeout_sec)
+        try:
+            self._mimo_tts_max_chars = max(
+                32,
+                int(
+                    str(
+                        _runtime_env_get("SOARMMOCE_TTS_MAX_CHARS", None, runtime_env)
+                        or _runtime_env_get("MIMO_TTS_MAX_CHARS", None, runtime_env)
+                        or str(MIMO_TTS_MAX_CHARS_DEFAULT)
+                    ).strip()
+                ),
+            )
+        except Exception:
+            self._mimo_tts_max_chars = MIMO_TTS_MAX_CHARS_DEFAULT
         self._groq_api_key = str(
             _runtime_env_get("SOARMMOCE_TTS_API_KEY", None, runtime_env)
             or _runtime_env_get("GROQ_TTS_API_KEY", None, runtime_env)
@@ -1979,6 +2241,44 @@ class SpeechInputWindow(QWidget):
             except Exception:
                 pass
 
+    def set_mimo_tts_config(
+        self,
+        enabled: Optional[bool] = None,
+        provider: Optional[str] = None,
+        api_key: Optional[str] = None,
+        url: Optional[str] = None,
+        model: Optional[str] = None,
+        voice: Optional[str] = None,
+        response_format: Optional[str] = None,
+        timeout_sec: Optional[float] = None,
+        max_chars: Optional[int] = None,
+    ):
+        self._tts_provider = _normalize_tts_provider(provider or "mimo")
+        if enabled is not None:
+            self._tts_enabled = bool(enabled)
+        if api_key is not None:
+            self._mimo_api_key = str(api_key or "").strip()
+        if url is not None:
+            self._mimo_tts_url = str(url or "").strip() or MIMO_TTS_URL_DEFAULT
+        if model is not None:
+            self._mimo_tts_model = str(model or "").strip() or MIMO_TTS_MODEL_DEFAULT
+        if voice is not None:
+            self._mimo_tts_voice = str(voice or "").strip() or MIMO_TTS_VOICE_DEFAULT
+        if response_format is not None:
+            self._mimo_tts_response_format = (
+                str(response_format or "").strip() or MIMO_TTS_RESPONSE_FORMAT_DEFAULT
+            )
+        if timeout_sec is not None:
+            try:
+                self._mimo_tts_timeout_sec = max(5.0, float(timeout_sec))
+            except Exception:
+                pass
+        if max_chars is not None:
+            try:
+                self._mimo_tts_max_chars = max(32, int(max_chars))
+            except Exception:
+                pass
+
     def set_cosyvoice_tts_config(
         self,
         enabled: Optional[bool] = None,
@@ -2130,6 +2430,26 @@ class SpeechInputWindow(QWidget):
                 sample_rate=self._cosyvoice_tts_sample_rate,
                 timeout_sec=self._cosyvoice_tts_timeout_sec,
                 max_chars=self._cosyvoice_tts_max_chars,
+                playback_backend=self._tts_playback_backend,
+            )
+        elif provider == "mimo":
+            _log_tts(
+                "start "
+                f"provider=mimo "
+                f"url={self._mimo_tts_url} "
+                f"model={self._mimo_tts_model} "
+                f"voice={self._mimo_tts_voice} "
+                f"backend={self._tts_playback_backend}"
+            )
+            worker = _MimoTtsWorker(
+                text=text,
+                api_key=self._mimo_api_key,
+                url=self._mimo_tts_url,
+                model=self._mimo_tts_model,
+                voice=self._mimo_tts_voice,
+                response_format=self._mimo_tts_response_format,
+                timeout_sec=self._mimo_tts_timeout_sec,
+                max_chars=self._mimo_tts_max_chars,
                 playback_backend=self._tts_playback_backend,
             )
         else:

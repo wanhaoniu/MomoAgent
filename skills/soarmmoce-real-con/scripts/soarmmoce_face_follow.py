@@ -23,11 +23,27 @@ from soarmmoce_sdk import JOINTS, SoArmMoceController, ValidationError
 FIXED_PAN_CONTROL_SIGN = 1.0
 FIXED_TILT_CONTROL_SIGN = -1.0
 FIXED_TILT_SECONDARY_CONTROL_SIGN = -1.0
+DEFAULT_MOVE_DURATION_SEC = 0.08
+DEFAULT_PAN_GAIN_DEG_PER_NORM = 10.5
+DEFAULT_TILT_GAIN_DEG_PER_NORM = 4.8
+DEFAULT_TILT_SECONDARY_GAIN_DEG_PER_NORM = 2.6
+DEFAULT_PAN_MAX_STEP_DEG = 2.6
+DEFAULT_TILT_MAX_STEP_DEG = 0.95
+DEFAULT_TILT_SECONDARY_MAX_STEP_DEG = 0.8
+DEFAULT_DEAD_ZONE_NDX = 0.025
+DEFAULT_DEAD_ZONE_NDY = 0.03
+DEFAULT_MIN_COMMAND_DEG = 0.05
+DEFAULT_SEARCH_PAN_STEP_DEG = 1.05
+DEFAULT_ERROR_FILTER_ALPHA = 0.78
+DEFAULT_ENGAGE_THRESHOLD_SCALE = 1.0
+DEFAULT_REVERSE_THRESHOLD_SCALE = 1.35
 DEFAULT_FACE_ENDPOINT = "http://127.0.0.1:8000"
 LEGACY_FACE_ENDPOINT_PORT = 8011
 CURRENT_FACE_ENDPOINT_PORT = 8000
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 DEBUG_LOG_PATH = SKILL_ROOT / "workspace" / "runtime" / "face_follow_debug.log"
+FACE_FOLLOW_SIGNS_PATH = SKILL_ROOT / "calibration" / "face_follow_signs.json"
+FACE_FOLLOW_TUNING_PATH = SKILL_ROOT / "calibration" / "face_follow_tuning.json"
 
 
 def _append_debug_log(level: str, message: str) -> None:
@@ -47,6 +63,24 @@ def _log(message: str) -> None:
 def _warn(message: str) -> None:
     print(f"[face-follow][warn] {message}", file=sys.stderr, flush=True)
     _append_debug_log("WARN", message)
+
+
+def _load_numeric_defaults(path: Path, defaults: dict[str, float]) -> dict[str, float]:
+    resolved = {key: float(value) for key, value in defaults.items()}
+    try:
+        if not path.exists():
+            return resolved
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            _warn(f"ignore non-object tuning file: {path}")
+            return resolved
+        for key in defaults:
+            value = payload.get(key)
+            if isinstance(value, (int, float)):
+                resolved[key] = float(value)
+    except Exception as exc:
+        _warn(f"failed to load tuning defaults from {path}: {exc}")
+    return resolved
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -847,7 +881,7 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         if pan_target is not None and abs(pan_target - current_pan) >= args.min_command_deg:
                             targets[pan_axis.joint_name] = pan_target
                             pan_metric_state.last_target_deg = float(pan_target)
-                            axis_command_signs.append((pan_metric_state, _sign(ndx)))
+                            axis_command_signs.append((pan_metric_state, _sign(float(pan_axis.control_sign) * ndx)))
                         else:
                             pan_metric_state.last_target_deg = None
                     if tilt_axis is not None:
@@ -872,7 +906,9 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         if tilt_target is not None and abs(tilt_target - current_tilt) >= args.min_command_deg:
                             targets[tilt_axis.joint_name] = tilt_target
                             tilt_metric_state.last_target_deg = float(tilt_target)
-                            axis_command_signs.append((tilt_metric_state, _sign(ndy_for_primary)))
+                            axis_command_signs.append(
+                                (tilt_metric_state, _sign(float(tilt_axis.control_sign) * ndy_for_primary))
+                            )
                         else:
                             tilt_metric_state.last_target_deg = None
                     if tilt_secondary_axis is not None:
@@ -897,7 +933,12 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
                         if tilt_secondary_target is not None and abs(tilt_secondary_target - current_tilt_secondary) >= args.min_command_deg:
                             targets[tilt_secondary_axis.joint_name] = tilt_secondary_target
                             tilt_secondary_metric_state.last_target_deg = float(tilt_secondary_target)
-                            axis_command_signs.append((tilt_secondary_metric_state, _sign(ndy_for_secondary)))
+                            axis_command_signs.append(
+                                (
+                                    tilt_secondary_metric_state,
+                                    _sign(float(tilt_secondary_axis.control_sign) * ndy_for_secondary),
+                                )
+                            )
                         else:
                             tilt_secondary_metric_state.last_target_deg = None
 
@@ -1156,11 +1197,38 @@ def run_face_follow(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    sign_defaults = _load_numeric_defaults(
+        FACE_FOLLOW_SIGNS_PATH,
+        {
+            "pan": FIXED_PAN_CONTROL_SIGN,
+            "tilt_primary": FIXED_TILT_CONTROL_SIGN,
+            "tilt_secondary": FIXED_TILT_SECONDARY_CONTROL_SIGN,
+        },
+    )
+    tuning_defaults = _load_numeric_defaults(
+        FACE_FOLLOW_TUNING_PATH,
+        {
+            "move_duration_sec": DEFAULT_MOVE_DURATION_SEC,
+            "pan_gain_deg_per_norm": DEFAULT_PAN_GAIN_DEG_PER_NORM,
+            "tilt_gain_deg_per_norm": DEFAULT_TILT_GAIN_DEG_PER_NORM,
+            "tilt_secondary_gain_deg_per_norm": DEFAULT_TILT_SECONDARY_GAIN_DEG_PER_NORM,
+            "pan_max_step_deg": DEFAULT_PAN_MAX_STEP_DEG,
+            "tilt_max_step_deg": DEFAULT_TILT_MAX_STEP_DEG,
+            "tilt_secondary_max_step_deg": DEFAULT_TILT_SECONDARY_MAX_STEP_DEG,
+            "dead_zone_ndx": DEFAULT_DEAD_ZONE_NDX,
+            "dead_zone_ndy": DEFAULT_DEAD_ZONE_NDY,
+            "min_command_deg": DEFAULT_MIN_COMMAND_DEG,
+            "search_pan_step_deg": DEFAULT_SEARCH_PAN_STEP_DEG,
+            "error_filter_alpha": DEFAULT_ERROR_FILTER_ALPHA,
+            "engage_threshold_scale": DEFAULT_ENGAGE_THRESHOLD_SCALE,
+            "reverse_threshold_scale": DEFAULT_REVERSE_THRESHOLD_SCALE,
+        },
+    )
     parser = argparse.ArgumentParser(description="Keep a detected face near the frame center with soarmMoce")
     parser.add_argument("--face-endpoint", default=DEFAULT_FACE_ENDPOINT, help="Face tracking service base URL or /latest URL")
     parser.add_argument("--http-timeout-sec", type=float, default=1.5)
     parser.add_argument("--poll-interval-sec", type=float, default=0.02)
-    parser.add_argument("--move-duration-sec", type=float, default=0.10)
+    parser.add_argument("--move-duration-sec", type=float, default=tuning_defaults["move_duration_sec"])
     parser.add_argument(
         "--home-on-start",
         type=cli_bool,
@@ -1168,39 +1236,55 @@ def build_parser() -> argparse.ArgumentParser:
         help="Move to configured home pose before follow control",
     )
     parser.add_argument("--home-duration-sec", type=float, default=1.5)
-    parser.add_argument("--pan-control-sign", type=float, default=FIXED_PAN_CONTROL_SIGN)
-    parser.add_argument("--tilt-control-sign", type=float, default=FIXED_TILT_CONTROL_SIGN)
-    parser.add_argument("--tilt-secondary-control-sign", type=float, default=FIXED_TILT_SECONDARY_CONTROL_SIGN)
+    parser.add_argument("--pan-control-sign", type=float, default=sign_defaults["pan"])
+    parser.add_argument("--tilt-control-sign", type=float, default=sign_defaults["tilt_primary"])
+    parser.add_argument("--tilt-secondary-control-sign", type=float, default=sign_defaults["tilt_secondary"])
     parser.add_argument("--pan-range-deg", type=float, default=40.0)
     parser.add_argument("--tilt-range-deg", type=float, default=18.0)
     parser.add_argument("--tilt-secondary-range-deg", type=float, default=18.0)
-    parser.add_argument("--pan-gain-deg-per-norm", type=float, default=10.0)
-    parser.add_argument("--tilt-gain-deg-per-norm", type=float, default=4.2)
-    parser.add_argument("--tilt-secondary-gain-deg-per-norm", type=float, default=2.0)
-    parser.add_argument("--pan-max-step-deg", type=float, default=2.4)
-    parser.add_argument("--tilt-max-step-deg", type=float, default=0.75)
-    parser.add_argument("--tilt-secondary-max-step-deg", type=float, default=0.65)
-    parser.add_argument("--dead-zone-ndx", type=float, default=0.03)
-    parser.add_argument("--dead-zone-ndy", type=float, default=0.04)
-    parser.add_argument("--min-command-deg", type=float, default=0.08)
+    parser.add_argument("--pan-gain-deg-per-norm", type=float, default=tuning_defaults["pan_gain_deg_per_norm"])
+    parser.add_argument("--tilt-gain-deg-per-norm", type=float, default=tuning_defaults["tilt_gain_deg_per_norm"])
+    parser.add_argument(
+        "--tilt-secondary-gain-deg-per-norm",
+        type=float,
+        default=tuning_defaults["tilt_secondary_gain_deg_per_norm"],
+    )
+    parser.add_argument("--pan-max-step-deg", type=float, default=tuning_defaults["pan_max_step_deg"])
+    parser.add_argument("--tilt-max-step-deg", type=float, default=tuning_defaults["tilt_max_step_deg"])
+    parser.add_argument(
+        "--tilt-secondary-max-step-deg",
+        type=float,
+        default=tuning_defaults["tilt_secondary_max_step_deg"],
+    )
+    parser.add_argument("--dead-zone-ndx", type=float, default=tuning_defaults["dead_zone_ndx"])
+    parser.add_argument("--dead-zone-ndy", type=float, default=tuning_defaults["dead_zone_ndy"])
+    parser.add_argument("--min-command-deg", type=float, default=tuning_defaults["min_command_deg"])
     parser.add_argument("--search-miss-threshold", type=int, default=8)
-    parser.add_argument("--search-pan-step-deg", type=float, default=0.9)
+    parser.add_argument("--search-pan-step-deg", type=float, default=tuning_defaults["search_pan_step_deg"])
     parser.add_argument("--wait-for-motion", type=cli_bool, default=True)
     parser.add_argument("--command-interval-sec", type=float, default=None)
     parser.add_argument("--hold-on-exit", type=cli_bool, default=True)
     parser.add_argument("--safe-limit-margin-deg", type=float, default=0.5)
     parser.add_argument("--limit-edge-margin-deg", type=float, default=0.25)
-    parser.add_argument("--error-filter-alpha", type=float, default=0.65)
-    parser.add_argument("--engage-threshold-scale", type=float, default=1.05)
-    parser.add_argument("--reverse-threshold-scale", type=float, default=1.6)
+    parser.add_argument("--error-filter-alpha", type=float, default=tuning_defaults["error_filter_alpha"])
+    parser.add_argument(
+        "--engage-threshold-scale",
+        type=float,
+        default=tuning_defaults["engage_threshold_scale"],
+    )
+    parser.add_argument(
+        "--reverse-threshold-scale",
+        type=float,
+        default=tuning_defaults["reverse_threshold_scale"],
+    )
     parser.add_argument("--continue-on-motion-error", type=cli_bool, default=True)
     parser.add_argument("--motion-error-backoff-sec", type=float, default=0.35)
     parser.add_argument("--runtime-error-backoff-sec", type=float, default=0.35)
     parser.set_defaults(
         max_face_staleness_sec=1.5,
-        pan_control_sign=FIXED_PAN_CONTROL_SIGN,
-        tilt_control_sign=FIXED_TILT_CONTROL_SIGN,
-        tilt_secondary_control_sign=FIXED_TILT_SECONDARY_CONTROL_SIGN,
+        pan_control_sign=sign_defaults["pan"],
+        tilt_control_sign=sign_defaults["tilt_primary"],
+        tilt_secondary_control_sign=sign_defaults["tilt_secondary"],
         lift_effect_sign=None,
         depth_effect_sign=None,
         pan_joint="shoulder_pan",
@@ -1209,15 +1293,16 @@ def build_parser() -> argparse.ArgumentParser:
         pan_range_deg=40.0,
         tilt_range_deg=18.0,
         tilt_secondary_range_deg=18.0,
-        pan_gain_deg_per_norm=9.0,
-        tilt_gain_deg_per_norm=3.2,
-        tilt_secondary_gain_deg_per_norm=1.8,
-        pan_max_step_deg=2.1,
-        tilt_max_step_deg=0.7,
-        tilt_secondary_max_step_deg=0.55,
-        dead_zone_ndx=0.03,
-        dead_zone_ndy=0.04,
-        min_command_deg=0.08,
+        move_duration_sec=tuning_defaults["move_duration_sec"],
+        pan_gain_deg_per_norm=tuning_defaults["pan_gain_deg_per_norm"],
+        tilt_gain_deg_per_norm=tuning_defaults["tilt_gain_deg_per_norm"],
+        tilt_secondary_gain_deg_per_norm=tuning_defaults["tilt_secondary_gain_deg_per_norm"],
+        pan_max_step_deg=tuning_defaults["pan_max_step_deg"],
+        tilt_max_step_deg=tuning_defaults["tilt_max_step_deg"],
+        tilt_secondary_max_step_deg=tuning_defaults["tilt_secondary_max_step_deg"],
+        dead_zone_ndx=tuning_defaults["dead_zone_ndx"],
+        dead_zone_ndy=tuning_defaults["dead_zone_ndy"],
+        min_command_deg=tuning_defaults["min_command_deg"],
         enable_lift=False,
         enable_depth=False,
         lift_range_m=0.03,
@@ -1232,15 +1317,15 @@ def build_parser() -> argparse.ArgumentParser:
         depth_target_area_ratio=None,
         depth_area_dead_zone=0.025,
         search_miss_threshold=8,
-        search_pan_step_deg=0.9,
+        search_pan_step_deg=tuning_defaults["search_pan_step_deg"],
         wait_for_motion=True,
         command_interval_sec=None,
         hold_on_exit=True,
         safe_limit_margin_deg=0.5,
         limit_edge_margin_deg=0.25,
-        error_filter_alpha=0.65,
-        engage_threshold_scale=1.05,
-        reverse_threshold_scale=1.6,
+        error_filter_alpha=tuning_defaults["error_filter_alpha"],
+        engage_threshold_scale=tuning_defaults["engage_threshold_scale"],
+        reverse_threshold_scale=tuning_defaults["reverse_threshold_scale"],
         continue_on_motion_error=True,
         motion_error_backoff_sec=0.35,
         runtime_error_backoff_sec=0.35,

@@ -1,0 +1,16 @@
+{
+  "move_duration_sec": 0.08,
+  "pan_gain_deg_per_norm": 9.4,
+  "tilt_gain_deg_per_norm": 4.8,
+  "tilt_secondary_gain_deg_per_norm": 2.6,
+  "pan_max_step_deg": 2.25,
+  "tilt_max_step_deg": 0.95,
+  "tilt_secondary_max_step_deg": 0.8,
+  "dead_zone_ndx": 0.025,
+  "dead_zone_ndy": 0.03,
+  "min_command_deg": 0.05,
+  "search_pan_step_deg": 1.05,
+  "error_filter_alpha": 0.78,
+  "engage_threshold_scale": 1.0,
+  "reverse_threshold_scale": 1.35
+}
