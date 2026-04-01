@@ -113,6 +113,8 @@ HEADER_ICON_FILES = {
 SIM_RENDER_SUPERSAMPLE = 1.4
 
 SDK_SRC = REPO_ROOT / "sdk" / "src"
+DEFAULT_SDK_REAL_CONFIG_PATH = SDK_SRC / "soarmmoce_sdk" / "resources" / "configs" / "soarm_moce_serial.yaml"
+DEFAULT_SDK_SIM_CONFIG_PATH = SDK_SRC / "soarmmoce_sdk" / "resources" / "configs" / "soarm_moce.yaml"
 if SDK_SRC.exists():
     _sdk_src_str = str(SDK_SRC)
     _normalized_sdk_src = os.path.normpath(_sdk_src_str)
@@ -219,7 +221,17 @@ class ArmControlGUI(QMainWindow):
         self._sdk_robot: Optional[SDKRobot] = None
         self._sdk_lock = threading.RLock()
         self._sdk_transport_override = str(os.getenv("SOARMMOCE_TRANSPORT", "")).strip().lower() or None
-        self._sdk_config_path = str(os.getenv("SOARMMOCE_CONFIG", "")).strip() or None
+        env_sdk_config = str(os.getenv("SOARMMOCE_CONFIG", "")).strip()
+        self._sdk_config_path = env_sdk_config or (str(DEFAULT_SDK_REAL_CONFIG_PATH) if DEFAULT_SDK_REAL_CONFIG_PATH.exists() else None)
+        self._sdk_fallback_config_path = (
+            str(DEFAULT_SDK_SIM_CONFIG_PATH)
+            if (not env_sdk_config and DEFAULT_SDK_SIM_CONFIG_PATH.exists())
+            else None
+        )
+        self._sdk_runtime_mode = "disconnected"
+        self._sdk_runtime_transport = ""
+        self._sdk_runtime_config_path = self._sdk_config_path or ""
+        self._sdk_last_connect_error = ""
         self._sdk_mock_shared_state_path = str(
             Path(
                 os.getenv(
@@ -294,6 +306,7 @@ class ArmControlGUI(QMainWindow):
         self._apply_language()
         self._update_connection_widgets()
         self._update_global_status_bar()
+        QTimer.singleShot(0, self._bootstrap_sdk_connection)
         if self._sdk_auto_home_on_start:
             QTimer.singleShot(0, self._auto_home_after_startup)
 
@@ -318,9 +331,11 @@ class ArmControlGUI(QMainWindow):
                 "status_connecting": "连接中...",
                 "status_connected": "已连接",
                 "status_disconnected": "已断开",
+                "status_simulation": "仿真模式",
                 "state_connecting": "Connecting",
                 "state_connected": "Connected",
                 "state_disconnected": "Disconnected",
+                "state_simulation": "Simulation",
                 "state_normal": "Normal",
                 "state_warning": "Warning",
                 "state_fault": "Fault",
@@ -451,9 +466,11 @@ class ArmControlGUI(QMainWindow):
                 "status_connecting": "Connecting...",
                 "status_connected": "Connected",
                 "status_disconnected": "Disconnected",
+                "status_simulation": "Simulation",
                 "state_connecting": "Connecting",
                 "state_connected": "Connected",
                 "state_disconnected": "Disconnected",
+                "state_simulation": "Simulation",
                 "state_normal": "Normal",
                 "state_warning": "Warning",
                 "state_fault": "Fault",
@@ -908,13 +925,7 @@ class ArmControlGUI(QMainWindow):
 
         self._sync_language_combos()
         self._update_global_status_bar()
-
-        if self.connected:
-            self.statusBar().showMessage(self._tr("status_connected"))
-        elif self.connecting:
-            self.statusBar().showMessage(self._tr("status_connecting"))
-        else:
-            self.statusBar().showMessage(self._tr("status_ready"))
+        self.statusBar().showMessage(self._status_message_for_runtime())
 
         self.refresh_recordings()
 
@@ -1605,7 +1616,13 @@ class ArmControlGUI(QMainWindow):
     def _state_connection_text(self) -> str:
         if self.connecting:
             return self._tr("state_connecting")
-        return self._tr("state_connected") if self.connected else self._tr("state_disconnected")
+        if self.connected:
+            return self._tr("state_connected")
+        if self._sdk_runtime_mode == "simulation":
+            return self._tr("state_simulation")
+        if self._sdk_runtime_mode == "connected":
+            return self._tr("state_connected")
+        return self._tr("state_disconnected")
 
     def _state_robot_text(self) -> str:
         lowered = self.robot_state_text.lower()
@@ -1634,6 +1651,27 @@ class ArmControlGUI(QMainWindow):
             self.quick_page.set_status_light("warning")
         else:
             self.quick_page.set_status_light("normal")
+
+    def _status_message_for_runtime(self) -> str:
+        if self.connecting:
+            return self._tr("status_connecting")
+        if self.connected or self._sdk_runtime_mode == "connected":
+            return self._tr("status_connected")
+        if self._sdk_runtime_mode == "simulation":
+            return self._tr("status_simulation")
+        return self._tr("status_ready")
+
+    def _bootstrap_sdk_connection(self):
+        if not SDK_AVAILABLE:
+            return
+
+        def _task():
+            try:
+                self._sdk_get_robot()
+            except Exception as exc:
+                self.log_signal.emit(f"[SDK] initial connect failed: {exc}", "warning")
+
+        threading.Thread(target=_task, name="soarmmoce-sdk-bootstrap", daemon=True).start()
 
     # ==================== Camera window ====================
 
@@ -1874,6 +1912,69 @@ class ArmControlGUI(QMainWindow):
         msg = str(exc).strip() or exc.__class__.__name__
         return {"ok": False, "error": msg, "error_type": exc.__class__.__name__, "backend": "sdk"}
 
+    def _sdk_set_runtime_state(
+        self,
+        mode: str,
+        *,
+        robot: Optional[SDKRobot] = None,
+        config_path: Optional[str] = None,
+        error_text: str = "",
+    ):
+        mode_norm = str(mode or "").strip().lower()
+        if mode_norm not in ("connected", "simulation", "disconnected"):
+            mode_norm = "disconnected"
+        self._sdk_runtime_mode = mode_norm
+        self._sdk_last_connect_error = str(error_text or "").strip()
+        if config_path is not None:
+            self._sdk_runtime_config_path = str(config_path or "").strip()
+        if robot is not None:
+            self._sdk_runtime_transport = self._sdk_transport_name(robot)
+        elif mode_norm == "disconnected":
+            self._sdk_runtime_transport = ""
+
+    def _sdk_build_robot(self, config_path: Optional[str], transport_override: Optional[str] = None) -> SDKRobot:
+        robot = RuntimeRobot.from_config(config_path) if config_path else RuntimeRobot()
+        if transport_override in ("mock", "tcp", "serial"):
+            robot.config.setdefault("transport", {})["type"] = str(transport_override)
+        return robot
+
+    def _sdk_should_fallback_to_sim(self) -> bool:
+        if self._sdk_transport_override is not None:
+            return False
+        if not self._sdk_fallback_config_path:
+            return False
+        cfg = str(self._sdk_config_path or "").strip()
+        fallback = str(self._sdk_fallback_config_path or "").strip()
+        if not cfg or not fallback:
+            return False
+        return os.path.normpath(cfg) != os.path.normpath(fallback)
+
+    def _sdk_connect_with_fallback(self) -> SDKRobot:
+        primary_cfg = self._sdk_config_path
+        try:
+            robot = self._sdk_build_robot(primary_cfg, self._sdk_transport_override)
+            robot.connect()
+            transport_name = self._sdk_transport_name(robot).lower()
+            mode = "simulation" if "mock" in transport_name else "connected"
+            self._sdk_set_runtime_state(mode, robot=robot, config_path=primary_cfg)
+            self._sdk_robot = robot
+            return robot
+        except Exception as exc:
+            self._sdk_set_runtime_state("disconnected", config_path=primary_cfg, error_text=str(exc))
+            if not self._sdk_should_fallback_to_sim():
+                self._sdk_robot = None
+                raise
+            fallback_cfg = self._sdk_fallback_config_path
+            self.log_signal.emit(
+                f"[SDK] real robot connect failed, fallback to simulation: {exc}",
+                "warning",
+            )
+            robot = self._sdk_build_robot(fallback_cfg, "mock")
+            robot.connect()
+            self._sdk_set_runtime_state("simulation", robot=robot, config_path=fallback_cfg)
+            self._sdk_robot = robot
+            return robot
+
     def _sdk_get_robot(self) -> SDKRobot:
         if not SDK_AVAILABLE:
             raise RuntimeError(f"soarmmoce_sdk import failed: {_SDK_IMPORT_ERROR}")
@@ -1882,24 +1983,35 @@ class ArmControlGUI(QMainWindow):
 
         with self._sdk_lock:
             if self._sdk_robot is None:
-                robot = RuntimeRobot.from_config(self._sdk_config_path) if self._sdk_config_path else RuntimeRobot()
-                if self._sdk_transport_override in ("mock", "tcp", "serial"):
-                    robot.config.setdefault("transport", {})["type"] = str(self._sdk_transport_override)
-                self._sdk_robot = robot
+                return self._sdk_connect_with_fallback()
 
             if not self._sdk_robot.connected:
-                self._sdk_robot.connect()
+                if self._sdk_runtime_mode == "simulation":
+                    self._sdk_robot = None
+                    return self._sdk_connect_with_fallback()
+                try:
+                    self._sdk_robot.connect()
+                except Exception:
+                    self._sdk_robot = None
+                    return self._sdk_connect_with_fallback()
+                transport_name = self._sdk_transport_name(self._sdk_robot).lower()
+                mode = "simulation" if "mock" in transport_name else "connected"
+                self._sdk_set_runtime_state(mode, robot=self._sdk_robot, config_path=self._sdk_runtime_config_path)
 
             return self._sdk_robot
 
     def _sdk_disconnect_robot(self):
         with self._sdk_lock:
             if self._sdk_robot is None:
+                self._sdk_set_runtime_state("disconnected")
                 return
             try:
                 self._sdk_robot.disconnect()
             except Exception:
                 pass
+            finally:
+                self._sdk_robot = None
+                self._sdk_set_runtime_state("disconnected")
 
     def _resolve_sim_home_q(self) -> Optional[np.ndarray]:
         if not SDK_AVAILABLE or RuntimeRobot is None or not self.sim_joint_names:
@@ -2830,12 +2942,12 @@ class ArmControlGUI(QMainWindow):
 
     def _on_connected(self):
         self._update_connection_widgets()
-        self.statusBar().showMessage(self._tr("status_connected"))
+        self.statusBar().showMessage(self._status_message_for_runtime())
         self._update_global_status_bar()
 
     def _on_connect_failed(self):
         self._update_connection_widgets()
-        self.statusBar().showMessage(self._tr("status_disconnected"))
+        self.statusBar().showMessage(self._status_message_for_runtime())
         self._update_global_status_bar()
 
     def on_disconnect(self):
@@ -2878,7 +2990,7 @@ class ArmControlGUI(QMainWindow):
                 self.camera_window.set_placeholder(pixmap, self._tr("camera_disconnected"))
 
         self.log(self._tr("log_disconnected"), "warning")
-        self.statusBar().showMessage(self._tr("status_disconnected"))
+        self.statusBar().showMessage(self._status_message_for_runtime())
         self._update_connection_widgets()
         self._update_global_status_bar()
 
