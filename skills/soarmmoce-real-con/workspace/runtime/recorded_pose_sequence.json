@@ -1,0 +1,126 @@
+{
+  "saved_at": "2026-03-31 17:47:35",
+  "pose_count": 2,
+  "poses": [
+    {
+      "index": 1,
+      "joint_targets_deg": {
+        "shoulder_pan": 6.681318681318682,
+        "shoulder_lift": 138.3365271226415,
+        "elbow_flex": -33.99483816964286,
+        "wrist_flex": -4.835164835164835,
+        "wrist_roll": -155.69230769230768
+      },
+      "tcp_pose": {
+        "xyz": [
+          -0.04774451474283488,
+          -0.3287468635204221,
+          0.21120828860600518
+        ],
+        "rpy": [
+          -0.15144589667395036,
+          -0.06803822779389491,
+          2.6345990108436355
+        ],
+        "quat_wxyz": [
+          -0.25241803298849086,
+          -0.013869726753193633,
+          0.08169612512479713,
+          -0.9640635406660738
+        ]
+      },
+      "raw_present_position": {
+        "shoulder_pan": 1971,
+        "shoulder_lift": 1063,
+        "elbow_flex": 2829,
+        "wrist_flex": 1992,
+        "wrist_roll": 276
+      },
+      "multi_turn_state": {
+        "shoulder_lift": {
+          "last_raw_mod": 1063.0,
+          "continuous_raw": -8342.0,
+          "motor_deg": -733.18359375,
+          "joint_deg": 138.3365271226415
+        },
+        "elbow_flex": {
+          "last_raw_mod": 2829.0,
+          "continuous_raw": 2166.0,
+          "motor_deg": 190.37109375,
+          "joint_deg": -33.99483816964286
+        }
+      },
+      "replay_joint_targets_deg": {
+        "shoulder_pan": 6.681318681318682,
+        "shoulder_lift": 138.3365271226415,
+        "elbow_flex": -33.99483816964286,
+        "wrist_flex": -4.835164835164835,
+        "wrist_roll": -5.362637362637362
+      },
+      "replay_multi_turn_continuous_raw": {
+        "shoulder_lift": -8342.0,
+        "elbow_flex": 2166.0
+      }
+    },
+    {
+      "index": 2,
+      "joint_targets_deg": {
+        "shoulder_pan": 6.681318681318682,
+        "shoulder_lift": 138.3365271226415,
+        "elbow_flex": 44.87130301339286,
+        "wrist_flex": -4.835164835164835,
+        "wrist_roll": -155.69230769230768
+      },
+      "tcp_pose": {
+        "xyz": [
+          -0.038591849452571124,
+          -0.2248917774389858,
+          0.035473090358809904
+        ],
+        "rpy": [
+          -1.5396331434787525,
+          -0.42407032726537014,
+          3.040855093749175
+        ],
+        "quat_wxyz": [
+          -0.1816299263358478,
+          -0.1166622188198121,
+          0.6871614257322936,
+          -0.6936927789337544
+        ]
+      },
+      "raw_present_position": {
+        "shoulder_pan": 1971,
+        "shoulder_lift": 1063,
+        "elbow_flex": 1900,
+        "wrist_flex": 1992,
+        "wrist_roll": 276
+      },
+      "multi_turn_state": {
+        "shoulder_lift": {
+          "last_raw_mod": 1063.0,
+          "continuous_raw": -8342.0,
+          "motor_deg": -733.18359375,
+          "joint_deg": 138.3365271226415
+        },
+        "elbow_flex": {
+          "last_raw_mod": 1900.0,
+          "continuous_raw": -2859.0,
+          "motor_deg": -251.279296875,
+          "joint_deg": 44.87130301339286
+        }
+      },
+      "replay_joint_targets_deg": {
+        "shoulder_pan": 6.681318681318682,
+        "shoulder_lift": 138.3365271226415,
+        "elbow_flex": 44.87130301339286,
+        "wrist_flex": -4.835164835164835,
+        "wrist_roll": -5.362637362637362
+      },
+      "replay_multi_turn_continuous_raw": {
+        "shoulder_lift": -8342.0,
+        "elbow_flex": -2859.0
+      }
+    }
+  ]
+}

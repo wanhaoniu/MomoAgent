@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import io
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -119,6 +120,46 @@ def diagnose_model(offsets_deg: Dict[str, float]) -> Dict[str, Any]:
     }
 
 
+def multi_turn_state_payload(arm: SoArmMoceController | None = None) -> Dict[str, Any]:
+    owned_arm = arm is None
+    arm = arm or SoArmMoceController()
+    try:
+        return arm.get_multi_turn_debug_state()
+    finally:
+        if owned_arm:
+            arm.close()
+
+
+def multi_turn_angles_payload(arm: SoArmMoceController | None = None) -> Dict[str, Any]:
+    owned_arm = arm is None
+    arm = arm or SoArmMoceController()
+    try:
+        state = arm.get_state()
+        return {
+            name: float(state["joint_state"][name])
+            for name in arm.meta()["multi_turn_joints"]
+            if name in state["joint_state"]
+        }
+    finally:
+        if owned_arm:
+            arm.close()
+
+
+def _print_json_payload(payload: Dict[str, Any]) -> None:
+    print(json.dumps({"ok": True, "result": payload, "error": None}, ensure_ascii=False, indent=2), flush=True)
+
+
+def watch_payload(interval: float, payload_factory) -> None:
+    sleep_s = max(0.05, float(interval))
+    arm = SoArmMoceController()
+    try:
+        while True:
+            _print_json_payload(payload_factory(arm))
+            time.sleep(sleep_s)
+    finally:
+        arm.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Read current soarmMoce state")
     parser.add_argument(
@@ -131,11 +172,48 @@ def main() -> None:
         default=json.dumps(DEFAULT_OFFSETS_DEG),
         help='JSON object for offset hypothesis, e.g. {"shoulder_lift": -90, "wrist_flex": -180}',
     )
+    parser.add_argument(
+        "--multi-turn",
+        action="store_true",
+        help="Print multi-turn runtime state, raw present position, and recent multi-turn goals",
+    )
+    parser.add_argument(
+        "--multi-turn-angles",
+        action="store_true",
+        help="Print only the current angle values of multi-turn joints",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Continuously print the selected payload until interrupted",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=0.2,
+        help="Watch refresh interval in seconds",
+    )
     args = parser.parse_args()
 
     if args.diag_model:
+        if args.watch:
+            raise ValueError("--watch is not supported together with --diag-model")
         run_and_print(lambda: diagnose_model(_parse_offsets_json(args.offsets_json)))
         return
+    if args.multi_turn:
+        if args.watch:
+            watch_payload(args.interval, multi_turn_state_payload)
+            return
+        run_and_print(multi_turn_state_payload)
+        return
+    if args.multi_turn_angles:
+        if args.watch:
+            watch_payload(args.interval, multi_turn_angles_payload)
+            return
+        run_and_print(multi_turn_angles_payload)
+        return
+    if args.watch:
+        raise ValueError("--watch currently requires --multi-turn or --multi-turn-angles")
     run_and_print(lambda: SoArmMoceController().read())
 
 

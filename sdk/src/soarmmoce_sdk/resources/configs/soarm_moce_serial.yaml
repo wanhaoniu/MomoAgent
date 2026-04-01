@@ -1,6 +1,6 @@
 transport:
   type: serial
-  port: /dev/ttyACM0
+  port: /dev/tty.usbmodem5B140315041
   baudrate: 115200
   timeout: 2.0
   robot_id: soarmmoce
@@ -31,7 +31,7 @@ robot:
   joint_scales:
     shoulder_pan: -1.0
     shoulder_lift: -5.3
-    elbow_flex: 5.6
+    elbow_flex: -5.6
     wrist_flex: 1.0
     wrist_roll: 1.0
   sim_joint_offsets_deg:
