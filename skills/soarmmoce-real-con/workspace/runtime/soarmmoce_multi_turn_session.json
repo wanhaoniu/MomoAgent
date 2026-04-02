@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "valid": true,
+  "robot_id": "soarmmoce",
+  "calib_dir": "/Users/moce/Documents/Project/MomoAgent/skills/soarmmoce-real-con/calibration",
+  "calibration": {
+    "shoulder_lift": {
+      "home_wrapped_raw": 1228.0,
+      "home_tolerance_raw": 96.0,
+      "min_relative_raw": -8984.0,
+      "max_relative_raw": 1.0
+    },
+    "elbow_flex": {
+      "home_wrapped_raw": 661.0,
+      "home_tolerance_raw": 96.0,
+      "min_relative_raw": -6258.0,
+      "max_relative_raw": 4003.0
+    }
+  },
+  "source": "init_home",
+  "initialized_at": 1775112976.007061,
+  "updated_at": 1775112991.791426,
+  "joints": {
+    "shoulder_lift": {
+      "zero_raw_mod": 1227.0,
+      "last_raw_mod": 1227.0,
+      "continuous_raw": 0.0
+    },
+    "elbow_flex": {
+      "zero_raw_mod": 658.0,
+      "last_raw_mod": 3195.0,
+      "continuous_raw": 2537.0
+    }
+  }
+}
