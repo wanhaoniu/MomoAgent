@@ -1,6 +1,6 @@
 ---
 name: soarmmoce-real-con
-description: 使用本技能通过本地 Python 脚本或本地 SDK 控制真实 soarmMoce 机械臂；适用于自然语言动作控制、连续小步笛卡尔移动、回零与状态查询。2/3 号关节按减速比 5.3/5.6 适配并运行在多圈模式，无夹爪舵机。
+description: 使用本技能通过本地 Python 脚本或本地 SDK 控制真实 soarmMoce 机械臂；适用于自然语言动作控制、连续小步笛卡尔移动、回零与状态查询。2/3 号关节按减速比 5.3/5.6 适配并运行在 mode 0 绝对位置配置，1/4/5 为单圈标定关节，可选夹爪单独处理。
 metadata:
   openclaw:
     emoji: "🤖"
@@ -20,8 +20,9 @@ metadata:
 - 当前 TCP 笛卡尔控制按 `5DOF position-only IK` 工作，只解末端位置 `x/y/z`，不再强行约束完整 6D 姿态。
 - 对 `delta/xyz` 这类笛卡尔移动，默认锁住 `wrist_flex + wrist_roll`，避免 4/5 号在只解 `xyz` 时自己乱补姿态。
 - 轨迹下发默认按时间频率连续插值，并使用平滑缓入缓出，避免单步跳变太大导致动作发卡。
-- 2 号关节 `shoulder_lift` 与 3 号关节 `elbow_flex` 已分别按减速比 `5.3 / 5.6` 做换算，底层运行在多圈模式。
-- 当前机械臂没有安装 6 号夹爪舵机，不要调用夹爪脚本或夹爪 API。
+- 2 号关节 `shoulder_lift` 与 3 号关节 `elbow_flex` 已分别按减速比 `5.3 / 5.6` 做换算，底层统一运行在 `mode 0`；其中 2/3 通过 `Min/Max_Position_Limit=0` 加 `18(Phase)=28` 读取绝对位置值。
+- 1/4/5 使用单圈标定，采用半圈归中后手动扫范围的方式记录 `homing_offset + range_min/max`。
+- 夹爪如果存在，可以单独标定；不要把夹爪标定和 2/3 的绝对位置逻辑混在一起。
 
 ## 何时使用
 
@@ -51,18 +52,21 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_state.py
 python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_diag_ik.py --dx 0.02 --frame base
 ```
 
-### 1.2) 自动标定
+### 1.2) 标定
 
-运行前先把机械臂摆到你认定的 `home` 姿态。脚本会以当前姿态作为 `home` 参考位，然后自动向正负两个方向寻限位，并把结果写到 `skills/soarmmoce-real-con/calibration/<robot_id>.json`。
+运行前先确认：
+- `2/3` 不参与传统单圈标定，只会被写成固定的绝对位置配置
+- 需要真正手动标定的是 `1/4/5`
+- `wrist_roll(5)` 只在安全范围内转动，避免扭线
 
 ```bash
-python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_auto_calibrate.py
+python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_calibrate.py
 ```
 
 如果只想先生成 JSON，不回写寄存器：
 
 ```bash
-python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_auto_calibrate.py --apply-registers false
+python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_calibrate.py --apply-registers false
 ```
 
 ### 2) 小步笛卡尔移动
@@ -91,29 +95,13 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py joint --
 
 ### 5) 回零
 
-多圈关节在每次机械臂重新上电后，先执行一次 `init_home`，把当前标定好的 home 姿态登记成这次运行的有效 session：
-
-```bash
-python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py init_home
-```
-
-如果机械臂已经大致摆回 home，但直接 `init_home` 仍然报 “not close enough to calibrated home”，可以先走自动恢复：
-
-```bash
-python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py init_home --recover
-```
-
-这条命令会先把 2/3 号多圈关节按标定 JSON 里的 `home_wrapped_raw` 拉回去，再立即初始化本次运行的 session。
-
-只有执行过这一步，后面的 `home` / `delta` / `xyz` 和多圈关节控制才会生效。
-
-### 6) 回零
+多圈关节现在直接使用硬件 mode 0 的绝对位置值，并始终以标定 JSON 中记录的 `home_present_raw` 作为基准；上电后可直接执行：
 
 ```bash
 python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py home
 ```
 
-### 7) 人脸居中跟随
+### 6) 人脸居中跟随
 
 如果用户说开启人脸跟随模式，或者跟随我的脸等请运行：
 
@@ -136,7 +124,6 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_move.py home
 from soarmmoce_sdk import SoArmMoceController
 
 arm = SoArmMoceController()
-arm.init_multi_turn_home()
 arm.move_delta(dz=0.01, frame="base")
 print(arm.get_state())
 ```
@@ -151,7 +138,6 @@ PYTHONPATH=~/.openclaw/skills/soarmmoce-real-con/scripts python3 /tmp/soarmmoce_
 
 - `SoArmMoceController().read()`
 - `SoArmMoceController().get_state()`
-- `SoArmMoceController().init_multi_turn_home()`
 - `SoArmMoceController().move_delta(...)`
 - `SoArmMoceController().move_to(...)`
 - `SoArmMoceController().move_joint(...)`
@@ -205,12 +191,12 @@ PYTHONPATH=~/.openclaw/skills/soarmmoce-real-con/scripts python3 /tmp/soarmmoce_
 
 串口相关脚本不要并行运行；同一时刻只保留一个 `state/move/diag` 进程，否则容易出现假性的缺电机 ID 或端口占用。
 
-自动标定脚本同样不要和其它串口脚本并行运行。它的限位判定优先看 `Present_Velocity + Moving`，`Present_Current` 只作为兜底异常保护。
+标定脚本同样不要和其它串口脚本并行运行。
 
 ## 参考文件
 
 - `skills/soarmmoce-real-con/scripts/soarmmoce_sdk.py`
-- `skills/soarmmoce-real-con/scripts/soarmmoce_auto_calibrate.py`
+- `skills/soarmmoce-real-con/scripts/soarmmoce_calibrate.py`
 - `skills/soarmmoce-real-con/scripts/soarmmoce_state.py`
 - `skills/soarmmoce-real-con/scripts/soarmmoce_diag_ik.py`
 - `skills/soarmmoce-real-con/scripts/soarmmoce_move.py`

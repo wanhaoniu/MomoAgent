@@ -5,7 +5,7 @@ transport:
   timeout: 2.0
   robot_id: soarmmoce
   calibration_path: ""
-  gripper_available: false
+  gripper_available: true
   arm_p_coefficient: 16
   arm_d_coefficient: 8
   update_hz: 25.0

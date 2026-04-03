@@ -1,80 +1,31 @@
-#!/usr/bin/env python3
-"""SDK-style control module for the local soarmMoce follower arm."""
-
 from __future__ import annotations
 
-import contextlib
-import io
 import json
+import math
 import os
-import threading
 import time
-import types
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
-import draccus
-import kinpy as kp
-import numpy as np
-from lerobot.motors import Motor, MotorCalibration, MotorNormMode
-from lerobot.motors.feetech import FeetechMotorsBus, OperatingMode
+import yaml
 
 from .json_utils import to_jsonable
 
 
-PACKAGE_ROOT = Path(__file__).resolve().parent
-RESOURCE_ROOT = PACKAGE_ROOT / "resources"
-REPO_ROOT = PACKAGE_ROOT.parents[2]
-REPO_SKILL_ROOT = REPO_ROOT / "skills" / "soarmmoce-real-con"
-OPENCLAW_SKILL_ROOT = Path.home() / ".openclaw" / "skills" / "soarmmoce-real-con"
-DEFAULT_URDF_PATH = RESOURCE_ROOT / "urdf" / "soarmoce_urdf.urdf"
-
-
-def _candidate_skill_roots() -> list[Path]:
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for path in (REPO_SKILL_ROOT, OPENCLAW_SKILL_ROOT):
-        try:
-            key = str(path.resolve()) if path.exists() else str(path)
-        except Exception:
-            key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(path)
-    return unique
-
-
-def _preferred_skill_root() -> Path:
-    for path in _candidate_skill_roots():
-        if path.exists():
-            return path
-    return OPENCLAW_SKILL_ROOT
-
-
-DEFAULT_CALIB_DIR = _preferred_skill_root() / "calibration"
-DEFAULT_RUNTIME_DIR = _preferred_skill_root() / "workspace" / "runtime"
-JOINTS = [
-    "shoulder_pan",
-    "shoulder_lift",
-    "elbow_flex",
-    "wrist_flex",
-    "wrist_roll",
-]
-ARM_JOINTS = list(JOINTS)
-MULTI_TURN_JOINTS = ("shoulder_lift", "elbow_flex")
-LOCKED_CARTESIAN_JOINTS = ("wrist_flex", "wrist_roll")
-MULTI_TURN_RAW_RANGE = 900000
-RAW_COUNTS_PER_REV = 4096.0
-HALF_RAW_COUNTS_PER_REV = RAW_COUNTS_PER_REV / 2.0
-DEFAULT_TARGET_FRAME = "wrist_roll"
-CALIBRATION_META_KEY = "_meta"
-MULTI_TURN_SETTLE_TOL_DEG = 0.5
-MULTI_TURN_SETTLE_MAX_ITERS = 6
-MULTI_TURN_SETTLE_WAIT_S = 0.08
-DEFAULT_MULTI_TURN_HOME_TOLERANCE_RAW = 96.0
-DEFAULT_MULTI_TURN_HOME_RECOVER_MAX_DELTA_RAW = 768.0
+RAW_COUNTS_PER_REV = 4096
+RAW_DEGREES_PER_REV = 360.0
+HALF_RAW_COUNTS_PER_REV = RAW_COUNTS_PER_REV // 2
+SINGLE_TURN_RAW_MIN = 0
+SINGLE_TURN_RAW_MAX = RAW_COUNTS_PER_REV - 1
+POSITION_MODE_VALUE = 0
+MULTI_TURN_PHASE_VALUE = 28
+MULTI_TURN_DISABLED_LIMIT_RAW = 0
+MULTI_TURN_ABSOLUTE_RAW_LIMIT = 30719
+DEFAULT_SERIAL_TIMEOUT_S = 2.0
+DEFAULT_SERIAL_BAUDRATE = 115200
+DEFAULT_MOTOR_MODEL = "sts3215"
 DEFAULT_HOME_JOINTS = {
     "shoulder_pan": 0.0,
     "shoulder_lift": 0.0,
@@ -96,26 +47,28 @@ DEFAULT_MODEL_OFFSETS_DEG = {
     "wrist_flex": 0.0,
     "wrist_roll": 0.0,
 }
-USER_DELTA_TO_MODEL_ROT = np.array(
-    [
-        [0.0, -1.0, 0.0],
-        [1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ],
-    dtype=float,
-)
-__all__ = [
-    "ARM_JOINTS",
-    "DEFAULT_MODEL_OFFSETS_DEG",
-    "JOINTS",
-    "HardwareError",
-    "IKError",
-    "SoArmMoceConfig",
-    "SoArmMoceController",
-    "ValidationError",
-    "resolve_config",
-    "to_jsonable",
-]
+DEFAULT_MOTOR_IDS = {
+    "shoulder_pan": 1,
+    "shoulder_lift": 2,
+    "elbow_flex": 3,
+    "wrist_flex": 4,
+    "wrist_roll": 5,
+}
+GRIPPER_JOINT_NAME = "gripper"
+DEFAULT_GRIPPER_SETTLE_TOLERANCE_RAW = 12
+DEFAULT_GRIPPER_POLL_INTERVAL_S = 0.02
+JOINTS = tuple(DEFAULT_HOME_JOINTS.keys())
+MULTI_TURN_JOINTS = ("shoulder_lift", "elbow_flex")
+BOUNDED_SINGLE_TURN_JOINTS = tuple(joint_name for joint_name in JOINTS if joint_name not in MULTI_TURN_JOINTS)
+
+PACKAGE_ROOT = Path(__file__).resolve().parent
+SDK_ROOT = PACKAGE_ROOT.parent.parent
+REPO_ROOT = SDK_ROOT.parent
+SKILL_ROOT = REPO_ROOT / "skills" / "soarmmoce-real-con"
+DEFAULT_CONFIG_PATH = PACKAGE_ROOT / "resources" / "configs" / "soarm_moce_serial.yaml"
+DEFAULT_URDF_PATH = PACKAGE_ROOT / "resources" / "urdf" / "soarmoce_urdf.urdf"
+DEFAULT_CALIB_DIR = SKILL_ROOT / "calibration"
+DEFAULT_RUNTIME_DIR = SKILL_ROOT / "workspace" / "runtime"
 
 
 class ValidationError(ValueError):
@@ -126,1054 +79,1003 @@ class HardwareError(RuntimeError):
     pass
 
 
-class IKError(RuntimeError):
+class CapabilityError(RuntimeError):
     pass
 
 
-class IKTraceError(IKError):
-    def __init__(self, message: str, *, details: Optional[Dict[str, Any]] = None):
-        super().__init__(message)
-        self.details = details or {}
+class AttrDict(dict):
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self[name] = value
 
 
-@dataclass(frozen=True)
+def _as_attrdict(value: Any) -> Any:
+    if isinstance(value, AttrDict):
+        return value
+    if isinstance(value, Mapping):
+        return AttrDict({str(key): _as_attrdict(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return [_as_attrdict(item) for item in value]
+    return value
+
+
+def _pkg_path_to_fs(path: str | Path) -> Path:
+    raw_path = str(path)
+    if raw_path.startswith("pkg://soarmmoce_sdk/"):
+        suffix = raw_path[len("pkg://soarmmoce_sdk/") :]
+        return (PACKAGE_ROOT / suffix).resolve()
+    return Path(raw_path).expanduser().resolve()
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if isinstance(loaded, dict):
+        return loaded
+    return {}
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(loaded, dict):
+        return loaded
+    return {}
+
+
+def _wrap_single_turn_raw(raw_value: int | float) -> int:
+    return int(round(float(raw_value))) % RAW_COUNTS_PER_REV
+
+
+def _signed_single_turn_delta(current_raw: int | float, startup_raw: int | float) -> int:
+    delta = _wrap_single_turn_raw(current_raw) - _wrap_single_turn_raw(startup_raw)
+    if delta > HALF_RAW_COUNTS_PER_REV:
+        delta -= RAW_COUNTS_PER_REV
+    elif delta < -HALF_RAW_COUNTS_PER_REV:
+        delta += RAW_COUNTS_PER_REV
+    return int(delta)
+
+
+@dataclass(slots=True)
 class SoArmMoceConfig:
-    port: str
-    robot_id: str
-    calib_dir: Path
-    urdf_path: Path
-    runtime_dir: Path
-    target_frame: str
-    home_joints: Dict[str, float]
-    joint_scales: Dict[str, float]
-    model_offsets_deg: Dict[str, float]
-    arm_p_coefficient: int
-    arm_d_coefficient: int
-    max_ee_pos_err_m: float
-    linear_step_m: float
-    joint_step_deg: float
-    cartesian_settle_time_s: float
-    cartesian_update_hz: float
-    joint_update_hz: float
-    ik_target_tol_m: float
-    ik_max_iters: int
-    ik_damping: float
-    ik_step_scale: float
-    ik_joint_step_deg: float
-    ik_seed_bias: float
+    port: str = ""
+    robot_id: str = "soarmmoce"
+    calib_dir: Path = field(default_factory=lambda: DEFAULT_CALIB_DIR)
+    urdf_path: Path = field(default_factory=lambda: DEFAULT_URDF_PATH)
+    runtime_dir: Path = field(default_factory=lambda: DEFAULT_RUNTIME_DIR)
+    target_frame: str = "wrist_roll"
+    home_joints: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_HOME_JOINTS))
+    joint_scales: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_JOINT_SCALES))
+    model_offsets_deg: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_MODEL_OFFSETS_DEG))
+    arm_p_coefficient: int = 16
+    arm_d_coefficient: int = 8
+    max_ee_pos_err_m: float = 0.03
+    linear_step_m: float = 0.01
+    joint_step_deg: float = 5.0
+    cartesian_settle_time_s: float = 0.15
+    cartesian_update_hz: float = 25.0
+    joint_update_hz: float = 25.0
+    ik_target_tol_m: float = 0.001
+    ik_max_iters: int = 200
+    ik_damping: float = 0.05
+    ik_step_scale: float = 0.8
+    ik_joint_step_deg: float = 8.0
+    ik_seed_bias: float = 0.02
+    gripper_available: bool = True
+    serial_timeout_s: float = DEFAULT_SERIAL_TIMEOUT_S
+    serial_baudrate: int = DEFAULT_SERIAL_BAUDRATE
+    motor_model: str = DEFAULT_MOTOR_MODEL
+
+    def __post_init__(self) -> None:
+        self.calib_dir = Path(self.calib_dir).expanduser().resolve()
+        self.urdf_path = Path(self.urdf_path).expanduser().resolve()
+        self.runtime_dir = Path(self.runtime_dir).expanduser().resolve()
+        self.port = str(self.port or "").strip()
+        self.robot_id = str(self.robot_id or "soarmmoce").strip() or "soarmmoce"
+        self.target_frame = str(self.target_frame or "wrist_roll").strip() or "wrist_roll"
+        self.home_joints = {joint: float(self.home_joints.get(joint, 0.0)) for joint in JOINTS}
+        self.joint_scales = {joint: float(self.joint_scales.get(joint, DEFAULT_JOINT_SCALES[joint])) for joint in JOINTS}
+        self.model_offsets_deg = {
+            joint: float(self.model_offsets_deg.get(joint, DEFAULT_MODEL_OFFSETS_DEG[joint])) for joint in JOINTS
+        }
+
+    @property
+    def calibration_path(self) -> Path:
+        return (self.calib_dir / f"{self.robot_id}.json").resolve()
 
 
-def _env_value(*keys: str, default: str = "") -> str:
-    for key in keys:
-        raw = os.environ.get(key)
-        if raw is None:
-            continue
-        value = str(raw).strip()
-        if value:
-            return value
-    return default
+@dataclass(frozen=True, slots=True)
+class JointRuntimeState:
+    startup_raw: int
+    last_raw: int
 
 
-def _load_calibration(robot_name: str, calib_dir: Path) -> dict[str, MotorCalibration]:
-    fpath = calib_dir / f"{robot_name}.json"
-    if not fpath.exists():
-        raise FileNotFoundError(f"Calibration file not found: {fpath}")
-    payload = json.loads(fpath.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"Calibration file must contain a JSON object: {fpath}")
-
-    # Keep runtime bus calibration compatible with extended manual/auto calibration payloads.
-    base_fields = ("id", "drive_mode", "homing_offset", "range_min", "range_max")
-    filtered_payload = {}
-    for joint_name, entry in payload.items():
-        if not isinstance(entry, dict):
-            continue
-        filtered_entry = {field: entry[field] for field in base_fields if field in entry}
-        if "id" not in filtered_entry:
-            continue
-        filtered_payload[joint_name] = filtered_entry
-
-    with io.StringIO(json.dumps(filtered_payload)) as f, draccus.config_type("json"):
-        return draccus.load(dict[str, MotorCalibration], f)
+@dataclass(frozen=True, slots=True)
+class GripperSpec:
+    name: str
+    motor_id: int
+    homing_offset: int
+    range_min: int
+    range_max: int
 
 
-def _sync_single_turn_calibration_registers(
-    bus: FeetechMotorsBus,
-    calibration: Dict[str, MotorCalibration],
-) -> None:
-    current_hw = bus.read_calibration()
-    for joint_name in JOINTS:
-        if joint_name in MULTI_TURN_JOINTS:
-            continue
-        target = calibration.get(joint_name)
-        if target is None:
-            continue
-        current = current_hw.get(joint_name)
-        target_offset = int(target.homing_offset)
-        target_min = int(target.range_min)
-        target_max = int(target.range_max)
-        if (
-            current is not None
-            and int(current.homing_offset) == target_offset
-            and int(current.range_min) == target_min
-            and int(current.range_max) == target_max
-        ):
-            continue
-        bus.write("Homing_Offset", joint_name, target_offset, normalize=False)
-        bus.write("Min_Position_Limit", joint_name, target_min, normalize=False)
-        bus.write("Max_Position_Limit", joint_name, target_max, normalize=False)
+class JointPositionPolicy:
+    kind: str = "base"
+
+    def register_writes(self, calibration_entry: Mapping[str, Any]) -> list[tuple[str, int]]:
+        raise NotImplementedError
+
+    def normalize_present_raw(self, raw_value: int | float) -> int:
+        raise NotImplementedError
+
+    def relative_raw(self, *, current_raw: int, startup_raw: int) -> int:
+        raise NotImplementedError
+
+    def relative_to_absolute_goal_raw(self, *, startup_raw: int, relative_raw: int | float) -> int:
+        raise NotImplementedError
+
+    def validate_goal_raw(self, raw_value: int) -> None:
+        return None
 
 
-def _candidate_calibration_dirs() -> list[Path]:
-    env = _env_value("SOARMMOCE_CALIB_DIR")
-    candidates: list[Path] = []
-    if env:
-        candidates.append(Path(env).expanduser())
-    candidates.extend(root / "calibration" for root in _candidate_skill_roots())
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for path in candidates:
-        try:
-            key = str(path.resolve()) if path.exists() else str(path)
-        except Exception:
-            key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(path)
-    return unique
+class SingleTurnPositionPolicy(JointPositionPolicy):
+    kind = "single_turn"
+
+    def register_writes(self, calibration_entry: Mapping[str, Any]) -> list[tuple[str, int]]:
+        return [
+            ("Homing_Offset", int(calibration_entry.get("homing_offset", 0))),
+            ("Min_Position_Limit", int(calibration_entry.get("range_min", 0))),
+            ("Max_Position_Limit", int(calibration_entry.get("range_max", RAW_COUNTS_PER_REV - 1))),
+            ("Operating_Mode", POSITION_MODE_VALUE),
+        ]
+
+    def normalize_present_raw(self, raw_value: int | float) -> int:
+        return _wrap_single_turn_raw(raw_value)
+
+    def relative_raw(self, *, current_raw: int, startup_raw: int) -> int:
+        return _signed_single_turn_delta(current_raw, startup_raw)
+
+    def relative_to_absolute_goal_raw(self, *, startup_raw: int, relative_raw: int | float) -> int:
+        return _wrap_single_turn_raw(startup_raw + int(round(float(relative_raw))))
 
 
-def _candidate_calibration_robot_ids() -> list[str]:
-    env_robot_id = _env_value("SOARMMOCE_ROBOT_ID")
-    if env_robot_id:
-        return [env_robot_id]
-    candidates = ["soarmmoce", "follower_moce"]
-    unique: list[str] = []
-    seen: set[str] = set()
-    for robot_id in candidates:
-        key = str(robot_id).strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        unique.append(key)
-    return unique
+class MultiTurnPositionPolicy(JointPositionPolicy):
+    kind = "multi_turn"
+
+    def register_writes(self, calibration_entry: Mapping[str, Any]) -> list[tuple[str, int]]:
+        return [
+            ("Homing_Offset", 0),
+            ("Phase", int(calibration_entry.get("phase", MULTI_TURN_PHASE_VALUE))),
+            ("Min_Position_Limit", MULTI_TURN_DISABLED_LIMIT_RAW),
+            ("Max_Position_Limit", MULTI_TURN_DISABLED_LIMIT_RAW),
+            ("Operating_Mode", POSITION_MODE_VALUE),
+        ]
+
+    def normalize_present_raw(self, raw_value: int | float) -> int:
+        return int(round(float(raw_value)))
+
+    def relative_raw(self, *, current_raw: int, startup_raw: int) -> int:
+        return int(current_raw - startup_raw)
+
+    def relative_to_absolute_goal_raw(self, *, startup_raw: int, relative_raw: int | float) -> int:
+        goal_raw = int(round(float(startup_raw) + float(relative_raw)))
+        self.validate_goal_raw(goal_raw)
+        return goal_raw
+
+    def validate_goal_raw(self, raw_value: int) -> None:
+        if raw_value < -MULTI_TURN_ABSOLUTE_RAW_LIMIT or raw_value > MULTI_TURN_ABSOLUTE_RAW_LIMIT:
+            raise HardwareError(
+                "Requested multi-turn absolute goal is outside the hardware-supported range "
+                f"[-{MULTI_TURN_ABSOLUTE_RAW_LIMIT}, {MULTI_TURN_ABSOLUTE_RAW_LIMIT}]: {raw_value}"
+            )
 
 
-def _resolve_calibration_target() -> tuple[str, Path]:
-    searched: list[str] = []
-    for candidate_dir in _candidate_calibration_dirs():
-        for robot_id in _candidate_calibration_robot_ids():
-            fpath = candidate_dir / f"{robot_id}.json"
-            searched.append(str(fpath))
-            if fpath.exists():
-                return robot_id, candidate_dir.resolve()
-    raise FileNotFoundError(
-        "Could not find calibration file. Searched: "
-        + str(searched)
-        + ". Set SOARMMOCE_CALIB_DIR and/or SOARMMOCE_ROBOT_ID explicitly."
-    )
+SINGLE_TURN_POLICY = SingleTurnPositionPolicy()
+MULTI_TURN_POLICY = MultiTurnPositionPolicy()
 
 
-def _candidate_urdf_paths() -> list[Path]:
-    env = _env_value("SOARMMOCE_URDF_PATH")
-    candidates: list[Path] = []
-    if env:
-        candidates.append(Path(env).expanduser())
-    candidates.append(DEFAULT_URDF_PATH)
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for path in candidates:
-        try:
-            key = str(path.resolve()) if path.exists() else str(path)
-        except Exception:
-            key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(path)
-    return unique
+@dataclass(frozen=True, slots=True)
+class JointSpec:
+    name: str
+    motor_id: int
+    reduction_ratio: float
+    policy: JointPositionPolicy
 
 
-def _resolve_urdf_path() -> Path:
-    for candidate in _candidate_urdf_paths():
-        if candidate.exists():
-            return candidate.resolve()
-    return _candidate_urdf_paths()[0]
+def resolve_config(path: str | Path | None = None) -> SoArmMoceConfig:
+    config_path = Path(os.environ.get("SOARMMOCE_CONFIG", path or DEFAULT_CONFIG_PATH)).expanduser().resolve()
+    payload = _load_yaml(config_path)
+    transport = payload.get("transport", {}) if isinstance(payload.get("transport"), dict) else {}
+    robot = payload.get("robot", {}) if isinstance(payload.get("robot"), dict) else {}
+    control = payload.get("control", {}) if isinstance(payload.get("control"), dict) else {}
+    ik = payload.get("ik", {}) if isinstance(payload.get("ik"), dict) else {}
+    calibration = payload.get("calibration", {}) if isinstance(payload.get("calibration"), dict) else {}
+    urdf = payload.get("urdf", {}) if isinstance(payload.get("urdf"), dict) else {}
 
+    robot_id = str(os.environ.get("SOARMMOCE_ROBOT_ID", transport.get("robot_id", "soarmmoce"))).strip() or "soarmmoce"
+    calib_dir = os.environ.get("SOARMMOCE_CALIB_DIR")
+    if calib_dir:
+        calib_root = Path(calib_dir).expanduser().resolve()
+    else:
+        calibration_path = str(calibration.get("path", "") or transport.get("calibration_path", "")).strip()
+        if calibration_path:
+            calib_root = _pkg_path_to_fs(calibration_path).expanduser().resolve().parent
+        else:
+            calib_root = DEFAULT_CALIB_DIR.resolve()
 
-def _resolve_home_joints() -> Dict[str, float]:
-    return {name: float(value) for name, value in DEFAULT_HOME_JOINTS.items()}
-
-
-def _resolve_runtime_dir(calib_dir: Optional[Path] = None) -> Path:
-    env = _env_value("SOARMMOCE_RUNTIME_DIR")
-    if env:
-        return Path(env).expanduser()
-    if calib_dir is not None:
-        calib_dir = Path(calib_dir).expanduser()
-        if calib_dir.name == "calibration":
-            return calib_dir.parent / "workspace" / "runtime"
-    for root in _candidate_skill_roots():
-        runtime_dir = root / "workspace" / "runtime"
-        if runtime_dir.exists():
-            return runtime_dir
-    return DEFAULT_RUNTIME_DIR
-
-
-def _resolve_joint_scales() -> Dict[str, float]:
-    raw = _env_value("SOARMMOCE_JOINT_SCALE_JSON")
-    scales = {name: float(value) for name, value in DEFAULT_JOINT_SCALES.items()}
-    if not raw:
-        return scales
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValidationError(f"Invalid JSON in JOINT_SCALE_JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValidationError("JOINT_SCALE_JSON must be a JSON object")
-    for joint_name, joint_value in payload.items():
-        joint = str(joint_name).strip()
-        if joint not in JOINTS:
-            raise ValidationError(f"Unknown joint in JOINT_SCALE_JSON: {joint}")
-        if not isinstance(joint_value, (int, float)):
-            raise ValidationError(f"Joint scale for {joint} must be numeric")
-        scale = float(joint_value)
-        if abs(scale) < 1e-9:
-            raise ValidationError(f"Joint scale for {joint} must be non-zero")
-        scales[joint] = scale
-    return scales
-
-
-def _resolve_model_offsets() -> Dict[str, float]:
-    raw = _env_value("SOARMMOCE_MODEL_OFFSETS_JSON")
-    offsets = {name: float(value) for name, value in DEFAULT_MODEL_OFFSETS_DEG.items()}
-    if not raw:
-        return offsets
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValidationError(f"Invalid JSON in MODEL_OFFSETS_JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValidationError("MODEL_OFFSETS_JSON must be a JSON object")
-    for joint_name, joint_value in payload.items():
-        joint = str(joint_name).strip()
-        if joint not in JOINTS:
-            raise ValidationError(f"Unknown joint in MODEL_OFFSETS_JSON: {joint}")
-        if not isinstance(joint_value, (int, float)):
-            raise ValidationError(f"Model offset for {joint} must be numeric")
-        offsets[joint] = float(joint_value)
-    return offsets
-
-
-def resolve_config() -> SoArmMoceConfig:
-    port = _env_value("SOARMMOCE_PORT", default="/dev/tty.usbmodem5B140315041")
-    urdf_path = _resolve_urdf_path()
-    target_frame = _env_value("SOARMMOCE_TARGET_FRAME", default=DEFAULT_TARGET_FRAME)
-    robot_id, chosen_dir = _resolve_calibration_target()
+    port = str(os.environ.get("SOARMMOCE_PORT", transport.get("port", ""))).strip()
+    urdf_path = _pkg_path_to_fs(str(urdf.get("path", DEFAULT_URDF_PATH)))
 
     return SoArmMoceConfig(
         port=port,
         robot_id=robot_id,
-        calib_dir=chosen_dir,
+        calib_dir=calib_root,
         urdf_path=urdf_path,
-        runtime_dir=_resolve_runtime_dir(chosen_dir),
-        target_frame=target_frame,
-        home_joints=_resolve_home_joints(),
-        joint_scales=_resolve_joint_scales(),
-        model_offsets_deg=_resolve_model_offsets(),
-        arm_p_coefficient=int(_env_value("SOARMMOCE_ARM_P_COEFFICIENT", default="16")),
-        arm_d_coefficient=int(_env_value("SOARMMOCE_ARM_D_COEFFICIENT", default="8")),
-        max_ee_pos_err_m=float(_env_value("SOARMMOCE_MAX_EE_POS_ERR_M", default="0.02")),
-        linear_step_m=float(_env_value("SOARMMOCE_LINEAR_STEP_M", default="0.01")),
-        joint_step_deg=float(_env_value("SOARMMOCE_JOINT_STEP_DEG", default="5.0")),
-        cartesian_settle_time_s=float(_env_value("SOARMMOCE_CARTESIAN_SETTLE_TIME_S", default="0.15")),
-        cartesian_update_hz=float(_env_value("SOARMMOCE_CARTESIAN_UPDATE_HZ", default="20.0")),
-        joint_update_hz=float(_env_value("SOARMMOCE_JOINT_UPDATE_HZ", default="25.0")),
-        ik_target_tol_m=float(_env_value("SOARMMOCE_IK_TARGET_TOL_M", default="0.001")),
-        ik_max_iters=int(_env_value("SOARMMOCE_IK_MAX_ITERS", default="200")),
-        ik_damping=float(_env_value("SOARMMOCE_IK_DAMPING", default="0.05")),
-        ik_step_scale=float(_env_value("SOARMMOCE_IK_STEP_SCALE", default="0.8")),
-        ik_joint_step_deg=float(_env_value("SOARMMOCE_IK_JOINT_STEP_DEG", default="8.0")),
-        ik_seed_bias=float(_env_value("SOARMMOCE_IK_SEED_BIAS", default="0.02")),
+        runtime_dir=DEFAULT_RUNTIME_DIR,
+        target_frame=str(robot.get("end_link", "wrist_roll")),
+        home_joints=dict(DEFAULT_HOME_JOINTS),
+        joint_scales={**DEFAULT_JOINT_SCALES, **dict(robot.get("joint_scales", {}))},
+        model_offsets_deg={**DEFAULT_MODEL_OFFSETS_DEG, **dict(robot.get("sim_joint_offsets_deg", {}))},
+        arm_p_coefficient=int(transport.get("arm_p_coefficient", 16)),
+        arm_d_coefficient=int(transport.get("arm_d_coefficient", 8)),
+        max_ee_pos_err_m=float(ik.get("max_pos_error_m", 0.03)),
+        linear_step_m=0.01,
+        joint_step_deg=5.0,
+        cartesian_settle_time_s=0.15,
+        cartesian_update_hz=float(control.get("hz", transport.get("update_hz", 25.0))),
+        joint_update_hz=float(control.get("hz", transport.get("update_hz", 25.0))),
+        ik_target_tol_m=float(ik.get("pos_tol", 0.001)),
+        ik_max_iters=int(ik.get("max_iters", 200)),
+        ik_damping=float(ik.get("damping", 0.05)),
+        ik_step_scale=float(ik.get("step_scale", 0.8)),
+        ik_joint_step_deg=8.0,
+        ik_seed_bias=float(ik.get("seed_bias", 0.02)),
+        gripper_available=bool(transport.get("gripper_available", True)),
+        serial_timeout_s=float(transport.get("timeout", DEFAULT_SERIAL_TIMEOUT_S)),
+        serial_baudrate=int(transport.get("baudrate", DEFAULT_SERIAL_BAUDRATE)),
+        motor_model=str(transport.get("motor_model", DEFAULT_MOTOR_MODEL)),
     )
 
 
-def _single_turn_zero_present_raw() -> int:
-    return int((RAW_COUNTS_PER_REV - 1.0) / 2.0)
-
-
-def _make_passthrough_unnormalize(original_method, passthrough_ids: set[int]):
-    def hybrid_unnormalize(self, ids_values: dict[int, float]) -> dict[int, int]:
-        result = {}
-        for motor_id, value in ids_values.items():
-            if motor_id in passthrough_ids:
-                result[motor_id] = int(value)
-            else:
-                result.update(original_method({motor_id: value}))
-        return result
-
-    return hybrid_unnormalize
-
-
 class SoArmMoceController:
-    def __init__(self, config: Optional[SoArmMoceConfig] = None):
-        self.config = config or resolve_config()
-        self._lock = threading.Lock()
-        self._bus: Optional[FeetechMotorsBus] = None
-        self._kin_chain = None
-        self._multi_turn_state: Dict[str, Dict[str, float]] = {}
-        self._multi_turn_zero_raw_mod: Dict[str, float] = {}
-        self._multi_turn_session_valid = False
-        self._multi_turn_session_source: Optional[str] = None
-        self._multi_turn_session_initialized_at: Optional[float] = None
-        self._last_multi_turn_goal_raw_mod: Dict[str, float] = {}
-        self._last_multi_turn_goal_continuous_raw: Dict[str, float] = {}
-        self._last_multi_turn_goal_joint_deg: Dict[str, float] = {}
-        self._manual_multi_turn_readback = False
-        self._calibration_payload = self._load_calibration_payload()
-        self._home_joint_deg = self._resolve_calibration_home_joint_deg(self._calibration_payload)
-        self._joint_limits_deg = self._compute_joint_limits_deg(self._calibration_payload)
+    """Real-arm controller rebuilt around startup-referenced position semantics.
 
-    def __enter__(self) -> "SoArmMoceController":
+    Important design points:
+    - Single-turn and multi-turn joints both use operating mode 0. The difference
+      is in how the servo registers are configured and how raw position values are
+      interpreted, not in a separate runtime state machine.
+    - Multi-turn joints disable both hardware position limits by writing 0/0, and
+      set register 18 (Phase) to 28, which exposes the signed absolute range
+      `-30719 .. 30719` required by the hardware.
+    - Startup position is recorded once and used as the runtime zero reference.
+      This intentionally removes the old init-home, cross-turn accumulation, and
+      power-loss recovery logic.
+    """
+
+    def __init__(self, config: SoArmMoceConfig | None = None) -> None:
+        self.config = config or resolve_config()
+        self._calibration_payload = _read_json(self.config.calibration_path)
+        self._joint_specs = self._build_joint_specs()
+        self._gripper_spec = self._build_gripper_spec()
+        self._joint_runtime_state: dict[str, JointRuntimeState] = {}
+        self._multi_turn_state: dict[str, dict[str, float | int | None]] = {}
+        self._last_multi_turn_goal_raw_mod: dict[str, int] = {}
+        self._last_multi_turn_goal_continuous_raw: dict[str, float] = {}
+        self._last_multi_turn_goal_joint_deg: dict[str, float] = {}
+        self._gripper_integrated = False
+        self._gripper_probe_result: bool | None = None
+        self._last_gripper_goal_raw: int | None = None
+        self._manual_multi_turn_readback = False
+        self._bus: Any | None = None
+        self.robot_model = _as_attrdict(
+            {
+                "joint_names": list(JOINTS),
+                "joint_limits": [
+                    (-2.0 * math.pi, 2.0 * math.pi) if joint in MULTI_TURN_JOINTS else (-math.pi, math.pi)
+                    for joint in JOINTS
+                ],
+            }
+        )
+
+    def __enter__(self) -> SoArmMoceController:
+        self._ensure_bus()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def close(self) -> None:
+    def close(self, *, disable_torque: bool = True) -> None:
         if self._bus is None:
             return
         disconnect = getattr(self._bus, "disconnect", None)
         if callable(disconnect):
             try:
-                disconnect()
+                disconnect(disable_torque=bool(disable_torque))
             except Exception:
-                pass
+                try:
+                    disconnect()
+                except Exception:
+                    pass
         self._bus = None
-        self._multi_turn_state = {}
-        self._multi_turn_zero_raw_mod = {}
-        self._multi_turn_session_valid = False
-        self._multi_turn_session_source = None
-        self._multi_turn_session_initialized_at = None
-        self._last_multi_turn_goal_raw_mod = {}
-        self._last_multi_turn_goal_continuous_raw = {}
-        self._last_multi_turn_goal_joint_deg = {}
-        self._manual_multi_turn_readback = False
+        self._gripper_integrated = False
 
-    def _append_sdk_debug_log(self, level: str, message: str) -> None:
-        path = self.config.runtime_dir / "sdk_multi_turn_debug.log"
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{level}] {message}\n")
-        except Exception:
-            pass
-
-    @staticmethod
-    def _debug_joint_subset(payload: Dict[str, Any], joints: list[str] | tuple[str, ...]) -> Dict[str, float]:
-        result: Dict[str, float] = {}
-        for joint_name in joints:
-            value = payload.get(joint_name)
-            if isinstance(value, (int, float)):
-                result[joint_name] = float(value)
-        return result
-
-    def _record_multi_turn_goal(
-        self,
-        *,
-        bus_cmd: Dict[str, float],
-        target_joint_deg: Dict[str, float],
-        target_multi_turn_continuous_raw: Optional[Dict[str, float]] = None,
-    ) -> None:
-        target_multi_turn_continuous_raw = dict(target_multi_turn_continuous_raw or {})
-        for joint_name in MULTI_TURN_JOINTS:
-            if joint_name not in bus_cmd or joint_name not in target_joint_deg:
-                continue
-            self._last_multi_turn_goal_raw_mod[joint_name] = self._normalize_raw_mod(float(bus_cmd[joint_name]))
-            if joint_name in target_multi_turn_continuous_raw:
-                self._last_multi_turn_goal_continuous_raw[joint_name] = float(target_multi_turn_continuous_raw[joint_name])
-            else:
-                target_motor_deg = self._joint_to_motor_deg(joint_name, float(target_joint_deg[joint_name]))
-                self._last_multi_turn_goal_continuous_raw[joint_name] = (
-                    float(target_motor_deg) * RAW_COUNTS_PER_REV / 360.0
-                )
-            self._last_multi_turn_goal_joint_deg[joint_name] = float(target_joint_deg[joint_name])
-
-    def set_manual_multi_turn_readback(self, enabled: bool) -> None:
-        enabled = bool(enabled)
-        self._manual_multi_turn_readback = enabled
-        self._last_multi_turn_goal_raw_mod = {}
-        self._last_multi_turn_goal_continuous_raw = {}
-        self._last_multi_turn_goal_joint_deg = {}
-        if enabled and self._bus is not None:
-            try:
-                self._prime_multi_turn_state_from_current_pose(self._bus)
-            except Exception as exc:
-                self._append_sdk_debug_log(
-                    "WARN",
-                    f"failed to prime manual multi-turn readback: {exc}",
-                )
-        self._append_sdk_debug_log("INFO", f"manual multi-turn readback enabled={enabled}")
-
-    def _prime_multi_turn_state_from_current_pose(self, bus: FeetechMotorsBus) -> None:
-        raw_motor = self._read_present_position_raw_map(bus)
-        raw_mod_by_joint = {
-            name: self._normalize_raw_mod(self._require_raw_present_position(raw_motor, name))
-            for name in MULTI_TURN_JOINTS
-        }
-        persisted_session = self._load_persisted_multi_turn_session()
-        if persisted_session:
-            restored: Dict[str, Dict[str, float]] = {}
-            zero_raw_mod: Dict[str, float] = {}
-            for name, raw_mod in raw_mod_by_joint.items():
-                prior = persisted_session["joints"].get(name)
-                if prior is None:
-                    restored = {}
-                    break
-                delta = self._raw_mod_delta(raw_mod, float(prior["last_raw_mod"]))
-                restored[name] = {
-                    "last_raw_mod": float(raw_mod),
-                    "continuous_raw": float(prior["continuous_raw"]) + float(delta),
-                }
-                zero_raw_mod[name] = self._normalize_raw_mod(float(prior["zero_raw_mod"]))
-            self._multi_turn_state = restored or {
-                name: {"last_raw_mod": float(raw_mod), "continuous_raw": 0.0}
-                for name, raw_mod in raw_mod_by_joint.items()
-            }
-            self._multi_turn_zero_raw_mod = zero_raw_mod if restored else {}
-            self._multi_turn_session_valid = bool(restored)
-            self._multi_turn_session_source = (
-                str(persisted_session.get("source") or "runtime_session") if restored else None
-            )
-            initialized_at = persisted_session.get("initialized_at")
-            self._multi_turn_session_initialized_at = float(initialized_at) if restored and isinstance(initialized_at, (int, float)) else None
-        else:
-            self._multi_turn_state = {
-                name: {"last_raw_mod": float(raw_mod), "continuous_raw": 0.0}
-                for name, raw_mod in raw_mod_by_joint.items()
-            }
-            self._multi_turn_zero_raw_mod = {}
-            self._multi_turn_session_valid = False
-            self._multi_turn_session_source = None
-            self._multi_turn_session_initialized_at = None
-        self._persist_multi_turn_session()
-
-    def meta(self) -> Dict[str, Any]:
-        return {
-            "connected": True,
-            "robot_type": "soarmmoce",
-            "robot_id": self.config.robot_id,
-            "port": self.config.port,
-            "joint_names": list(JOINTS),
-            "multi_turn_joints": list(MULTI_TURN_JOINTS),
-            "joint_scales": dict(self.config.joint_scales),
-            "model_offsets_deg": dict(self.config.model_offsets_deg),
-            "home_joint_deg": dict(self._home_joint_deg),
-            "joint_limits_deg": dict(self._joint_limits_deg),
-            "multi_turn_session": self._multi_turn_session_info(),
-            "ik_mode": "5dof_position_only",
-            "cartesian_locked_joints": list(LOCKED_CARTESIAN_JOINTS),
-            "delta_frames": {
-                "base": "raw URDF base frame (matches packaged SDK/simulation)",
-                "urdf": "raw URDF base frame (alias of base)",
-                "user": "user-facing frame: x=forward, y=left, z=up",
-                "tool": "current tool frame",
-            },
-            "gripper_available": False,
-        }
-
-    def _load_calibration_payload(self) -> Dict[str, Any]:
-        fpath = self.config.calib_dir / f"{self.config.robot_id}.json"
-        if not fpath.exists():
-            return {}
-        payload = json.loads(fpath.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
-
-    def _resolve_calibration_home_joint_deg(self, payload: Dict[str, Any]) -> Dict[str, float]:
-        meta = payload.get(CALIBRATION_META_KEY)
-        if isinstance(meta, dict):
-            home_joint_deg = meta.get("home_joint_deg")
-            if isinstance(home_joint_deg, dict):
-                resolved = {name: 0.0 for name in JOINTS}
-                for name in JOINTS:
-                    if name in home_joint_deg and isinstance(home_joint_deg[name], (int, float)):
-                        resolved[name] = float(home_joint_deg[name])
-                return resolved
-        return {name: float(value) for name, value in self.config.home_joints.items()}
-
-    def _single_turn_joint_limit_deg(self, joint_name: str, entry: Dict[str, Any]) -> Dict[str, float]:
-        range_min = float(entry["range_min"])
-        range_max = float(entry["range_max"])
-        zero_raw = float(_single_turn_zero_present_raw())
-        max_res = RAW_COUNTS_PER_REV - 1.0
-        motor_min_deg = (range_min - zero_raw) * 360.0 / max_res
-        motor_max_deg = (range_max - zero_raw) * 360.0 / max_res
-        joint_min_deg = self._motor_to_joint_deg(joint_name, motor_min_deg)
-        joint_max_deg = self._motor_to_joint_deg(joint_name, motor_max_deg)
-        return {
-            "min_deg": float(min(joint_min_deg, joint_max_deg)),
-            "max_deg": float(max(joint_min_deg, joint_max_deg)),
-        }
-
-    def _multi_turn_joint_limit_deg(self, joint_name: str, entry: Dict[str, Any]) -> Dict[str, float]:
-        min_rel_raw = float(entry["min_relative_raw"])
-        max_rel_raw = float(entry["max_relative_raw"])
-        motor_min_deg = min_rel_raw * 360.0 / RAW_COUNTS_PER_REV
-        motor_max_deg = max_rel_raw * 360.0 / RAW_COUNTS_PER_REV
-        joint_min_deg = self._motor_to_joint_deg(joint_name, motor_min_deg)
-        joint_max_deg = self._motor_to_joint_deg(joint_name, motor_max_deg)
-        return {
-            "min_deg": float(min(joint_min_deg, joint_max_deg)),
-            "max_deg": float(max(joint_min_deg, joint_max_deg)),
-        }
-
-    def _compute_joint_limits_deg(self, payload: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
-        limits: Dict[str, Dict[str, float]] = {}
-        for joint_name in JOINTS:
-            entry = payload.get(joint_name)
-            if not isinstance(entry, dict):
-                continue
-            try:
-                if joint_name in MULTI_TURN_JOINTS and {"min_relative_raw", "max_relative_raw"}.issubset(entry):
-                    limits[joint_name] = self._multi_turn_joint_limit_deg(joint_name, entry)
-                elif {"range_min", "range_max"}.issubset(entry):
-                    limits[joint_name] = self._single_turn_joint_limit_deg(joint_name, entry)
-            except Exception:
-                continue
-        return limits
-
-    def _multi_turn_session_path(self) -> Path:
-        return self.config.runtime_dir / f"{self.config.robot_id}_multi_turn_session.json"
-
-    def _multi_turn_calibration_signature(self) -> Dict[str, Dict[str, float]]:
-        signature: Dict[str, Dict[str, float]] = {}
-        for joint_name in MULTI_TURN_JOINTS:
-            entry = self._calibration_payload.get(joint_name)
-            if not isinstance(entry, dict):
-                continue
-            item: Dict[str, float] = {
-                "home_wrapped_raw": float(self._multi_turn_home_wrapped_raw(joint_name)),
-                "home_tolerance_raw": float(self._multi_turn_home_tolerance_raw(joint_name)),
-            }
-            for key in ("min_relative_raw", "max_relative_raw"):
-                if isinstance(entry.get(key), (int, float)):
-                    item[key] = float(entry[key])
-            signature[joint_name] = item
-        return signature
-
-    def _persisted_multi_turn_session_matches_runtime(self, payload: Dict[str, Any]) -> bool:
-        robot_id = payload.get("robot_id")
-        if robot_id is not None and str(robot_id) != str(self.config.robot_id):
-            return False
-
-        expected_sig = self._multi_turn_calibration_signature()
-        stored_sig = payload.get("calibration")
-        if stored_sig is not None:
-            if not isinstance(stored_sig, dict):
-                return False
-            for joint_name in MULTI_TURN_JOINTS:
-                expected_entry = expected_sig.get(joint_name)
-                stored_entry = stored_sig.get(joint_name)
-                if not isinstance(expected_entry, dict) or not isinstance(stored_entry, dict):
-                    return False
-                for key, expected_value in expected_entry.items():
-                    stored_value = stored_entry.get(key)
-                    if not isinstance(stored_value, (int, float)):
-                        return False
-                    if abs(float(stored_value) - float(expected_value)) > 1e-6:
-                        return False
-
-        joints = payload.get("joints")
-        if not isinstance(joints, dict):
-            return False
-        for joint_name in MULTI_TURN_JOINTS:
-            stored_entry = joints.get(joint_name)
-            expected_entry = expected_sig.get(joint_name)
-            if not isinstance(stored_entry, dict) or not isinstance(expected_entry, dict):
-                return False
-            if "zero_raw_mod" not in stored_entry:
-                return False
-            try:
-                stored_zero_raw_mod = self._normalize_raw_mod(float(stored_entry["zero_raw_mod"]))
-            except Exception:
-                return False
-            home_wrapped_raw = float(expected_entry["home_wrapped_raw"])
-            home_tolerance_raw = float(expected_entry["home_tolerance_raw"])
-            if abs(self._raw_mod_delta(stored_zero_raw_mod, home_wrapped_raw)) > max(1.0, home_tolerance_raw):
-                return False
-        return True
-
-    @staticmethod
-    def _normalize_raw_mod(raw_value: float) -> float:
-        return float(float(raw_value) % RAW_COUNTS_PER_REV)
-
-    @staticmethod
-    def _require_raw_present_position(raw_motor: Dict[str, Any], joint_name: str) -> float:
-        if joint_name not in raw_motor:
-            raise ConnectionError(f"Present_Position missing for joint '{joint_name}'")
-        value = raw_motor[joint_name]
-        if not isinstance(value, (int, float)):
-            raise ConnectionError(f"Present_Position for joint '{joint_name}' is not numeric: {value!r}")
-        return float(value)
-
-    def _read_present_position_raw_map(self, bus: FeetechMotorsBus) -> Dict[str, float]:
-        sync_raw = bus.sync_read("Present_Position", normalize=False)
-        raw_map: Dict[str, float] = {}
+    def _build_joint_specs(self) -> dict[str, JointSpec]:
+        specs: dict[str, JointSpec] = {}
         for joint_name in JOINTS:
             if joint_name in MULTI_TURN_JOINTS:
-                raw_value = bus.read("Present_Position", joint_name, normalize=False)
+                policy = MULTI_TURN_POLICY
+            elif joint_name in BOUNDED_SINGLE_TURN_JOINTS:
+                policy = SINGLE_TURN_POLICY
             else:
-                raw_value = sync_raw.get(joint_name)
-                if not isinstance(raw_value, (int, float)):
-                    raw_value = bus.read("Present_Position", joint_name, normalize=False)
-            raw_map[joint_name] = float(raw_value)
-        return raw_map
+                raise ValidationError(f"Joint '{joint_name}' is not assigned to a position policy group")
+            specs[joint_name] = JointSpec(
+                name=joint_name,
+                motor_id=DEFAULT_MOTOR_IDS[joint_name],
+                reduction_ratio=float(self.config.joint_scales[joint_name]),
+                policy=policy,
+            )
+        return specs
 
-    @staticmethod
-    def _raw_mod_delta(current_raw_mod: float, last_raw_mod: float) -> float:
-        delta = float(current_raw_mod) - float(last_raw_mod)
-        if delta > HALF_RAW_COUNTS_PER_REV:
-            delta -= RAW_COUNTS_PER_REV
-        elif delta < -HALF_RAW_COUNTS_PER_REV:
-            delta += RAW_COUNTS_PER_REV
-        return float(delta)
+    def _build_gripper_spec(self) -> GripperSpec | None:
+        if not bool(self.config.gripper_available):
+            return None
 
-    def _multi_turn_session_info(self) -> Dict[str, Any]:
-        return {
-            "valid": bool(self._multi_turn_session_valid),
-            "source": self._multi_turn_session_source,
-            "initialized_at": self._multi_turn_session_initialized_at,
-            "path": str(self._multi_turn_session_path()),
-            "zero_raw_mod": {name: float(value) for name, value in self._multi_turn_zero_raw_mod.items()},
-        }
+        entry = self._calibration_payload.get(GRIPPER_JOINT_NAME)
+        if entry is None:
+            return None
+        if not isinstance(entry, Mapping):
+            raise ValidationError(
+                f"Calibration entry '{GRIPPER_JOINT_NAME}' must be an object in {self.config.calibration_path}"
+            )
 
-    def _multi_turn_home_wrapped_raw(self, joint_name: str) -> float:
-        entry = self._calibration_payload.get(joint_name)
-        if not isinstance(entry, dict) or "home_wrapped_raw" not in entry:
-            raise ValidationError(f"Calibration for multi-turn joint '{joint_name}' is missing home_wrapped_raw")
-        return self._normalize_raw_mod(float(entry["home_wrapped_raw"]))
+        required_fields = ("id", "homing_offset", "range_min", "range_max")
+        missing_fields = [field_name for field_name in required_fields if field_name not in entry]
+        if missing_fields:
+            raise ValidationError(
+                f"Calibration entry '{GRIPPER_JOINT_NAME}' is missing required fields: {', '.join(missing_fields)}"
+            )
 
-    def _multi_turn_home_tolerance_raw(self, joint_name: str) -> float:
-        entry = self._calibration_payload.get(joint_name)
-        if isinstance(entry, dict) and isinstance(entry.get("home_tolerance_raw"), (int, float)):
-            return max(0.0, float(entry["home_tolerance_raw"]))
-        return float(DEFAULT_MULTI_TURN_HOME_TOLERANCE_RAW)
-
-    def _describe_multi_turn_home_alignment(
-        self,
-        raw_motor: Dict[str, int | float],
-    ) -> Dict[str, Dict[str, float]]:
-        alignment: Dict[str, Dict[str, float]] = {}
-        for name in MULTI_TURN_JOINTS:
-            raw_mod = self._normalize_raw_mod(self._require_raw_present_position(raw_motor, name))
-            home_raw = self._multi_turn_home_wrapped_raw(name)
-            delta_raw = self._raw_mod_delta(raw_mod, home_raw)
-            delta_motor_deg = float(delta_raw) * 360.0 / RAW_COUNTS_PER_REV
-            alignment[name] = {
-                "current_raw_mod": float(raw_mod),
-                "home_wrapped_raw": float(home_raw),
-                "delta_raw": float(delta_raw),
-                "delta_motor_deg": float(delta_motor_deg),
-                "delta_joint_deg": float(self._motor_to_joint_deg(name, delta_motor_deg)),
-                "tolerance_raw": float(self._multi_turn_home_tolerance_raw(name)),
-            }
-        return alignment
-
-    def _load_persisted_multi_turn_session(self) -> Dict[str, Any]:
-        path = self._multi_turn_session_path()
-        if not path.exists():
-            return {}
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        if not isinstance(payload, dict):
-            return {}
-        schema_version = int(payload.get("schema_version", 0))
-        if schema_version not in {1, 2}:
-            return {}
-        if payload.get("valid") is not True:
-            return {}
-        joints = payload.get("joints")
-        if not isinstance(joints, dict):
-            return {}
-        restored: Dict[str, Dict[str, float]] = {}
-        for name in MULTI_TURN_JOINTS:
-            entry = joints.get(name)
-            if not isinstance(entry, dict):
-                return {}
-            try:
-                restored[name] = {
-                    "zero_raw_mod": self._normalize_raw_mod(float(entry["zero_raw_mod"])),
-                    "last_raw_mod": self._normalize_raw_mod(float(entry["last_raw_mod"])),
-                    "continuous_raw": float(entry["continuous_raw"]),
-                }
-            except Exception:
-                return {}
-        if not self._persisted_multi_turn_session_matches_runtime(
-            {
-                "robot_id": payload.get("robot_id"),
-                "calibration": payload.get("calibration"),
-                "joints": restored,
-            }
-        ):
-            return {}
-        return {
-            "schema_version": schema_version,
-            "valid": True,
-            "robot_id": payload.get("robot_id"),
-            "calib_dir": payload.get("calib_dir"),
-            "calibration": payload.get("calibration"),
-            "source": payload.get("source"),
-            "initialized_at": payload.get("initialized_at"),
-            "joints": restored,
-        }
-
-    def _persist_multi_turn_session(self) -> None:
-        path = self._multi_turn_session_path()
-        if not self._multi_turn_session_valid or not self._multi_turn_state:
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-            except Exception:
-                pass
-            return
-        payload = {
-            "schema_version": 2,
-            "valid": True,
-            "robot_id": self.config.robot_id,
-            "calib_dir": str(self.config.calib_dir.resolve()),
-            "calibration": self._multi_turn_calibration_signature(),
-            "source": self._multi_turn_session_source or "runtime_session",
-            "initialized_at": (
-                float(self._multi_turn_session_initialized_at)
-                if self._multi_turn_session_initialized_at is not None
-                else float(time.time())
-            ),
-            "updated_at": float(time.time()),
-            "joints": {
-                name: {
-                    "zero_raw_mod": float(self._multi_turn_zero_raw_mod.get(name, state["last_raw_mod"])),
-                    "last_raw_mod": float(state["last_raw_mod"]),
-                    "continuous_raw": float(state["continuous_raw"]),
-                }
-                for name, state in self._multi_turn_state.items()
-                if name in MULTI_TURN_JOINTS
-            },
-        }
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-
-    def _require_multi_turn_session_initialized(self, action: str) -> None:
-        if self._multi_turn_session_valid:
-            return
-        raise ValidationError(
-            f"Multi-turn runtime session is not initialized for '{action}'. "
-            "Place the arm at calibrated home and run 'init_home' first."
+        return GripperSpec(
+            name=GRIPPER_JOINT_NAME,
+            motor_id=int(entry["id"]),
+            homing_offset=int(entry["homing_offset"]),
+            range_min=int(entry["range_min"]),
+            range_max=int(entry["range_max"]),
         )
 
-    def init_multi_turn_home(self) -> Dict[str, Any]:
-        bus = self._ensure_bus()
-        raw_motor = self._read_present_position_raw_map(bus)
-        alignment = self._describe_multi_turn_home_alignment(raw_motor)
-        raw_mod_by_joint = {name: float(info["current_raw_mod"]) for name, info in alignment.items()}
-        home_delta_raw: Dict[str, float] = {name: float(info["delta_raw"]) for name, info in alignment.items()}
-        tolerance_raw: Dict[str, float] = {name: float(info["tolerance_raw"]) for name, info in alignment.items()}
-        violations: list[str] = []
-        for name, info in alignment.items():
-            delta_raw = float(info["delta_raw"])
-            tol_raw = float(info["tolerance_raw"])
-            if abs(delta_raw) > tol_raw:
-                violations.append(
-                    f"{name}: current_raw_mod={info['current_raw_mod']:.1f}, "
-                    f"home_wrapped_raw={info['home_wrapped_raw']:.1f}, "
-                    f"delta_raw={delta_raw:.1f}, tolerance_raw={tol_raw:.1f}, "
-                    f"delta_joint_deg={info['delta_joint_deg']:.2f}"
-                )
-        if violations:
-            raise ValidationError(
-                "Current multi-turn pose is not close enough to calibrated home to initialize the runtime session:\n"
-                + "\n".join(violations)
-                + "\nIf the arm is already near home, try 'init_home --recover' first."
+    def _probe_gripper_presence(self) -> bool:
+        if self._gripper_spec is None:
+            return False
+        if self._gripper_probe_result is not None:
+            return bool(self._gripper_probe_result)
+
+        try:
+            from lerobot.motors import Motor, MotorNormMode
+            from lerobot.motors.feetech import FeetechMotorsBus
+        except ImportError:
+            self._gripper_probe_result = False
+            return False
+
+        probe_bus = None
+        detected = False
+        try:
+            probe_bus = FeetechMotorsBus(
+                port=self.config.port,
+                motors={
+                    self._gripper_spec.name: Motor(
+                        self._gripper_spec.motor_id,
+                        self.config.motor_model,
+                        MotorNormMode.DEGREES,
+                    )
+                },
             )
+            connect = getattr(probe_bus, "connect", None)
+            if callable(connect):
+                connect()
+            probe_bus.read("Present_Position", self._gripper_spec.name, normalize=False)
+            detected = True
+        except Exception:
+            detected = False
+        finally:
+            disconnect = getattr(probe_bus, "disconnect", None)
+            if callable(disconnect):
+                try:
+                    disconnect()
+                except Exception:
+                    pass
 
-        self._multi_turn_state = {
-            name: {"last_raw_mod": float(raw_mod), "continuous_raw": 0.0}
-            for name, raw_mod in raw_mod_by_joint.items()
+        self._gripper_probe_result = bool(detected)
+        return bool(detected)
+
+    def _ensure_bus(self):
+        if self._bus is not None:
+            return self._bus
+
+        try:
+            from lerobot.motors import Motor, MotorNormMode
+            from lerobot.motors.feetech import FeetechMotorsBus
+        except ImportError as exc:
+            raise HardwareError(
+                "Real arm transport requires the optional 'lerobot' dependency, which is not installed in this Python environment."
+            ) from exc
+
+        motors = {
+            joint_name: Motor(spec.motor_id, self.config.motor_model, MotorNormMode.DEGREES)
+            for joint_name, spec in self._joint_specs.items()
         }
-        self._multi_turn_zero_raw_mod = {name: float(raw_mod) for name, raw_mod in raw_mod_by_joint.items()}
-        self._multi_turn_session_valid = True
-        self._multi_turn_session_source = "init_home"
-        self._multi_turn_session_initialized_at = float(time.time())
-        self._persist_multi_turn_session()
-        state = self.get_state()
-        return {
-            "action": "init_home",
-            "message": "Initialized multi-turn runtime session from the current calibrated home pose",
-            "multi_turn_session": self._multi_turn_session_info(),
-            "home_delta_raw": home_delta_raw,
-            "tolerance_raw": tolerance_raw,
-            "home_alignment": alignment,
-            "multi_turn_state": self._snapshot_multi_turn_state(),
-            "state": state,
-        }
-
-    def zero_multi_turn_here(self) -> Dict[str, Any]:
-        return self.init_multi_turn_home()
-
-    def recover_multi_turn_home(
-        self,
-        *,
-        duration: float = 1.0,
-        wait: bool = True,
-        timeout: Optional[float] = None,
-        max_delta_raw: float = DEFAULT_MULTI_TURN_HOME_RECOVER_MAX_DELTA_RAW,
-    ) -> Dict[str, Any]:
-        bus = self._ensure_bus()
-        raw_before = self._read_raw_present_position(bus)
-        alignment_before = self._describe_multi_turn_home_alignment(raw_before)
-        max_delta_raw = max(0.0, float(max_delta_raw))
-
-        violations: list[str] = []
-        for name, info in alignment_before.items():
-            delta_raw = float(info["delta_raw"])
-            if abs(delta_raw) > max_delta_raw:
-                violations.append(
-                    f"{name}: delta_raw={delta_raw:.1f}, delta_joint_deg={info['delta_joint_deg']:.2f}, "
-                    f"recover_limit_raw={max_delta_raw:.1f}"
-                )
-        if violations:
-            raise ValidationError(
-                "Current multi-turn pose is too far from calibrated home for automatic recovery:\n"
-                + "\n".join(violations)
+        self._gripper_integrated = False
+        if self._probe_gripper_presence():
+            motors[self._gripper_spec.name] = Motor(
+                self._gripper_spec.motor_id,
+                self.config.motor_model,
+                MotorNormMode.DEGREES,
             )
+            self._gripper_integrated = True
+        bus = FeetechMotorsBus(port=self.config.port, motors=motors)
+        connect = getattr(bus, "connect", None)
+        if callable(connect):
+            connect()
 
-        hold_cmd = self._build_raw_hold_command(bus)
-        for name, info in alignment_before.items():
-            hold_cmd[name] = float(int(round(info["home_wrapped_raw"])))
-        if hold_cmd:
-            bus.sync_write("Goal_Position", hold_cmd)
-        self._wait(duration, wait, timeout)
+        self._bus = bus
+        self._apply_position_mode_registers(bus)
+        self._apply_gripper_registers(bus)
+        self._prime_startup_references_from_current_pose(bus)
+        self.apply_hold_state(self.capture_hold_state(bus), bus=bus)
+        return bus
 
-        raw_after = self._read_raw_present_position(bus)
-        alignment_after = self._describe_multi_turn_home_alignment(raw_after)
-        state = self.get_state()
+    def _apply_position_mode_registers(self, bus) -> None:
+        for joint_name, spec in self._joint_specs.items():
+            calibration_entry = self._calibration_payload.get(joint_name, {})
+            for register_name, register_value in spec.policy.register_writes(calibration_entry):
+                bus.write(register_name, joint_name, int(register_value), normalize=False)
+        time.sleep(0.02)
+
+    def _apply_gripper_registers(self, bus) -> None:
+        if self._gripper_spec is None or not self._gripper_integrated:
+            return
+        # The gripper stays in the same single-turn position mode used by the arm.
+        # For integrated pose record/replay we command the gripper by the raw
+        # register values captured from Present_Position. Some historical gripper
+        # calibration files contain very narrow range_min/range_max values for
+        # standalone ratio-based control, which would block valid replay targets.
+        # So the integrated controller keeps the homing offset, but widens the
+        # hardware position limits to the full single-turn register range.
+        bus.write("Operating_Mode", self._gripper_spec.name, POSITION_MODE_VALUE, normalize=False)
+        bus.write("Homing_Offset", self._gripper_spec.name, int(self._gripper_spec.homing_offset), normalize=False)
+        bus.write("Min_Position_Limit", self._gripper_spec.name, SINGLE_TURN_RAW_MIN, normalize=False)
+        bus.write("Max_Position_Limit", self._gripper_spec.name, SINGLE_TURN_RAW_MAX, normalize=False)
+
+    def _prime_startup_references_from_current_pose(self, bus) -> dict[str, int]:
+        raw_present = self._read_raw_present_position(bus)
+        self._joint_runtime_state = {
+            joint_name: JointRuntimeState(
+                startup_raw=self._joint_specs[joint_name].policy.normalize_present_raw(raw_present[joint_name]),
+                last_raw=self._joint_specs[joint_name].policy.normalize_present_raw(raw_present[joint_name]),
+            )
+            for joint_name in JOINTS
+        }
+        self._multi_turn_state = self._build_multi_turn_state(raw_present)
+        return raw_present
+
+    def _prime_multi_turn_state_from_current_pose(self, bus) -> dict[str, int]:
+        return self._prime_startup_references_from_current_pose(bus)
+
+    def _read_raw_present_position(self, bus=None) -> dict[str, int]:
+        active_bus = bus or self._ensure_bus()
+        sync_read = getattr(active_bus, "sync_read", None)
+        if callable(sync_read):
+            try:
+                payload = sync_read("Present_Position", normalize=False)
+                if isinstance(payload, Mapping):
+                    return {joint_name: int(payload[joint_name]) for joint_name in JOINTS}
+            except Exception:
+                pass
         return {
-            "action": "recover_multi_turn_home",
-            "message": "Moved multi-turn joints toward the calibrated home pose using wrapped raw targets",
-            "recover_limit_raw": float(max_delta_raw),
-            "before_alignment": alignment_before,
-            "after_alignment": alignment_after,
-            "raw_present_position_before": raw_before,
-            "raw_present_position_after": raw_after,
-            "raw_present_position_delta": self._raw_delta(raw_before, raw_after),
-            "multi_turn_state": self._snapshot_multi_turn_state(),
-            "state": state,
+            joint_name: int(active_bus.read("Present_Position", joint_name, normalize=False))
+            for joint_name in JOINTS
         }
 
-    def get_state(self) -> Dict[str, Any]:
-        bus = self._ensure_bus()
-        joints = self._read_joint_state_from_bus(bus)
-        tf = self._forward_kinematics_from_arm_deg(np.array([joints[name] for name in ARM_JOINTS], dtype=float))
-        pose = self._transform_to_pose_dict(tf)
-        pose.pop("rot_matrix", None)
-        return {
-            "joint_state": joints,
-            "tcp_pose": pose,
-            "gripper": {
-                "available": False,
-                "installed": False,
-                "message": "gripper servo is not installed on this soarmMoce arm",
+    def _current_relative_raw_from_raw(self, joint_name: str, present_raw: int | float) -> int:
+        spec = self._joint_specs[joint_name]
+        normalized_raw = spec.policy.normalize_present_raw(present_raw)
+        runtime_state = self._joint_runtime_state.get(joint_name)
+        if runtime_state is None:
+            runtime_state = JointRuntimeState(startup_raw=normalized_raw, last_raw=normalized_raw)
+        relative_raw = spec.policy.relative_raw(current_raw=normalized_raw, startup_raw=runtime_state.startup_raw)
+        self._joint_runtime_state[joint_name] = JointRuntimeState(
+            startup_raw=runtime_state.startup_raw,
+            last_raw=normalized_raw,
+        )
+        return int(relative_raw)
+
+    def _relative_raw_to_motor_deg(self, relative_raw: int | float) -> float:
+        return float(relative_raw) * RAW_DEGREES_PER_REV / float(RAW_COUNTS_PER_REV)
+
+    def _relative_raw_to_joint_deg(self, joint_name: str, relative_raw: int | float) -> float:
+        reduction_ratio = float(self._joint_specs[joint_name].reduction_ratio)
+        if abs(reduction_ratio) < 1e-9:
+            raise ValidationError(f"Joint {joint_name} has an invalid reduction ratio of 0")
+        return self._relative_raw_to_motor_deg(relative_raw) / reduction_ratio
+
+    def _joint_deg_to_relative_raw(self, joint_name: str, joint_deg: int | float) -> float:
+        reduction_ratio = float(self._joint_specs[joint_name].reduction_ratio)
+        if abs(reduction_ratio) < 1e-9:
+            raise ValidationError(f"Joint {joint_name} has an invalid reduction ratio of 0")
+        motor_deg = float(joint_deg) * reduction_ratio
+        return motor_deg * float(RAW_COUNTS_PER_REV) / RAW_DEGREES_PER_REV
+
+    def _relative_raw_to_absolute_goal_raw(self, joint_name: str, relative_raw: int | float) -> int:
+        runtime_state = self._joint_runtime_state.get(joint_name)
+        if runtime_state is None:
+            raise HardwareError(f"Startup reference for joint '{joint_name}' is not initialized")
+        spec = self._joint_specs[joint_name]
+        goal_raw = spec.policy.relative_to_absolute_goal_raw(
+            startup_raw=runtime_state.startup_raw,
+            relative_raw=relative_raw,
+        )
+        spec.policy.validate_goal_raw(goal_raw)
+        return int(goal_raw)
+
+    def _joint_deg_to_absolute_goal_raw(self, joint_name: str, joint_deg: int | float) -> int:
+        return self._relative_raw_to_absolute_goal_raw(joint_name, self._joint_deg_to_relative_raw(joint_name, joint_deg))
+
+    def _multi_turn_raw_to_joint_deg(self, joint_name: str, raw_value: int | float) -> float:
+        if joint_name not in MULTI_TURN_JOINTS:
+            raise ValidationError(f"Joint '{joint_name}' is not configured as multi-turn")
+        return self._relative_raw_to_joint_deg(joint_name, self._current_relative_raw_from_raw(joint_name, raw_value))
+
+    def _continuous_raw_to_multi_turn_goal_raw(self, joint_name: str, continuous_raw: int | float) -> int:
+        if joint_name not in MULTI_TURN_JOINTS:
+            raise ValidationError(f"Joint '{joint_name}' is not configured as multi-turn")
+        return self._relative_raw_to_absolute_goal_raw(joint_name, continuous_raw)
+
+    def _joint_deg_to_multi_turn_goal_raw(self, joint_name: str, joint_deg: int | float) -> int:
+        if joint_name not in MULTI_TURN_JOINTS:
+            raise ValidationError(f"Joint '{joint_name}' is not configured as multi-turn")
+        return self._joint_deg_to_absolute_goal_raw(joint_name, joint_deg)
+
+    def _build_multi_turn_state(self, raw_present: Mapping[str, int]) -> dict[str, dict[str, float | int | None]]:
+        snapshot: dict[str, dict[str, float | int | None]] = {}
+        for joint_name in MULTI_TURN_JOINTS:
+            relative_raw = self._current_relative_raw_from_raw(joint_name, raw_present[joint_name])
+            runtime_state = self._joint_runtime_state[joint_name]
+            snapshot[joint_name] = {
+                "startup_raw": int(runtime_state.startup_raw),
+                "current_raw": int(raw_present[joint_name]),
+                "continuous_raw": int(relative_raw),
+                "relative_raw": int(relative_raw),
+                "motor_deg": float(self._relative_raw_to_motor_deg(relative_raw)),
+                "joint_deg": float(self._relative_raw_to_joint_deg(joint_name, relative_raw)),
+                "goal_raw": self._last_multi_turn_goal_raw_mod.get(joint_name),
+            }
+        return snapshot
+
+    def _snapshot_multi_turn_state(self) -> dict[str, dict[str, float | int | None]]:
+        raw_present = self._read_raw_present_position()
+        self._multi_turn_state = self._build_multi_turn_state(raw_present)
+        return to_jsonable(self._multi_turn_state)
+
+    def set_manual_multi_turn_readback(self, enabled: bool) -> None:
+        # The old readback mode was tied to continuous turn accumulation. The new
+        # design keeps the flag for compatibility but does not alter semantics.
+        self._manual_multi_turn_readback = bool(enabled)
+
+    def has_gripper(self) -> bool:
+        self._ensure_bus()
+        return bool(self._gripper_integrated and self._gripper_spec is not None)
+
+    def _require_gripper_spec(self) -> GripperSpec:
+        if self._gripper_spec is None or not self.has_gripper():
+            raise CapabilityError("Optional gripper is not available on this controller.")
+        return self._gripper_spec
+
+    def _read_gripper_register_raw(self, bus=None) -> int | None:
+        if self._gripper_spec is None or not self._gripper_integrated:
+            return None
+        active_bus = bus or self._ensure_bus()
+        return int(active_bus.read("Present_Position", self._gripper_spec.name, normalize=False))
+
+    def _gripper_register_raw_to_adjusted_raw(self, register_raw: int | float) -> int:
+        spec = self._require_gripper_spec()
+        return _wrap_single_turn_raw(int(round(float(register_raw))) + int(spec.homing_offset))
+
+    def _gripper_adjusted_raw_to_register_raw(self, adjusted_raw: int | float) -> int:
+        spec = self._require_gripper_spec()
+        return _wrap_single_turn_raw(int(round(float(adjusted_raw))) - int(spec.homing_offset))
+
+    def _gripper_adjusted_raw_to_open_ratio(self, adjusted_raw: int | float) -> float:
+        spec = self._require_gripper_spec()
+        span = float(spec.range_max - spec.range_min)
+        if abs(span) <= 1e-9:
+            return 0.0
+        ratio = (float(adjusted_raw) - float(spec.range_min)) / span
+        return float(min(1.0, max(0.0, ratio)))
+
+    def _open_ratio_to_gripper_adjusted_raw(self, open_ratio: float) -> int:
+        spec = self._require_gripper_spec()
+        ratio = min(1.0, max(0.0, float(open_ratio)))
+        return int(round(float(spec.range_min) + ratio * float(spec.range_max - spec.range_min)))
+
+    def _open_ratio_to_gripper_goal_raw(self, open_ratio: float) -> int:
+        adjusted_raw = self._open_ratio_to_gripper_adjusted_raw(open_ratio)
+        return self._gripper_adjusted_raw_to_register_raw(adjusted_raw)
+
+    def _build_gripper_state(self, bus=None) -> AttrDict | None:
+        if self._gripper_spec is None or not self._gripper_integrated:
+            return None
+        register_raw = self._read_gripper_register_raw(bus)
+        if register_raw is None:
+            return None
+        adjusted_raw = self._gripper_register_raw_to_adjusted_raw(register_raw)
+        return _as_attrdict(
+            {
+                "available": True,
+                "present_raw": int(register_raw),
+                "present_register_raw": int(register_raw),
+                "adjusted_raw": int(adjusted_raw),
+                "open_ratio": float(self._gripper_adjusted_raw_to_open_ratio(adjusted_raw)),
+                "goal_raw": self._last_gripper_goal_raw,
+                "range_min": int(self._gripper_spec.range_min),
+                "range_max": int(self._gripper_spec.range_max),
+                "homing_offset": int(self._gripper_spec.homing_offset),
+            }
+        )
+
+    def get_gripper_state(self) -> AttrDict | None:
+        self._ensure_bus()
+        return self._build_gripper_state()
+
+    def read_gripper_raw(self) -> int | None:
+        state = self.get_gripper_state()
+        if state is None:
+            return None
+        return int(state["present_raw"])
+
+    def _build_state(self, raw_present: Mapping[str, int]) -> AttrDict:
+        joint_state_deg: dict[str, float] = {}
+        joint_state_rad: list[float] = []
+        raw_relative: dict[str, int] = {}
+        startup_raw: dict[str, int] = {}
+        motor_deg: dict[str, float] = {}
+        output_deg: dict[str, float] = {}
+
+        for joint_name in JOINTS:
+            relative_raw = self._current_relative_raw_from_raw(joint_name, raw_present[joint_name])
+            runtime_state = self._joint_runtime_state[joint_name]
+            joint_deg = self._relative_raw_to_joint_deg(joint_name, relative_raw)
+            joint_state_deg[joint_name] = float(joint_deg)
+            joint_state_rad.append(math.radians(float(joint_deg)))
+            raw_relative[joint_name] = int(relative_raw)
+            startup_raw[joint_name] = int(runtime_state.startup_raw)
+            motor_deg[joint_name] = float(self._relative_raw_to_motor_deg(relative_raw))
+            output_deg[joint_name] = float(joint_deg)
+
+        self._multi_turn_state = self._build_multi_turn_state(raw_present)
+        gripper_state = self._build_gripper_state()
+
+        state = {
+            "joint_state": {
+                **joint_state_deg,
+                "names": list(JOINTS),
+                "values_deg": [joint_state_deg[joint_name] for joint_name in JOINTS],
+                "values_rad": list(joint_state_rad),
+                "q": list(joint_state_rad),
             },
+            "tcp_pose": {
+                "xyz": [0.0, 0.0, 0.0],
+                "rpy": [0.0, 0.0, 0.0],
+            },
+            "gripper_state": to_jsonable(gripper_state)
+            if gripper_state is not None
+            else {
+                "available": False,
+                "open_ratio": None,
+            },
+            "raw_present_position": {joint_name: int(raw_present[joint_name]) for joint_name in JOINTS},
+            "relative_raw_position": raw_relative,
+            "startup_raw_position": startup_raw,
+            "motor_position_deg": motor_deg,
+            "output_position_deg": output_deg,
+            "multi_turn_state": to_jsonable(self._multi_turn_state),
+            "mode_by_joint": {joint_name: POSITION_MODE_VALUE for joint_name in JOINTS},
             "timestamp": time.time(),
         }
+        return _as_attrdict(state)
 
-    def read(self) -> Dict[str, Any]:
-        return {"meta": self.meta(), "state": self.get_state()}
-
-    def get_multi_turn_debug_state(self) -> Dict[str, Any]:
+    def get_state(self) -> AttrDict:
         bus = self._ensure_bus()
-        state = self.get_state()
         raw_present = self._read_raw_present_position(bus)
-        return {
-            "joint_state": {name: float(state["joint_state"][name]) for name in JOINTS},
-            "raw_present_position": {name: int(raw_present[name]) for name in JOINTS if name in raw_present},
-            "multi_turn_joints": list(MULTI_TURN_JOINTS),
-            "multi_turn_state": self._snapshot_multi_turn_state(),
-            "multi_turn_zero_raw_mod": {
-                name: float(value) for name, value in self._multi_turn_zero_raw_mod.items()
-            },
-            "multi_turn_session": self._multi_turn_session_info(),
-            "last_multi_turn_goal_raw_mod": {
-                name: float(value) for name, value in self._last_multi_turn_goal_raw_mod.items()
-            },
-            "last_multi_turn_goal_continuous_raw": {
-                name: float(value) for name, value in self._last_multi_turn_goal_continuous_raw.items()
-            },
-            "last_multi_turn_goal_joint_deg": {
-                name: float(value) for name, value in self._last_multi_turn_goal_joint_deg.items()
-            },
-            "manual_multi_turn_readback": bool(self._manual_multi_turn_readback),
-            "timestamp": float(state["timestamp"]),
+        return self._build_state(raw_present)
+
+    def read(self) -> AttrDict:
+        return self.get_state()
+
+    def _coerce_joint_targets_deg(self, targets: Mapping[str, Any] | Iterable[Any]) -> dict[str, float]:
+        if isinstance(targets, Mapping):
+            coerced: dict[str, float] = {}
+            for joint_name, target_value in targets.items():
+                joint_key = str(joint_name)
+                if joint_key not in JOINTS:
+                    raise ValidationError(f"Unknown joint: {joint_key}")
+                coerced[joint_key] = float(target_value)
+            return coerced
+
+        values = list(targets)
+        if len(values) != len(JOINTS):
+            raise ValidationError(f"Expected {len(JOINTS)} joint values, got {len(values)}")
+        return {joint_name: math.degrees(float(values[idx])) for idx, joint_name in enumerate(JOINTS)}
+
+    def _hold_raw_positions(self, bus, raw_present: Mapping[str, int]) -> None:
+        self._write_raw_goal_positions(bus, raw_present)
+
+    def _write_raw_goal_positions(self, bus, goal_raw_by_joint: Mapping[str, int]) -> None:
+        for joint_name in JOINTS:
+            if joint_name not in goal_raw_by_joint:
+                continue
+            bus.write("Goal_Position", joint_name, int(goal_raw_by_joint[joint_name]), normalize=False)
+
+    def _build_raw_hold_command(self, bus=None) -> dict[str, int]:
+        # Compatibility helper for older skill scripts: when torque is re-enabled
+        # we hold the exact current raw register values instead of reusing any
+        # historical multi-turn state. This matches the rebuilt "startup is the
+        # only reference" design and avoids bringing back the removed turn tracker.
+        raw_present = self._read_raw_present_position(bus or self._ensure_bus())
+        return {joint_name: int(raw_present[joint_name]) for joint_name in JOINTS if joint_name in raw_present}
+
+    def capture_hold_state(self, bus=None) -> dict[str, Any]:
+        active_bus = bus or self._ensure_bus()
+        payload: dict[str, Any] = {
+            "joint_goal_raw": self._build_raw_hold_command(active_bus),
         }
+        gripper_raw = self._read_gripper_register_raw(active_bus)
+        if gripper_raw is not None:
+            payload["gripper_goal_raw"] = int(gripper_raw)
+        return payload
 
-    def diagnose_ik(
-        self,
-        *,
-        dx: float = 0.0,
-        dy: float = 0.0,
-        dz: float = 0.0,
-        frame: str = "base",
-        repeats: int = 12,
-        seed_jitter_deg: float = 0.1,
-        random_seed: int = 0,
-    ) -> Dict[str, Any]:
-        self._ensure_bus()
-        self._require_multi_turn_session_initialized("diagnose_ik")
-        if abs(dx) < 1e-12 and abs(dy) < 1e-12 and abs(dz) < 1e-12:
-            raise ValidationError("At least one of dx/dy/dz must be non-zero")
-        if frame not in {"base", "urdf", "user", "tool"}:
-            raise ValidationError("frame must be 'base', 'urdf', 'user', or 'tool'")
-
-        state = self.get_state()
-        q_seed_deg = self._state_to_arm_q_deg(state)
-        current_tf = self._forward_kinematics_from_arm_deg(q_seed_deg)
-        delta = np.array([float(dx), float(dy), float(dz)], dtype=float)
-        resolved_delta = self._resolve_delta_in_model_frame(delta, frame=frame, current_tf=current_tf)
-        target_pos = np.asarray(current_tf.pos, dtype=float) + resolved_delta
-
-        locked_joint_targets_deg = {
-            joint_name: float(state["joint_state"][joint_name]) for joint_name in LOCKED_CARTESIAN_JOINTS
-        }
-        locked_indices = [ARM_JOINTS.index(name) for name in LOCKED_CARTESIAN_JOINTS if name in ARM_JOINTS]
-        active_indices = [idx for idx in range(len(ARM_JOINTS)) if idx not in locked_indices]
-
-        jacobian_full = np.asarray(self._ensure_kin_chain().jacobian(np.deg2rad(q_seed_deg)), dtype=float)[:3, :]
-        jacobian_pos = jacobian_full[:, active_indices]
-        singular_values = np.linalg.svd(jacobian_pos, compute_uv=False)
-        min_sv = float(np.min(singular_values)) if singular_values.size else 0.0
-        max_sv = float(np.max(singular_values)) if singular_values.size else 0.0
-        condition_number = float(max_sv / min_sv) if min_sv > 1e-12 else float("inf")
-
-        rng = np.random.default_rng(int(random_seed))
-        solve_runs: list[Dict[str, Any]] = []
-        run_joint_targets: list[np.ndarray] = []
-        run_tcp_deltas: list[np.ndarray] = []
-        requested_repeats = max(1, int(repeats))
-        jitter_deg = max(0.0, float(seed_jitter_deg))
-
-        for run_index in range(requested_repeats):
-            q_trial_deg = q_seed_deg.copy()
-            if run_index > 0 and jitter_deg > 0.0:
-                jitter = rng.uniform(-jitter_deg, jitter_deg, size=len(active_indices))
-                q_trial_deg[active_indices] = q_trial_deg[active_indices] + jitter
-            ik = self._solve_ik_to_position(
-                target_pos,
-                q_trial_deg,
-                locked_joint_targets_deg=locked_joint_targets_deg,
-            )
-            q_target_deg = np.asarray(ik["q_target_deg"], dtype=float)
-            achieved_tf = self._forward_kinematics_from_arm_deg(q_target_deg)
-            achieved_delta = np.asarray(achieved_tf.pos, dtype=float) - np.asarray(current_tf.pos, dtype=float)
-            q_delta_deg = q_target_deg - q_seed_deg
-            run_joint_targets.append(q_target_deg)
-            run_tcp_deltas.append(achieved_delta)
-            solve_runs.append(
-                {
-                    "run_index": run_index,
-                    "seed_deg": {name: float(q_trial_deg[idx]) for idx, name in enumerate(ARM_JOINTS)},
-                    "q_target_deg": {name: float(q_target_deg[idx]) for idx, name in enumerate(ARM_JOINTS)},
-                    "q_delta_deg": {name: float(q_delta_deg[idx]) for idx, name in enumerate(ARM_JOINTS)},
-                    "achieved_tcp_delta": self._xyz_dict(achieved_delta),
-                    "pos_err_m": float(ik["pos_err_m"]),
-                    "iterations": int(ik["iterations"]),
-                }
+    def apply_hold_state(self, hold_state: Mapping[str, Any] | None, *, bus=None) -> dict[str, Any]:
+        active_bus = bus or self._ensure_bus()
+        payload = dict(hold_state or {})
+        joint_goal_raw = payload.get("joint_goal_raw")
+        if isinstance(joint_goal_raw, Mapping):
+            self._write_raw_goal_positions(
+                active_bus,
+                {str(joint_name): int(value) for joint_name, value in joint_goal_raw.items() if joint_name in JOINTS},
             )
 
-        joint_targets_arr = np.vstack(run_joint_targets)
-        tcp_deltas_arr = np.vstack(run_tcp_deltas)
+        gripper_goal_raw = payload.get("gripper_goal_raw")
+        applied_gripper_raw: int | None = None
+        if isinstance(gripper_goal_raw, (int, float)):
+            applied_gripper_raw = int(gripper_goal_raw)
+            self.write_gripper_raw(applied_gripper_raw, bus=active_bus)
+
         return {
-            "note": "read-only IK diagnosis, does not move hardware",
-            "request": {"dx": float(dx), "dy": float(dy), "dz": float(dz), "frame": frame},
-            "resolved_model_delta": self._xyz_dict(resolved_delta),
-            "state": state,
-            "target_tcp": self._xyz_dict(target_pos),
-            "jacobian": {
-                "locked_joints": list(LOCKED_CARTESIAN_JOINTS),
-                "active_joints": [ARM_JOINTS[idx] for idx in active_indices],
-                "singular_values": [float(value) for value in singular_values],
-                "condition_number": condition_number,
-            },
-            "solver": {
-                "repeats": requested_repeats,
-                "seed_jitter_deg": jitter_deg,
-                "random_seed": int(random_seed),
-            },
-            "summary": {
-                "target_joint_span_deg": {
-                    name: float(np.max(joint_targets_arr[:, idx]) - np.min(joint_targets_arr[:, idx]))
-                    for idx, name in enumerate(ARM_JOINTS)
-                },
-                "achieved_tcp_span_m": {
-                    "x": float(np.max(tcp_deltas_arr[:, 0]) - np.min(tcp_deltas_arr[:, 0])),
-                    "y": float(np.max(tcp_deltas_arr[:, 1]) - np.min(tcp_deltas_arr[:, 1])),
-                    "z": float(np.max(tcp_deltas_arr[:, 2]) - np.min(tcp_deltas_arr[:, 2])),
-                },
-                "best_pos_err_m": float(min(run["pos_err_m"] for run in solve_runs)),
-                "worst_pos_err_m": float(max(run["pos_err_m"] for run in solve_runs)),
-            },
-            "runs": solve_runs,
+            "joint_goal_raw": dict(payload.get("joint_goal_raw", {})) if isinstance(joint_goal_raw, Mapping) else {},
+            "gripper_goal_raw": applied_gripper_raw,
         }
 
-    def move_to(
+    def disable_torque(self) -> None:
+        bus = self._ensure_bus()
+        disable = getattr(bus, "disable_torque", None)
+        if callable(disable):
+            disable()
+
+    def enable_torque(self) -> None:
+        bus = self._ensure_bus()
+        enable = getattr(bus, "enable_torque", None)
+        if callable(enable):
+            enable()
+
+    def _wait_for_motion(self, bus, goal_raw_by_joint: Mapping[str, int], duration: float, timeout: float | None) -> None:
+        duration = max(0.0, float(duration))
+        deadline = time.monotonic() + (
+            float(timeout) if timeout is not None else max(duration * 2.0, 0.5)
+        )
+        if duration > 0.0:
+            time.sleep(min(duration, 0.2))
+
+        while time.monotonic() < deadline:
+            try:
+                moving = [
+                    int(bus.read("Moving", joint_name, normalize=False))
+                    for joint_name in goal_raw_by_joint
+                ]
+            except Exception:
+                return
+            if not any(moving):
+                return
+            time.sleep(0.02)
+
+    def _interpolate_raw_goal_positions(
         self,
         *,
-        x: Optional[float] = None,
-        y: Optional[float] = None,
-        z: Optional[float] = None,
+        bus,
+        start_relative_raw_by_joint: Mapping[str, float],
+        target_relative_raw_by_joint: Mapping[str, float],
+        duration: float,
+    ) -> bool:
+        duration = max(0.0, float(duration))
+        update_hz = max(1.0, float(self.config.joint_update_hz))
+        step_count = int(round(duration * update_hz))
+        if step_count <= 1:
+            return False
+
+        dt = duration / float(step_count)
+        for step_index in range(1, step_count + 1):
+            alpha = float(step_index) / float(step_count)
+            step_goal_raw: dict[str, int] = {}
+            for joint_name, target_relative_raw in target_relative_raw_by_joint.items():
+                start_relative_raw = float(start_relative_raw_by_joint.get(joint_name, target_relative_raw))
+                interpolated_relative_raw = start_relative_raw + (float(target_relative_raw) - start_relative_raw) * alpha
+                step_goal_raw[joint_name] = self._relative_raw_to_absolute_goal_raw(joint_name, interpolated_relative_raw)
+            self._write_raw_goal_positions(bus, step_goal_raw)
+            if step_index < step_count:
+                time.sleep(max(0.0, dt))
+        return True
+
+    def _append_sdk_debug_log(self, message: str) -> None:
+        self.config.runtime_dir.mkdir(parents=True, exist_ok=True)
+        path = self.config.runtime_dir / "sdk_multi_turn_debug.log"
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} {message.rstrip()}\n")
+
+    def move_joints(
+        self,
+        targets_deg: Mapping[str, Any] | Iterable[Any],
+        *,
+        multi_turn_targets_continuous_raw: Mapping[str, Any] | None = None,
         duration: float = 1.0,
         wait: bool = True,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         trace: bool = False,
-    ) -> Dict[str, Any]:
-        self._ensure_bus()
-        self._require_multi_turn_session_initialized("move_to")
-        if x is None and y is None and z is None:
-            raise ValidationError("At least one of x/y/z is required")
-        before = self.get_state()
-        q_seed_deg = self._state_to_arm_q_deg(before)
-        current_tf = self._forward_kinematics_from_arm_deg(q_seed_deg)
-        target_pos = np.array(
-            [
-                float(current_tf.pos[0]) if x is None else float(x),
-                float(current_tf.pos[1]) if y is None else float(y),
-                float(current_tf.pos[2]) if z is None else float(z),
-            ],
-            dtype=float,
-        )
-        trace_steps: Optional[list[Dict[str, Any]]] = [] if trace else None
-        state = self._move_tcp_smooth(
-            start_state=before,
-            target_pos=target_pos,
-            duration=duration,
-            wait=wait,
-            timeout=timeout,
-            trace_steps=trace_steps,
-        )
+    ) -> dict[str, Any]:
+        bus = self._ensure_bus()
+        raw_present_before = self._read_raw_present_position(bus)
+        before_state = self._build_state(raw_present_before)
+        target_deg_by_joint = self._coerce_joint_targets_deg(targets_deg)
+        override_relative_raw = {
+            str(joint_name): float(value) for joint_name, value in dict(multi_turn_targets_continuous_raw or {}).items()
+        }
+        invalid_override_joints = [joint_name for joint_name in override_relative_raw if joint_name not in MULTI_TURN_JOINTS]
+        if invalid_override_joints:
+            raise ValidationError(
+                "Continuous-raw overrides are only valid for multi-turn joints: "
+                + ", ".join(sorted(invalid_override_joints))
+            )
+        goal_raw_by_joint: dict[str, int] = {}
+        accepted_target_deg: dict[str, float] = {}
+        effective_relative_raw: dict[str, float] = {}
+        start_relative_raw_by_joint = {
+            joint_name: float(before_state["relative_raw_position"][joint_name])
+            for joint_name in goal_raw_by_joint
+        }
+
+        for joint_name in sorted(set(target_deg_by_joint) | set(override_relative_raw)):
+            if joint_name in override_relative_raw:
+                relative_raw = float(override_relative_raw[joint_name])
+                goal_raw = self._continuous_raw_to_multi_turn_goal_raw(joint_name, relative_raw)
+                accepted_target_deg[joint_name] = float(self._relative_raw_to_joint_deg(joint_name, relative_raw))
+                effective_relative_raw[joint_name] = relative_raw
+            else:
+                accepted_target_deg[joint_name] = float(target_deg_by_joint[joint_name])
+                relative_raw = float(self._joint_deg_to_relative_raw(joint_name, accepted_target_deg[joint_name]))
+                goal_raw = self._joint_deg_to_absolute_goal_raw(joint_name, accepted_target_deg[joint_name])
+                effective_relative_raw[joint_name] = relative_raw
+            goal_raw_by_joint[joint_name] = int(goal_raw)
+            start_relative_raw_by_joint[joint_name] = float(before_state["relative_raw_position"][joint_name])
+
+        if trace:
+            self._append_sdk_debug_log(
+                "[INFO] move_goal start "
+                f"target_joint_deg={json.dumps(accepted_target_deg, ensure_ascii=False, sort_keys=True)} "
+                f"target_multi_turn_continuous_raw={json.dumps({k: v for k, v in effective_relative_raw.items() if k in MULTI_TURN_JOINTS}, ensure_ascii=False, sort_keys=True)} "
+                f"before_joint_deg={json.dumps({joint_name: before_state['joint_state'][joint_name] for joint_name in accepted_target_deg}, ensure_ascii=False, sort_keys=True)} "
+                f"bus_cmd={json.dumps(goal_raw_by_joint, ensure_ascii=False, sort_keys=True)}"
+            )
+
+        interpolated = False
+        if wait and goal_raw_by_joint:
+            interpolated = self._interpolate_raw_goal_positions(
+                bus=bus,
+                start_relative_raw_by_joint=start_relative_raw_by_joint,
+                target_relative_raw_by_joint=effective_relative_raw,
+                duration=float(duration),
+            )
+        if not interpolated:
+            self._write_raw_goal_positions(bus, goal_raw_by_joint)
+
+        for joint_name, goal_raw in goal_raw_by_joint.items():
+            if joint_name in MULTI_TURN_JOINTS:
+                self._last_multi_turn_goal_raw_mod[joint_name] = int(goal_raw)
+                self._last_multi_turn_goal_continuous_raw[joint_name] = float(effective_relative_raw[joint_name])
+                self._last_multi_turn_goal_joint_deg[joint_name] = float(accepted_target_deg[joint_name])
+
+        if wait:
+            self._wait_for_motion(bus, goal_raw_by_joint, duration=0.0 if interpolated else float(duration), timeout=timeout)
+
+        state = self.get_state()
         result = {
-            "action": "move_to",
-            "target_tcp": self._xyz_dict(target_pos),
-            "tcp_delta": self._tcp_delta(before, state),
+            "action": "move_joints",
+            "targets_deg": accepted_target_deg,
+            "goal_raw": goal_raw_by_joint,
             "state": state,
         }
-        if trace_steps is not None:
-            result["trace"] = self._finalize_trace(trace_steps)
+
+        if trace:
+            after_multi_turn = {joint_name: state["joint_state"][joint_name] for joint_name in MULTI_TURN_JOINTS}
+            self._append_sdk_debug_log(
+                "[INFO] move_goal end "
+                f"after_joint_deg={json.dumps({joint_name: state['joint_state'][joint_name] for joint_name in accepted_target_deg}, ensure_ascii=False, sort_keys=True)} "
+                f"joint_error_deg={json.dumps({joint_name: float(state['joint_state'][joint_name]) - float(accepted_target_deg[joint_name]) for joint_name in accepted_target_deg}, ensure_ascii=False, sort_keys=True)} "
+                f"multi_turn_state={json.dumps(after_multi_turn, ensure_ascii=False, sort_keys=True)} "
+                "correction_count=0"
+            )
+
         return result
+
+    def move_joint(
+        self,
+        *,
+        joint: str,
+        target_deg: float | None = None,
+        delta_deg: float | None = None,
+        duration: float = 1.0,
+        wait: bool = True,
+        timeout: float | None = None,
+        trace: bool = False,
+    ) -> dict[str, Any]:
+        joint_name = str(joint).strip()
+        if joint_name not in JOINTS:
+            raise ValidationError(f"Unknown joint: {joint_name}")
+        if (target_deg is None) == (delta_deg is None):
+            raise ValidationError("Exactly one of target_deg or delta_deg must be provided")
+
+        current_state = self.get_state()
+        base_deg = float(current_state["joint_state"][joint_name])
+        final_target_deg = float(target_deg) if target_deg is not None else base_deg + float(delta_deg)
+        move_result = self.move_joints(
+            {joint_name: final_target_deg},
+            duration=float(duration),
+            wait=bool(wait),
+            timeout=timeout,
+            trace=trace,
+        )
+        move_result["target_deg"] = float(final_target_deg)
+        return move_result
+
+    def home(self, *, duration: float = 1.0, wait: bool = True, timeout: float | None = None) -> dict[str, Any]:
+        # Startup position is intentionally the runtime zero reference, so "home"
+        # simply returns every joint to the startup pose captured at controller init.
+        result = self.move_joints(
+            dict(self.config.home_joints),
+            duration=float(duration),
+            wait=bool(wait),
+            timeout=timeout,
+        )
+        result["action"] = "home"
+        return result
+
+    def stop(self) -> dict[str, Any]:
+        bus = self._ensure_bus()
+        raw_present = self._read_raw_present_position(bus)
+        self.apply_hold_state(self.capture_hold_state(bus), bus=bus)
+        return {
+            "action": "stop",
+            "state": self._build_state(raw_present),
+        }
+
+    def move_pose(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise CapabilityError("Cartesian move_pose is not implemented in the rebuilt real-arm controller.")
+
+    def move_to(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise CapabilityError("Cartesian move_to is not implemented in the rebuilt real-arm controller.")
 
     def move_delta(
         self,
@@ -1184,1245 +1086,141 @@ class SoArmMoceController:
         frame: str = "base",
         duration: float = 1.0,
         wait: bool = True,
-        timeout: Optional[float] = None,
-        trace: bool = False,
-    ) -> Dict[str, Any]:
-        self._ensure_bus()
-        self._require_multi_turn_session_initialized("move_delta")
-        if abs(dx) < 1e-12 and abs(dy) < 1e-12 and abs(dz) < 1e-12:
-            raise ValidationError("At least one of dx/dy/dz must be non-zero")
-        if frame not in {"base", "urdf", "user", "tool"}:
-            raise ValidationError("frame must be 'base', 'urdf', 'user', or 'tool'")
-        delta = np.array([float(dx), float(dy), float(dz)], dtype=float)
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        if abs(float(dx)) <= 1e-12 and abs(float(dy)) <= 1e-12 and abs(float(dz)) <= 1e-12:
+            return {
+                "action": "move_delta",
+                "frame": str(frame),
+                "delta": {"dx": float(dx), "dy": float(dy), "dz": float(dz)},
+                "state": self.get_state(),
+            }
+        raise CapabilityError("Cartesian move_delta is not implemented in the rebuilt real-arm controller.")
 
-        before = self.get_state()
-        q_seed_deg = self._state_to_arm_q_deg(before)
-        current_tf = self._forward_kinematics_from_arm_deg(q_seed_deg)
-        resolved_delta = self._resolve_delta_in_model_frame(delta, frame=frame, current_tf=current_tf)
-        target_pos = np.asarray(current_tf.pos, dtype=float) + resolved_delta
-        trace_steps: Optional[list[Dict[str, Any]]] = [] if trace else None
-        state = self._move_tcp_smooth(
-            start_state=before,
-            target_pos=target_pos,
-            duration=duration,
-            wait=wait,
-            timeout=timeout,
-            trace_steps=trace_steps,
-        )
-        result = {
-            "action": "move_delta",
-            "requested_delta": {"dx": float(dx), "dy": float(dy), "dz": float(dz), "frame": frame},
-            "resolved_model_delta": self._xyz_dict(resolved_delta),
-            "tcp_delta": self._tcp_delta(before, state),
-            "state": state,
-        }
-        if trace_steps is not None:
-            result["trace"] = self._finalize_trace(trace_steps)
-        return result
+    def write_gripper_raw(self, goal_raw: int | None, *, bus=None) -> bool:
+        if goal_raw is None:
+            return False
+        spec = self._require_gripper_spec()
+        active_bus = bus or self._ensure_bus()
+        active_bus.write("Goal_Position", spec.name, int(goal_raw), normalize=False)
+        self._last_gripper_goal_raw = int(goal_raw)
+        return True
 
-    def move_joint(
+    def _wait_for_gripper_settled(
         self,
         *,
-        joint: str,
-        delta_deg: Optional[float] = None,
-        target_deg: Optional[float] = None,
-        duration: float = 1.0,
-        wait: bool = True,
-        timeout: Optional[float] = None,
-        trace: bool = False,
-    ) -> Dict[str, Any]:
-        joint_name = self._validate_joint_name(joint)
-        if joint_name in MULTI_TURN_JOINTS:
-            self._ensure_bus()
-            self._require_multi_turn_session_initialized(f"move_joint:{joint_name}")
-        if (delta_deg is None) == (target_deg is None):
-            raise ValidationError("Exactly one of delta_deg or target_deg must be provided")
-        before = self.get_state()
-        current = float(before["joint_state"][joint_name])
-        target = float(current + float(delta_deg)) if delta_deg is not None else float(target_deg)
-        target_cmd = {name: float(before["joint_state"][name]) for name in JOINTS}
-        target_cmd[joint_name] = target
-        trace_steps: Optional[list[Dict[str, Any]]] = [] if trace else None
-        state = self._move_joint_targets_smooth(
-            start_state=before,
-            target_cmd=target_cmd,
-            duration=duration,
-            wait=wait,
-            timeout=timeout,
-            trace_steps=trace_steps,
-        )
-        result = {
-            "action": "move_joint",
-            "joint": joint_name,
-            "delta_deg": float(target - current),
-            "target_deg": target,
-            "state": state,
-        }
-        if trace_steps is not None:
-            result["trace"] = self._finalize_trace(trace_steps)
-        return result
+        goal_raw: int,
+        timeout: float | None,
+        settle_tolerance_raw: int = DEFAULT_GRIPPER_SETTLE_TOLERANCE_RAW,
+        poll_interval_s: float = DEFAULT_GRIPPER_POLL_INTERVAL_S,
+    ) -> dict[str, Any]:
+        spec = self._require_gripper_spec()
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        goal_adjusted_raw = self._gripper_register_raw_to_adjusted_raw(goal_raw)
 
-    def move_joints(
-        self,
-        *,
-        targets_deg: Dict[str, float],
-        multi_turn_targets_continuous_raw: Optional[Dict[str, float]] = None,
-        duration: float = 1.0,
-        wait: bool = True,
-        timeout: Optional[float] = None,
-        trace: bool = False,
-    ) -> Dict[str, Any]:
-        if not isinstance(targets_deg, dict) or not targets_deg:
-            raise ValidationError("targets_deg must be a non-empty object")
-        validated_targets = {
-            self._validate_joint_name(str(raw_joint)): raw_value for raw_joint, raw_value in targets_deg.items()
-        }
-        requested_multi_turn = [joint_name for joint_name in validated_targets if joint_name in MULTI_TURN_JOINTS]
-        if requested_multi_turn:
-            self._ensure_bus()
-            self._require_multi_turn_session_initialized("move_joints")
-        before = self.get_state()
-        cmd: Dict[str, float] = {name: float(before["joint_state"][name]) for name in JOINTS}
-        for joint, raw_value in validated_targets.items():
-            if not isinstance(raw_value, (int, float)):
-                raise ValidationError(f"targets_deg.{joint} must be a number")
-            cmd[joint] = float(raw_value)
-        trace_steps: Optional[list[Dict[str, Any]]] = [] if trace else None
-        state = self._move_joint_targets_smooth(
-            start_state=before,
-            target_cmd=cmd,
-            multi_turn_target_continuous_raw=multi_turn_targets_continuous_raw,
-            duration=duration,
-            wait=wait,
-            timeout=timeout,
-            trace_steps=trace_steps,
-        )
-        result = {
-            "action": "move_joints",
-            "targets_deg": cmd,
-            "state": state,
-        }
-        if trace_steps is not None:
-            result["trace"] = self._finalize_trace(trace_steps)
-        return result
-
-    def home(
-        self,
-        *,
-        duration: float = 1.5,
-        wait: bool = True,
-        timeout: Optional[float] = None,
-        trace: bool = False,
-    ) -> Dict[str, Any]:
-        self._ensure_bus()
-        self._require_multi_turn_session_initialized("home")
-        before = self.get_state()
-        target_home = dict(self._home_joint_deg)
-        trace_steps: Optional[list[Dict[str, Any]]] = [] if trace else None
-        state = self._move_joint_targets_smooth(
-            start_state=before,
-            target_cmd=target_home,
-            duration=duration,
-            wait=wait,
-            timeout=timeout,
-            trace_steps=trace_steps,
-        )
-        result = {"action": "home", "target_joints": target_home, "state": state}
-        if trace_steps is not None:
-            result["trace"] = self._finalize_trace(trace_steps)
-        return result
+        while True:
+            state = self.get_gripper_state()
+            if state is None:
+                raise CapabilityError("Optional gripper disappeared while waiting for motion completion.")
+            present_adjusted_raw = int(state["adjusted_raw"])
+            error_raw = _signed_single_turn_delta(goal_adjusted_raw, present_adjusted_raw)
+            moving = int(self._ensure_bus().read("Moving", spec.name, normalize=False))
+            velocity = float(self._ensure_bus().read("Present_Velocity", spec.name, normalize=False))
+            current = float(self._ensure_bus().read("Present_Current", spec.name, normalize=False))
+            if abs(int(error_raw)) <= int(settle_tolerance_raw):
+                return {
+                    "settled": True,
+                    "present_raw": int(state["present_raw"]),
+                    "present_adjusted_raw": int(present_adjusted_raw),
+                    "error_raw": int(error_raw),
+                    "moving": moving,
+                    "velocity": velocity,
+                    "current": current,
+                }
+            if deadline is not None and time.monotonic() > deadline:
+                return {
+                    "settled": False,
+                    "present_raw": int(state["present_raw"]),
+                    "present_adjusted_raw": int(present_adjusted_raw),
+                    "error_raw": int(error_raw),
+                    "moving": moving,
+                    "velocity": velocity,
+                    "current": current,
+                }
+            time.sleep(max(0.005, float(poll_interval_s)))
 
     def set_gripper(
         self,
         *,
-        open_ratio: float,
+        open_ratio: float = 1.0,
         duration: float = 1.0,
         wait: bool = True,
-        timeout: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        raise HardwareError("Gripper servo is not installed on this soarmMoce arm")
-
-    def open_gripper(self, *, duration: float = 1.0, wait: bool = True, timeout: Optional[float] = None) -> Dict[str, Any]:
-        raise HardwareError("Gripper servo is not installed on this soarmMoce arm")
-
-    def close_gripper(self, *, duration: float = 1.0, wait: bool = True, timeout: Optional[float] = None) -> Dict[str, Any]:
-        raise HardwareError("Gripper servo is not installed on this soarmMoce arm")
-
-    def stop(self) -> Dict[str, Any]:
-        state = self._hold_current_pose()
-        return {"action": "stop", "held": True, "state": state}
-
-    def _ensure_bus(self) -> FeetechMotorsBus:
-        with self._lock:
-            if self._bus is not None:
-                return self._bus
-
-            calib = _load_calibration(self.config.robot_id, self.config.calib_dir)
-            for name in MULTI_TURN_JOINTS:
-                if name in calib:
-                    calib[name].range_min = -MULTI_TURN_RAW_RANGE
-                    calib[name].range_max = MULTI_TURN_RAW_RANGE
-
-            bus = FeetechMotorsBus(
-                port=self.config.port,
-                motors={
-                    "shoulder_pan": Motor(1, "sts3215", MotorNormMode.DEGREES),
-                    "shoulder_lift": Motor(2, "sts3215", MotorNormMode.DEGREES),
-                    "elbow_flex": Motor(3, "sts3215", MotorNormMode.DEGREES),
-                    "wrist_flex": Motor(4, "sts3215", MotorNormMode.DEGREES),
-                    "wrist_roll": Motor(5, "sts3215", MotorNormMode.DEGREES),
-                },
-                calibration=calib,
-            )
-
-            passthrough_ids = {bus.motors[name].id for name in JOINTS if name in bus.motors}
-            bus._unnormalize = types.MethodType(_make_passthrough_unnormalize(bus._unnormalize, passthrough_ids), bus)
-
-            bus.connect()
-            with bus.torque_disabled():
-                bus.configure_motors()
-                _sync_single_turn_calibration_registers(bus, calib)
-                for name in JOINTS:
-                    if name in MULTI_TURN_JOINTS:
-                        max_res = int(bus.model_resolution_table[bus.motors[name].model] - 1)
-                        bus.write("Lock", name, 0)
-                        time.sleep(0.02)
-                        bus.write("Min_Position_Limit", name, 0)
-                        bus.write("Max_Position_Limit", name, max_res)
-                        bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
-                        bus.write("P_Coefficient", name, self.config.arm_p_coefficient)
-                        bus.write("I_Coefficient", name, 0)
-                        bus.write("D_Coefficient", name, self.config.arm_d_coefficient)
-                        time.sleep(0.02)
-                        bus.write("Lock", name, 1)
-                    else:
-                        bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
-                        bus.write("P_Coefficient", name, self.config.arm_p_coefficient)
-                        bus.write("I_Coefficient", name, 0)
-                        bus.write("D_Coefficient", name, self.config.arm_d_coefficient)
-
-            bus.enable_torque()
-            self._prime_multi_turn_state_from_current_pose(bus)
-            hold_cmd = self._build_raw_hold_command(bus)
-            if hold_cmd:
-                bus.sync_write("Goal_Position", hold_cmd)
-            self._bus = bus
-            return bus
-
-    def _ensure_kin_chain(self):
-        if self._kin_chain is not None:
-            return self._kin_chain
-        if not self.config.urdf_path.exists():
-            raise FileNotFoundError(f"URDF not found: {self.config.urdf_path}")
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self._kin_chain = kp.build_serial_chain_from_urdf(
-                self.config.urdf_path.read_text().encode("utf-8"),
-                end_link_name=self.config.target_frame,
-            )
-        return self._kin_chain
-
-    @staticmethod
-    def _wait(duration: float, wait: bool, timeout: Optional[float]) -> None:
-        if not wait:
-            return
-        delay = max(0.0, float(duration))
-        if timeout is not None and timeout < delay:
-            time.sleep(max(0.0, float(timeout)))
-            raise TimeoutError(f"timeout exceeded before nominal duration {delay:.3f}s")
-        time.sleep(delay)
-
-    @staticmethod
-    def _validate_joint_name(name: str) -> str:
-        joint = str(name or "").strip()
-        if joint not in JOINTS:
-            raise ValidationError(f"Unknown joint: {joint}")
-        return joint
-
-    @staticmethod
-    def _state_to_arm_q_deg(state: Dict[str, Any]) -> np.ndarray:
-        return np.array([float(state["joint_state"][name]) for name in ARM_JOINTS], dtype=float)
-
-    @staticmethod
-    def _transform_to_pose_dict(tf: kp.Transform) -> Dict[str, Any]:
-        quat_wxyz = np.asarray(tf.rot, dtype=float)
-        return {
-            "xyz": np.asarray(tf.pos, dtype=float),
-            "rpy": np.asarray(tf.rot_euler, dtype=float),
-            "quat_wxyz": quat_wxyz,
-            "rot_matrix": np.asarray(tf.rot_mat, dtype=float),
-        }
-
-    def _forward_kinematics_from_arm_deg(self, q_arm_deg: np.ndarray) -> kp.Transform:
-        chain = self._ensure_kin_chain()
-        q_rad = np.deg2rad(self._arm_to_model_q_deg(q_arm_deg))
-        return chain.forward_kinematics(q_rad)
-
-    @staticmethod
-    def _resolve_delta_in_model_frame(delta: np.ndarray, *, frame: str, current_tf: kp.Transform) -> np.ndarray:
-        delta = np.asarray(delta, dtype=float).reshape(3)
-        if frame == "tool":
-            return np.asarray(current_tf.rot_mat, dtype=float) @ delta
-        if frame in {"base", "urdf"}:
-            return delta
-        if frame == "user":
-            # Convenience frame for teleop-style commands. The raw URDF/simulation base is
-            # left untouched in `frame="base"` so the real arm matches the packaged SDK.
-            return USER_DELTA_TO_MODEL_ROT @ delta
-        raise ValidationError(f"Unsupported delta frame: {frame}")
-
-    def _solve_ik_to_position(
-        self,
-        target_pos: np.ndarray,
-        q_seed_deg: np.ndarray,
-        locked_joint_targets_deg: Optional[Dict[str, float]] = None,
-    ) -> Dict[str, Any]:
-        chain = self._ensure_kin_chain()
-        q_seed_deg = np.asarray(q_seed_deg, dtype=float).reshape(-1)
-        if q_seed_deg.shape[0] != len(ARM_JOINTS):
-            raise IKError(f"Expected {len(ARM_JOINTS)} seed joints, got {q_seed_deg.shape[0]}")
-
-        q_seed_rad = np.deg2rad(self._arm_to_model_q_deg(q_seed_deg))
-        target_pos = np.asarray(target_pos, dtype=float).reshape(3)
-        q_current = q_seed_rad.copy()
-        locked_joint_targets_deg = dict(locked_joint_targets_deg or {})
-        locked_indices = []
-        for joint_name, joint_target_deg in locked_joint_targets_deg.items():
-            if joint_name not in ARM_JOINTS:
-                raise IKError(f"Cannot lock non-arm joint in IK: {joint_name}")
-            idx = ARM_JOINTS.index(joint_name)
-            q_current[idx] = np.deg2rad(self._arm_joint_deg_to_model(joint_name, float(joint_target_deg)))
-            locked_indices.append(idx)
-        active_indices = [idx for idx in range(len(ARM_JOINTS)) if idx not in locked_indices]
-        if not active_indices:
-            raise IKError("No active joints left for IK solve")
-
-        damping = max(1e-6, float(self.config.ik_damping))
-        step_scale = max(1e-3, float(self.config.ik_step_scale))
-        max_step_rad = np.deg2rad(max(0.1, float(self.config.ik_joint_step_deg)))
-        seed_bias = max(0.0, float(self.config.ik_seed_bias))
-        solve_tol_m = max(1e-5, float(self.config.ik_target_tol_m))
-        failure_tol_m = max(solve_tol_m, float(self.config.max_ee_pos_err_m))
-        identity_pos = np.eye(3, dtype=float)
-        identity_joint = np.eye(len(active_indices), dtype=float)
-
-        best_q = q_current.copy()
-        best_err = float("inf")
-
-        for iteration in range(1, max(1, int(self.config.ik_max_iters)) + 1):
-            current_tf = chain.forward_kinematics(q_current)
-            current_pos = np.asarray(current_tf.pos, dtype=float)
-            pos_err_vec = target_pos - current_pos
-            pos_err = float(np.linalg.norm(pos_err_vec))
-            if pos_err < best_err:
-                best_err = pos_err
-                best_q = q_current.copy()
-            if pos_err <= solve_tol_m:
-                return {
-                    "q_target_deg": self._model_to_arm_q_deg(np.rad2deg(q_current)),
-                    "pos_err_m": pos_err,
-                    "iterations": iteration,
-                }
-
-            jacobian_full = np.asarray(chain.jacobian(q_current), dtype=float)[:3, :]
-            if jacobian_full.shape != (3, len(ARM_JOINTS)):
-                raise IKError(f"Unexpected Jacobian shape: {jacobian_full.shape}")
-            jacobian_pos = jacobian_full[:, active_indices]
-            if jacobian_pos.shape != (3, len(active_indices)):
-                raise IKError(f"Unexpected Jacobian shape: {jacobian_pos.shape}")
-
-            jj_t = jacobian_pos @ jacobian_pos.T
-            damped_system = jj_t + (damping**2) * identity_pos
-            try:
-                primary_step = jacobian_pos.T @ np.linalg.solve(damped_system, pos_err_vec)
-                if seed_bias > 0.0:
-                    null_projector = identity_joint - (jacobian_pos.T @ np.linalg.solve(damped_system, jacobian_pos))
-                    secondary_step = null_projector @ (q_seed_rad[active_indices] - q_current[active_indices])
-                else:
-                    secondary_step = np.zeros(len(active_indices), dtype=float)
-            except np.linalg.LinAlgError as exc:
-                raise IKError(f"IK linear solve failed: {exc}") from exc
-
-            joint_step_active = (primary_step + seed_bias * secondary_step) * step_scale
-            joint_step_active = np.clip(joint_step_active, -max_step_rad, max_step_rad)
-            if not np.all(np.isfinite(joint_step_active)):
-                raise IKError("IK solver produced non-finite joint update")
-            if np.linalg.norm(joint_step_active) < 1e-9:
-                break
-            q_current = q_current.copy()
-            q_current[active_indices] = q_current[active_indices] + joint_step_active
-            for idx in locked_indices:
-                joint_name = ARM_JOINTS[idx]
-                q_current[idx] = np.deg2rad(
-                    self._arm_joint_deg_to_model(joint_name, float(locked_joint_targets_deg[joint_name]))
-                )
-
-        if best_err <= failure_tol_m:
-            return {
-                "q_target_deg": self._model_to_arm_q_deg(np.rad2deg(best_q)),
-                "pos_err_m": best_err,
-                "iterations": int(self.config.ik_max_iters),
-            }
-        raise IKError(
-            f"5DOF IK position error too large: {best_err:.6f} m "
-            f"(limit {failure_tol_m:.6f} m)"
-        )
-
-    def _model_offset_deg(self, joint_name: str) -> float:
-        return float(self.config.model_offsets_deg.get(joint_name, 0.0))
-
-    def _arm_joint_deg_to_model(self, joint_name: str, joint_deg: float) -> float:
-        return float(joint_deg) + self._model_offset_deg(joint_name)
-
-    def _model_joint_deg_to_arm(self, joint_name: str, joint_deg: float) -> float:
-        return float(joint_deg) - self._model_offset_deg(joint_name)
-
-    def _arm_to_model_q_deg(self, q_arm_deg: np.ndarray) -> np.ndarray:
-        q_arm_deg = np.asarray(q_arm_deg, dtype=float).reshape(-1)
-        offsets = np.array([self._model_offset_deg(name) for name in ARM_JOINTS], dtype=float)
-        return q_arm_deg + offsets
-
-    def _model_to_arm_q_deg(self, q_model_deg: np.ndarray) -> np.ndarray:
-        q_model_deg = np.asarray(q_model_deg, dtype=float).reshape(-1)
-        offsets = np.array([self._model_offset_deg(name) for name in ARM_JOINTS], dtype=float)
-        return q_model_deg - offsets
-
-    def _joint_scale(self, joint_name: str) -> float:
-        return float(self.config.joint_scales.get(joint_name, 1.0))
-
-    def _motor_to_joint_deg(self, joint_name: str, motor_deg: float) -> float:
-        return float(motor_deg) / self._joint_scale(joint_name)
-
-    def _joint_to_motor_deg(self, joint_name: str, joint_deg: float) -> float:
-        return float(joint_deg) * self._joint_scale(joint_name)
-
-    def _single_turn_present_raw_to_joint_deg(self, joint_name: str, raw_value: float) -> float:
-        zero_raw = float(_single_turn_zero_present_raw())
-        motor_deg = (float(raw_value) - zero_raw) * 360.0 / (RAW_COUNTS_PER_REV - 1.0)
-        return self._motor_to_joint_deg(joint_name, motor_deg)
-
-    def _joint_deg_to_single_turn_present_raw(self, joint_name: str, joint_deg: float) -> int:
-        zero_raw = float(_single_turn_zero_present_raw())
-        motor_deg = self._joint_to_motor_deg(joint_name, float(joint_deg))
-        raw_value = int(round(zero_raw + motor_deg * (RAW_COUNTS_PER_REV - 1.0) / 360.0))
-        entry = self._calibration_payload.get(joint_name)
-        if isinstance(entry, dict) and "range_min" in entry and "range_max" in entry:
-            raw_value = int(min(int(entry["range_max"]), max(int(entry["range_min"]), raw_value)))
-        return raw_value
-
-    def _unwrap_multi_turn_raw(self, joint_name: str, raw_value: float) -> float:
-        raw_scalar = float(raw_value)
-        raw_mod = self._normalize_raw_mod(raw_scalar)
-        state = self._multi_turn_state.get(joint_name)
-        if state is None:
-            continuous_raw = 0.0
-        else:
-            continuous_before = float(state["continuous_raw"])
-            delta = self._raw_mod_delta(raw_mod, float(state["last_raw_mod"]))
-            continuous_raw = continuous_before + delta
-            goal_raw_mod = None
-            goal_continuous_raw = None
-            if not self._manual_multi_turn_readback:
-                goal_raw_mod = self._last_multi_turn_goal_raw_mod.get(joint_name)
-                goal_continuous_raw = self._last_multi_turn_goal_continuous_raw.get(joint_name)
-            if goal_continuous_raw is not None:
-                goal_aligned_raw = self._goal_aligned_multi_turn_continuous_raw(
-                    joint_name,
-                    raw_mod,
-                    float(goal_continuous_raw),
-                )
-                if goal_aligned_raw is not None:
-                    goal_aligned_dist = abs(goal_aligned_raw - float(goal_continuous_raw))
-                    default_dist = abs(continuous_raw - float(goal_continuous_raw))
-                    if goal_aligned_dist + 1e-6 < default_dist:
-                        self._append_sdk_debug_log(
-                            "INFO",
-                            "align multi-turn branch to goal: "
-                            f"joint={joint_name} raw_mod={raw_mod:.1f} "
-                            f"default_continuous_raw={continuous_raw:.1f} "
-                            f"goal_aligned_continuous_raw={goal_aligned_raw:.1f} "
-                            f"goal_continuous_raw={float(goal_continuous_raw):.1f}",
-                        )
-                        continuous_raw = goal_aligned_raw
-                prev_dist_to_goal = abs(continuous_before - float(goal_continuous_raw))
-                curr_dist_to_goal = abs(continuous_raw - float(goal_continuous_raw))
-                if abs(continuous_raw - continuous_before) > 256.0 and curr_dist_to_goal > (prev_dist_to_goal + 128.0):
-                    self._append_sdk_debug_log(
-                        "WARN",
-                        "reject multi-turn unwrap jump: "
-                        f"joint={joint_name} raw_mod={raw_mod:.1f} last_raw_mod={float(state['last_raw_mod']):.1f} "
-                        f"delta={delta:.1f} goal_raw_mod={goal_raw_mod:.1f} "
-                        f"goal_continuous_raw={float(goal_continuous_raw):.1f} "
-                        f"prev_goal_dist={prev_dist_to_goal:.1f} curr_goal_dist={curr_dist_to_goal:.1f} "
-                        f"continuous_before={continuous_before:.1f} goal_joint_deg="
-                        f"{self._last_multi_turn_goal_joint_deg.get(joint_name)}"
-                    )
-                    # Advance the wrapped raw bucket even when we reject the branch
-                    # change so the next sample is compared against the latest encoder
-                    # position instead of re-triggering the same large jump forever.
-                    self._multi_turn_state[joint_name] = {
-                        "last_raw_mod": raw_mod,
-                        "continuous_raw": continuous_before,
-                    }
-                    return continuous_before
-        self._multi_turn_state[joint_name] = {
-            "last_raw_mod": raw_mod,
-            "continuous_raw": continuous_raw,
-        }
-        return continuous_raw
-
-    @staticmethod
-    def _joint_limit_violation_deg(target_deg: float, min_deg: float, max_deg: float) -> float:
-        if target_deg < min_deg:
-            return float(min_deg - target_deg)
-        if target_deg > max_deg:
-            return float(target_deg - max_deg)
-        return 0.0
-
-    def _clamp_joint_targets_to_limits(
-        self,
-        target_joint_deg: Dict[str, float],
-    ) -> tuple[Dict[str, float], list[str]]:
-        clamped: Dict[str, float] = {}
-        clamp_events: list[str] = []
-        for name, target in target_joint_deg.items():
-            target_deg = float(target)
-            limit = self._joint_limits_deg.get(name)
-            if not isinstance(limit, dict):
-                clamped[name] = target_deg
-                continue
-            min_deg = float(limit["min_deg"])
-            max_deg = float(limit["max_deg"])
-            clamped_deg = float(min(max(target_deg, min_deg), max_deg))
-            clamped[name] = clamped_deg
-            if abs(clamped_deg - target_deg) > 1e-9:
-                clamp_events.append(
-                    f"{name}: requested={target_deg:.2f} deg, clamped={clamped_deg:.2f} deg, "
-                    f"allowed=[{min_deg:.2f}, {max_deg:.2f}] deg"
-                )
-        return clamped, clamp_events
-
-    def _validate_joint_targets_within_limits(
-        self,
-        target_joint_deg: Dict[str, float],
-        *,
-        current_joint_deg: Optional[Dict[str, float]] = None,
-    ) -> None:
-        violations = []
-        for name, target in target_joint_deg.items():
-            if name not in self._joint_limits_deg:
-                continue
-            limit = self._joint_limits_deg[name]
-            target_deg = float(target)
-            min_deg = float(limit["min_deg"])
-            max_deg = float(limit["max_deg"])
-            target_violation = self._joint_limit_violation_deg(target_deg, min_deg, max_deg)
-            if target_violation <= 0.0:
-                continue
-            if current_joint_deg is not None and name in current_joint_deg:
-                current_deg = float(current_joint_deg[name])
-                current_violation = self._joint_limit_violation_deg(current_deg, min_deg, max_deg)
-                if target_violation <= current_violation + 1e-6:
-                    continue
-                violations.append(
-                    f"{name}: target={target_deg:.2f} deg, current={current_deg:.2f} deg, "
-                    f"allowed=[{min_deg:.2f}, {max_deg:.2f}] deg"
-                )
-            else:
-                violations.append(
-                    f"{name}: target={target_deg:.2f} deg, allowed=[{min_deg:.2f}, {max_deg:.2f}] deg"
-                )
-        if violations:
-            raise ValidationError(
-                "Requested joint target exceeds software safety limits from calibration:\n"
-                + "\n".join(violations)
-            )
-
-    def _multi_turn_raw_to_joint_deg(self, joint_name: str, raw_value: float) -> float:
-        continuous_raw = self._unwrap_multi_turn_raw(joint_name, raw_value)
-        motor_deg = continuous_raw * 360.0 / RAW_COUNTS_PER_REV
-        return self._motor_to_joint_deg(joint_name, motor_deg)
-
-    def _snapshot_multi_turn_state(self) -> Dict[str, Dict[str, float]]:
-        return {
-            name: {
-                "last_raw_mod": float(state["last_raw_mod"]),
-                "continuous_raw": float(state["continuous_raw"]),
-                "motor_deg": float(state["continuous_raw"] * 360.0 / RAW_COUNTS_PER_REV),
-                "joint_deg": float(
-                    self._motor_to_joint_deg(name, state["continuous_raw"] * 360.0 / RAW_COUNTS_PER_REV)
-                ),
-            }
-            for name, state in self._multi_turn_state.items()
-        }
-
-    def _read_joint_state_from_bus(self, bus: FeetechMotorsBus) -> Dict[str, float]:
-        raw_motor = self._read_present_position_raw_map(bus)
-        joints: Dict[str, float] = {}
-        for name in JOINTS:
-            raw_value = self._require_raw_present_position(raw_motor, name)
-            if name in MULTI_TURN_JOINTS:
-                joints[name] = self._multi_turn_raw_to_joint_deg(name, raw_value)
-            else:
-                joints[name] = self._single_turn_present_raw_to_joint_deg(name, raw_value)
-        self._persist_multi_turn_session()
-        return joints
-
-    def _get_current_joint_state(self) -> Dict[str, float]:
-        return self._read_joint_state_from_bus(self._ensure_bus())
-
-    @staticmethod
-    def _read_raw_present_position(bus: FeetechMotorsBus) -> Dict[str, int]:
-        sync_raw = bus.sync_read("Present_Position", normalize=False)
-        result: Dict[str, int] = {}
-        for name in JOINTS:
-            if name in MULTI_TURN_JOINTS:
-                value = bus.read("Present_Position", name, normalize=False)
-            else:
-                value = sync_raw.get(name)
-            if value is None:
-                raise ConnectionError(f"Present_Position missing for joint '{name}'")
-            if not isinstance(value, (int, float)):
-                raise ConnectionError(f"Present_Position for joint '{name}' is not numeric: {value!r}")
-            result[name] = int(value)
-        return result
-
-    def _build_raw_hold_command(
-        self,
-        bus: FeetechMotorsBus,
-        joints: Optional[list[str]] = None,
-    ) -> Dict[str, float]:
-        selected = list(joints) if joints is not None else list(JOINTS)
-        raw_present = self._read_raw_present_position(bus)
-        return {
-            name: float(int(raw_present[name]))
-            for name in selected
-            if name in raw_present
-        }
-
-    def _joint_deg_to_multi_turn_goal_raw(
-        self,
-        joint_name: str,
-        joint_deg: float,
-        *,
-        current_joint_deg: Optional[float] = None,
-    ) -> int:
-        if joint_name not in self._multi_turn_zero_raw_mod:
-            raise ValidationError(
-                f"Multi-turn runtime zero is missing for '{joint_name}'. Run 'init_home' after power-on first."
-            )
-        zero_raw_mod = float(self._multi_turn_zero_raw_mod[joint_name])
-        motor_deg = self._joint_to_motor_deg(joint_name, float(joint_deg))
-        relative_raw = motor_deg * RAW_COUNTS_PER_REV / 360.0
-        # The servo Goal_Position register expects the wrapped encoder bucket, while
-        # the branch itself is tracked in software by the smoothed waypoint path plus
-        # `_last_multi_turn_goal_continuous_raw` during readback unwrapping.
-        return int(round(self._normalize_raw_mod(zero_raw_mod + relative_raw)))
-
-    def _continuous_raw_to_multi_turn_goal_raw(self, joint_name: str, continuous_raw: float) -> int:
-        if joint_name not in self._multi_turn_zero_raw_mod:
-            raise ValidationError(
-                f"Multi-turn runtime zero is missing for '{joint_name}'. Run 'init_home' after power-on first."
-            )
-        zero_raw_mod = float(self._multi_turn_zero_raw_mod[joint_name])
-        return int(round(self._normalize_raw_mod(zero_raw_mod + float(continuous_raw))))
-
-    def _goal_aligned_multi_turn_continuous_raw(
-        self,
-        joint_name: str,
-        raw_mod: float,
-        goal_continuous_raw: float,
-    ) -> Optional[float]:
-        if joint_name not in self._multi_turn_zero_raw_mod:
-            return None
-        zero_raw_mod = float(self._multi_turn_zero_raw_mod[joint_name])
-        base_relative_raw = self._raw_mod_delta(raw_mod, zero_raw_mod)
-        turns = round((float(goal_continuous_raw) - float(base_relative_raw)) / RAW_COUNTS_PER_REV)
-        return float(base_relative_raw + turns * RAW_COUNTS_PER_REV)
-
-    @staticmethod
-    def _joint_error_deg(target_joint_deg: Dict[str, float], actual_joint_deg: Dict[str, float]) -> Dict[str, float]:
-        return {
-            name: float(actual_joint_deg[name] - float(target_joint_deg[name]))
-            for name in target_joint_deg
-            if name in actual_joint_deg
-        }
-
-    @staticmethod
-    def _raw_delta(before_raw: Dict[str, int], after_raw: Dict[str, int]) -> Dict[str, int]:
-        keys = list(dict.fromkeys(list(before_raw.keys()) + list(after_raw.keys())))
-        return {name: int(after_raw.get(name, 0) - before_raw.get(name, 0)) for name in keys}
-
-    def _build_bus_command(
-        self,
-        target_joint_deg: Dict[str, float],
-        current_joint_deg: Optional[Dict[str, float]] = None,
-        locked_single_turn_raw: Optional[Dict[str, int]] = None,
-        multi_turn_target_continuous_raw: Optional[Dict[str, float]] = None,
-    ) -> Dict[str, float]:
-        current_joint_deg = current_joint_deg or self._get_current_joint_state()
-        locked_single_turn_raw = dict(locked_single_turn_raw or {})
-        multi_turn_target_continuous_raw = dict(multi_turn_target_continuous_raw or {})
-        safe_target_joint_deg, clamp_events = self._clamp_joint_targets_to_limits(target_joint_deg)
-        for event in clamp_events:
-            self._append_sdk_debug_log("WARN", f"clamp joint target before bus command: {event}")
-        self._validate_joint_targets_within_limits(safe_target_joint_deg, current_joint_deg=current_joint_deg)
-        cmd: Dict[str, float] = {
-            name: float(int(raw_value))
-            for name, raw_value in locked_single_turn_raw.items()
-            if name not in MULTI_TURN_JOINTS
-        }
-        for name, target in safe_target_joint_deg.items():
-            if name in locked_single_turn_raw and name not in MULTI_TURN_JOINTS:
-                continue
-            if name in MULTI_TURN_JOINTS:
-                if name in multi_turn_target_continuous_raw:
-                    cmd[name] = float(
-                        self._continuous_raw_to_multi_turn_goal_raw(
-                            name,
-                            float(multi_turn_target_continuous_raw[name]),
-                        )
-                    )
-                else:
-                    cmd[name] = float(
-                        self._joint_deg_to_multi_turn_goal_raw(
-                            name,
-                            float(target),
-                            current_joint_deg=float(current_joint_deg[name]),
-                        )
-                    )
-            else:
-                cmd[name] = float(self._joint_deg_to_single_turn_present_raw(name, float(target)))
-        return cmd
-
-    def _refine_multi_turn_targets(
-        self,
-        *,
-        bus: FeetechMotorsBus,
-        target_joint_deg: Dict[str, float],
-        target_multi_turn_continuous_raw: Optional[Dict[str, float]],
-        state: Dict[str, Any],
-        deadline: Optional[float],
-    ) -> tuple[Dict[str, Any], list[Dict[str, Any]]]:
-        target_multi = {name: float(target_joint_deg[name]) for name in MULTI_TURN_JOINTS if name in target_joint_deg}
-        target_multi_turn_continuous_raw = {
-            name: float(value)
-            for name, value in dict(target_multi_turn_continuous_raw or {}).items()
-            if name in target_multi
-        }
-        if not target_multi:
-            return state, []
-        target_multi, clamp_events = self._clamp_joint_targets_to_limits(target_multi)
-        for event in clamp_events:
-            self._append_sdk_debug_log("WARN", f"clamp refine multi-turn target: {event}")
-        current_joint_deg = {name: float(state["joint_state"][name]) for name in JOINTS}
-        self._validate_joint_targets_within_limits(target_multi, current_joint_deg=current_joint_deg)
-
-        corrections: list[Dict[str, Any]] = []
-        for _ in range(MULTI_TURN_SETTLE_MAX_ITERS):
-            current_joint_deg = {name: float(state["joint_state"][name]) for name in JOINTS}
-            residual = {
-                name: float(target_multi[name] - current_joint_deg[name])
-                for name in target_multi
-                if abs(float(target_multi[name] - current_joint_deg[name])) > MULTI_TURN_SETTLE_TOL_DEG
-            }
-            if not residual:
-                break
-
-            bus_cmd = self._build_bus_command(
-                target_multi,
-                current_joint_deg=current_joint_deg,
-                multi_turn_target_continuous_raw=target_multi_turn_continuous_raw,
-            )
-            if not bus_cmd:
-                break
-            self._record_multi_turn_goal(
-                bus_cmd=bus_cmd,
-                target_joint_deg=target_multi,
-                target_multi_turn_continuous_raw=target_multi_turn_continuous_raw,
-            )
-            bus.sync_write("Goal_Position", bus_cmd)
-
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            settle_wait = MULTI_TURN_SETTLE_WAIT_S if remaining is None else min(MULTI_TURN_SETTLE_WAIT_S, remaining)
-            if settle_wait <= 0.0:
-                break
-            time.sleep(settle_wait)
-            state = self.get_state()
-            corrections.append(
-                {
-                    "residual_before_deg": residual,
-                    "bus_cmd": {name: float(value) for name, value in bus_cmd.items()},
-                }
-            )
-        return state, corrections
-
-    def _move_goal(
-        self,
-        cmd: Dict[str, float],
-        *,
-        multi_turn_target_continuous_raw: Optional[Dict[str, float]] = None,
-        duration: float,
-        wait: bool,
-        timeout: Optional[float],
-        command_reference_joint_deg: Optional[Dict[str, float]] = None,
-        locked_single_turn_raw: Optional[Dict[str, int]] = None,
-        trace_entry: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        bus = self._ensure_bus()
-        deadline = None if timeout is None else time.monotonic() + float(timeout)
-        current_joint_deg = self._read_joint_state_from_bus(bus)
-        command_reference_joint_deg = dict(command_reference_joint_deg or current_joint_deg)
-        raw_before = self._read_raw_present_position(bus) if trace_entry is not None else None
-        bus_cmd = self._build_bus_command(
-            cmd,
-            current_joint_deg=current_joint_deg,
-            locked_single_turn_raw=locked_single_turn_raw,
-            multi_turn_target_continuous_raw=multi_turn_target_continuous_raw,
-        )
-        self._record_multi_turn_goal(
-            bus_cmd=bus_cmd,
-            target_joint_deg=cmd,
-            target_multi_turn_continuous_raw=multi_turn_target_continuous_raw,
-        )
-        debug_joints = tuple(dict.fromkeys(list(MULTI_TURN_JOINTS) + ["wrist_roll"]))
-        self._append_sdk_debug_log(
-            "INFO",
-            "move_goal start "
-            f"target_joint_deg={json.dumps(self._debug_joint_subset(cmd, debug_joints), ensure_ascii=True)} "
-            f"target_multi_turn_continuous_raw="
-            f"{json.dumps(self._debug_joint_subset(dict(multi_turn_target_continuous_raw or {}), MULTI_TURN_JOINTS), ensure_ascii=True)} "
-            f"before_joint_deg={json.dumps(self._debug_joint_subset(current_joint_deg, debug_joints), ensure_ascii=True)} "
-            f"bus_cmd={json.dumps(self._debug_joint_subset(bus_cmd, debug_joints), ensure_ascii=True)}",
-        )
-        if bus_cmd:
-            bus.sync_write("Goal_Position", bus_cmd)
-        self._wait(duration, wait, timeout)
-        state = self.get_state()
-        correction_trace: list[Dict[str, Any]] = []
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        goal_raw = self._open_ratio_to_gripper_goal_raw(open_ratio)
+        self.write_gripper_raw(goal_raw)
+        settled = None
         if wait:
-            state, correction_trace = self._refine_multi_turn_targets(
-                bus=bus,
-                target_joint_deg=cmd,
-                target_multi_turn_continuous_raw=multi_turn_target_continuous_raw,
-                state=state,
-                deadline=deadline,
-            )
-        if trace_entry is not None:
-            raw_after = self._read_raw_present_position(bus)
-            trace_entry.update(
-                {
-                    "before_joint_deg": {name: float(current_joint_deg[name]) for name in JOINTS},
-                    "command_reference_joint_deg": {
-                        name: float(command_reference_joint_deg[name]) for name in JOINTS if name in command_reference_joint_deg
-                    },
-                    "after_joint_deg": {name: float(state["joint_state"][name]) for name in JOINTS},
-                    "target_joint_deg": {name: float(cmd[name]) for name in cmd},
-                    "target_multi_turn_continuous_raw": {
-                        name: float(value)
-                        for name, value in dict(multi_turn_target_continuous_raw or {}).items()
-                        if name in MULTI_TURN_JOINTS
-                    },
-                    "joint_error_deg": self._joint_error_deg(cmd, state["joint_state"]),
-                    "bus_cmd": {name: float(value) for name, value in bus_cmd.items()},
-                    "multi_turn_goal_raw_cmd": {
-                        name: int(round(bus_cmd[name])) for name in MULTI_TURN_JOINTS if name in bus_cmd
-                    },
-                    "raw_present_position_before": raw_before,
-                    "raw_present_position_after": raw_after,
-                    "raw_present_position_delta": self._raw_delta(raw_before or {}, raw_after),
-                    "multi_turn_state": self._snapshot_multi_turn_state(),
-                    "multi_turn_settle_corrections": correction_trace,
-                    "locked_single_turn_raw": {
-                        name: int(value) for name, value in (locked_single_turn_raw or {}).items()
-                    },
-                    "wait_s": float(duration),
-                }
-            )
-        self._append_sdk_debug_log(
-            "INFO",
-            "move_goal end "
-            f"after_joint_deg={json.dumps(self._debug_joint_subset(state['joint_state'], debug_joints), ensure_ascii=True)} "
-            f"joint_error_deg={json.dumps(self._debug_joint_subset(self._joint_error_deg(cmd, state['joint_state']), debug_joints), ensure_ascii=True)} "
-            f"multi_turn_state={json.dumps(self._debug_joint_subset({name: data.get('joint_deg') for name, data in self._snapshot_multi_turn_state().items()}, MULTI_TURN_JOINTS), ensure_ascii=True)} "
-            f"correction_count={len(correction_trace)}",
-        )
-        return state
-
-    def _hold_current_pose(self) -> Dict[str, Any]:
-        bus = self._ensure_bus()
+            effective_timeout = timeout if timeout is not None else max(float(duration) * 2.0, 0.5)
+            settled = self._wait_for_gripper_settled(goal_raw=goal_raw, timeout=effective_timeout)
         state = self.get_state()
-        hold_cmd = self._build_raw_hold_command(bus)
-        if hold_cmd:
-            debug_joints = tuple(dict.fromkeys(list(MULTI_TURN_JOINTS) + ["wrist_roll"]))
-            self._append_sdk_debug_log(
-                "INFO",
-                "hold_current_pose "
-                f"joint_deg={json.dumps(self._debug_joint_subset(state['joint_state'], debug_joints), ensure_ascii=True)} "
-                f"raw_hold_cmd={json.dumps(self._debug_joint_subset(hold_cmd, debug_joints), ensure_ascii=True)}",
-            )
-            bus.sync_write("Goal_Position", hold_cmd)
-        return state
-
-    def _move_tcp_smooth(
-        self,
-        *,
-        start_state: Dict[str, Any],
-        target_pos: np.ndarray,
-        duration: float,
-        wait: bool,
-        timeout: Optional[float],
-        trace_steps: Optional[list[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
-        start_xyz = np.asarray(start_state["tcp_pose"]["xyz"], dtype=float)
-        q_seed_deg = self._state_to_arm_q_deg(start_state)
-        command_reference_joint_deg = {name: float(start_state["joint_state"][name]) for name in JOINTS}
-        locked_joint_targets_deg = {
-            joint_name: float(start_state["joint_state"][joint_name]) for joint_name in LOCKED_CARTESIAN_JOINTS
-        }
-        locked_single_turn_raw = {
-            name: int(value)
-            for name, value in self._read_raw_present_position(self._ensure_bus()).items()
-            if name in LOCKED_CARTESIAN_JOINTS and name not in MULTI_TURN_JOINTS
-        }
-        # Reject cartesian requests that cannot meet the configured final-position tolerance
-        # before sending any waypoint to the bus. The incremental path can otherwise start
-        # moving and only fail after the arm has already drifted toward an unreachable target.
-        final_target_ik = self._solve_ik_to_position(
-            target_pos,
-            q_seed_deg,
-            locked_joint_targets_deg=locked_joint_targets_deg,
-        )
-        final_cmd = {
-            name: float(final_target_ik["q_target_deg"][idx])
-            for idx, name in enumerate(ARM_JOINTS)
-            if name not in LOCKED_CARTESIAN_JOINTS
-        }
-        final_cmd, final_clamp_events = self._clamp_joint_targets_to_limits(final_cmd)
-        for event in final_clamp_events:
-            self._append_sdk_debug_log("WARN", f"clamp cartesian final target: {event}")
-        self._validate_joint_targets_within_limits(final_cmd, current_joint_deg=command_reference_joint_deg)
-        state = start_state
-        deadline = None if timeout is None else time.monotonic() + float(timeout)
-        try:
-            if not wait:
-                trace_entry = None
-                if trace_steps is not None:
-                    trace_entry = {
-                        "mode": "cartesian",
-                        "step_index": 1,
-                        "steps_total": 1,
-                        "alpha": 1.0,
-                        "waypoint_tcp_target": self._xyz_dict(target_pos),
-                        "ik_target_joint_deg": final_cmd,
-                        "ik_pos_err_m": float(final_target_ik["pos_err_m"]),
-                        "ik_iterations": int(final_target_ik["iterations"]),
-                    }
-                state = self._move_goal(
-                    final_cmd,
-                    duration=duration,
-                    wait=False,
-                    timeout=timeout,
-                    command_reference_joint_deg=command_reference_joint_deg,
-                    locked_single_turn_raw=locked_single_turn_raw,
-                    trace_entry=trace_entry,
-                )
-                if trace_entry is not None:
-                    trace_steps.append(trace_entry)
-                command_reference_joint_deg.update({name: float(value) for name, value in final_cmd.items()})
-                return state
-
-            step_m = max(1e-4, float(self.config.linear_step_m))
-            distance = float(np.linalg.norm(target_pos - start_xyz))
-            # For small cartesian moves, forcing many waypoints by update_hz makes each
-            # multi-turn increment too tiny to execute reliably on hardware. Keep waypoint
-            # count distance-driven so 1-2 cm motions are sent as meaningful steps.
-            steps = max(1, int(np.ceil(distance / step_m)))
-            step_duration = max(0.0, float(duration)) / steps if steps else 0.0
-            planned_waypoints: list[Dict[str, Any]] = []
-            planning_seed_deg = q_seed_deg.copy()
-            planning_reference_joint_deg = dict(command_reference_joint_deg)
-            for step_index in range(1, steps + 1):
-                alpha = self._smooth_fraction(float(step_index) / float(steps))
-                waypoint_pos = start_xyz + (target_pos - start_xyz) * alpha
-                ik = self._solve_ik_to_position(
-                    waypoint_pos,
-                    planning_seed_deg,
-                    locked_joint_targets_deg=locked_joint_targets_deg,
-                )
-                cmd = {
-                    name: float(ik["q_target_deg"][idx])
-                    for idx, name in enumerate(ARM_JOINTS)
-                    if name not in LOCKED_CARTESIAN_JOINTS
-                }
-                cmd, clamp_events = self._clamp_joint_targets_to_limits(cmd)
-                for event in clamp_events:
-                    self._append_sdk_debug_log("WARN", f"clamp cartesian waypoint target: {event}")
-                self._validate_joint_targets_within_limits(
-                    cmd,
-                    current_joint_deg=planning_reference_joint_deg,
-                )
-                planning_reference_joint_deg.update({name: float(value) for name, value in cmd.items()})
-                planned_waypoints.append(
-                    {
-                        "step_index": int(step_index),
-                        "steps_total": int(steps),
-                        "alpha": float(alpha),
-                        "waypoint_pos": np.asarray(waypoint_pos, dtype=float),
-                        "ik": ik,
-                        "cmd": cmd,
-                    }
-                )
-                planning_seed_deg = np.asarray(ik["q_target_deg"], dtype=float)
-
-            for plan in planned_waypoints:
-                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-                trace_entry = None
-                if trace_steps is not None:
-                    trace_entry = {
-                        "mode": "cartesian",
-                        "step_index": int(plan["step_index"]),
-                        "steps_total": int(plan["steps_total"]),
-                        "alpha": float(plan["alpha"]),
-                        "waypoint_tcp_target": self._xyz_dict(plan["waypoint_pos"]),
-                        "ik_target_joint_deg": plan["cmd"],
-                        "ik_pos_err_m": float(plan["ik"]["pos_err_m"]),
-                        "ik_iterations": int(plan["ik"]["iterations"]),
-                    }
-                state = self._move_goal(
-                    plan["cmd"],
-                    duration=step_duration,
-                    wait=True,
-                    timeout=remaining,
-                    command_reference_joint_deg=command_reference_joint_deg,
-                    locked_single_turn_raw=locked_single_turn_raw,
-                    trace_entry=trace_entry,
-                )
-                if trace_entry is not None:
-                    trace_entry["after_tcp_pose"] = self._xyz_dict(state["tcp_pose"]["xyz"])
-                    trace_steps.append(trace_entry)
-                command_reference_joint_deg.update({name: float(value) for name, value in plan["cmd"].items()})
-                q_seed_deg = self._state_to_arm_q_deg(state)
-
-            final_state = self._hold_current_pose()
-            if self.config.cartesian_settle_time_s > 0.0:
-                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-                settle_time = float(self.config.cartesian_settle_time_s)
-                if remaining is not None:
-                    settle_time = min(settle_time, remaining)
-                if settle_time > 0.0:
-                    time.sleep(settle_time)
-                    final_state = self.get_state()
-            final_err = self._tcp_position_error_m(final_state, target_pos)
-            if final_err > self.config.max_ee_pos_err_m:
-                raise IKError(
-                    f"Cartesian move settled with {final_err:.6f} m position error "
-                    f"(limit {self.config.max_ee_pos_err_m:.6f} m)"
-                )
-            return final_state
-        except Exception as exc:
-            if trace_steps is None:
-                raise
-            error_type = exc.__class__.__name__
-            details = {
-                "trace": self._finalize_trace(trace_steps),
-                "last_state": state,
-                "target_tcp": self._xyz_dict(target_pos),
-                "start_tcp": self._xyz_dict(start_xyz),
-                "error_type": error_type,
-            }
-            if isinstance(exc, IKTraceError):
-                exc.details.update(details)
-                raise
-            raise IKTraceError(str(exc), details=details) from exc
-
-    def _move_joint_targets_smooth(
-        self,
-        *,
-        start_state: Dict[str, Any],
-        target_cmd: Dict[str, float],
-        multi_turn_target_continuous_raw: Optional[Dict[str, float]] = None,
-        duration: float,
-        wait: bool,
-        timeout: Optional[float],
-        step_size: Optional[float] = None,
-        trace_steps: Optional[list[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
-        multi_turn_target_continuous_raw = {
-            name: float(value)
-            for name, value in dict(multi_turn_target_continuous_raw or {}).items()
-            if name in target_cmd and name in MULTI_TURN_JOINTS
-        }
-        target_cmd, clamp_events = self._clamp_joint_targets_to_limits(target_cmd)
-        for event in clamp_events:
-            self._append_sdk_debug_log("WARN", f"clamp smooth joint target: {event}")
-        self._validate_joint_targets_within_limits(target_cmd, current_joint_deg=start_state["joint_state"])
-        start_multi_turn_continuous_raw = {
-            name: float(state["continuous_raw"])
-            for name, state in self._multi_turn_state.items()
-            if name in MULTI_TURN_JOINTS and isinstance(state, dict) and "continuous_raw" in state
-        }
-        if not wait:
-            trace_entry = None
-            if trace_steps is not None:
-                trace_entry = {
-                    "mode": "joint",
-                    "step_index": 1,
-                    "steps_total": 1,
-                    "alpha": 1.0,
-                }
-            state = self._move_goal(
-                target_cmd,
-                multi_turn_target_continuous_raw=multi_turn_target_continuous_raw,
-                duration=duration,
-                wait=False,
-                timeout=timeout,
-                command_reference_joint_deg={name: float(start_state["joint_state"][name]) for name in JOINTS},
-                trace_entry=trace_entry,
-            )
-            if trace_entry is not None:
-                trace_steps.append(trace_entry)
-            return state
-
-        resolved_step_size = max(1e-4, float(step_size or self.config.joint_step_deg))
-        max_change = max(
-            abs(float(target_value) - float(start_state["joint_state"][joint_name]))
-            for joint_name, target_value in target_cmd.items()
-        )
-        # Keep joint replay distance-driven. For multi-turn joints, forcing extra
-        # waypoints from update_hz creates tiny wrapped moves that hardware follows
-        # poorly and makes the arm feel stop-and-go.
-        steps = max(1, int(np.ceil(max_change / resolved_step_size)))
-        step_duration = max(0.0, float(duration)) / steps if steps else 0.0
-        deadline = None if timeout is None else time.monotonic() + float(timeout)
-        state = start_state
-        command_reference_joint_deg = {name: float(start_state["joint_state"][name]) for name in JOINTS}
-        planned_waypoints: list[Dict[str, Any]] = []
-        for step_index in range(1, steps + 1):
-            alpha = self._smooth_fraction(float(step_index) / float(steps))
-            waypoint_cmd = {
-                joint_name: float(start_state["joint_state"][joint_name])
-                + (float(target_value) - float(start_state["joint_state"][joint_name])) * alpha
-                for joint_name, target_value in target_cmd.items()
-            }
-            waypoint_multi_turn_continuous_raw = {
-                joint_name: float(start_multi_turn_continuous_raw[joint_name])
-                + (float(target_value) - float(start_multi_turn_continuous_raw[joint_name])) * alpha
-                for joint_name, target_value in multi_turn_target_continuous_raw.items()
-                if joint_name in start_multi_turn_continuous_raw
-            }
-            planned_waypoints.append(
-                {
-                    "step_index": int(step_index),
-                    "steps_total": int(steps),
-                    "alpha": float(alpha),
-                    "cmd": waypoint_cmd,
-                    "multi_turn_continuous_raw": waypoint_multi_turn_continuous_raw,
-                }
-            )
-
-        if trace_steps is None and len(planned_waypoints) > 1:
-            stream_started_at = time.monotonic()
-            for plan in planned_waypoints[:-1]:
-                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-                if remaining is not None and remaining <= 0.0:
-                    raise TimeoutError("timeout exceeded before final joint waypoint")
-                state = self._move_goal(
-                    plan["cmd"],
-                    multi_turn_target_continuous_raw=plan["multi_turn_continuous_raw"],
-                    duration=0.0,
-                    wait=False,
-                    timeout=remaining,
-                    command_reference_joint_deg=command_reference_joint_deg,
-                    trace_entry=None,
-                )
-                command_reference_joint_deg.update({name: float(value) for name, value in plan["cmd"].items()})
-                target_send_time = stream_started_at + step_duration * float(plan["step_index"])
-                sleep_time = target_send_time - time.monotonic()
-                if deadline is not None:
-                    sleep_time = min(sleep_time, max(0.0, deadline - time.monotonic()))
-                if sleep_time > 0.0:
-                    time.sleep(sleep_time)
-
-            final_plan = planned_waypoints[-1]
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            final_duration = max(0.0, float(duration) - (time.monotonic() - stream_started_at))
-            state = self._move_goal(
-                final_plan["cmd"],
-                multi_turn_target_continuous_raw=final_plan["multi_turn_continuous_raw"],
-                duration=final_duration,
-                wait=True,
-                timeout=remaining,
-                command_reference_joint_deg=command_reference_joint_deg,
-                trace_entry=None,
-            )
-            return self._hold_current_pose()
-
-        for plan in planned_waypoints:
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            trace_entry = None
-            if trace_steps is not None:
-                trace_entry = {
-                    "mode": "joint",
-                    "step_index": int(plan["step_index"]),
-                    "steps_total": int(plan["steps_total"]),
-                    "alpha": float(plan["alpha"]),
-                }
-            state = self._move_goal(
-                plan["cmd"],
-                multi_turn_target_continuous_raw=plan["multi_turn_continuous_raw"],
-                duration=step_duration,
-                wait=True,
-                timeout=remaining,
-                command_reference_joint_deg=command_reference_joint_deg,
-                trace_entry=trace_entry,
-            )
-            if trace_entry is not None:
-                trace_steps.append(trace_entry)
-            command_reference_joint_deg.update({name: float(value) for name, value in plan["cmd"].items()})
-        return self._hold_current_pose()
-
-    @staticmethod
-    def _xyz_dict(xyz: Any) -> Dict[str, float]:
-        return {"x": float(xyz[0]), "y": float(xyz[1]), "z": float(xyz[2])}
-
-    @staticmethod
-    def _tcp_delta(before_state: Dict[str, Any], after_state: Dict[str, Any]) -> Dict[str, float]:
-        before_xyz = before_state["tcp_pose"]["xyz"]
-        after_xyz = after_state["tcp_pose"]["xyz"]
         return {
-            "dx": float(after_xyz[0] - before_xyz[0]),
-            "dy": float(after_xyz[1] - before_xyz[1]),
-            "dz": float(after_xyz[2] - before_xyz[2]),
+            "action": "set_gripper",
+            "goal_open_ratio": float(min(1.0, max(0.0, float(open_ratio)))),
+            "goal_raw": int(goal_raw),
+            "wait": bool(wait),
+            "settled": settled,
+            "state": state,
         }
 
-    @staticmethod
-    def _tcp_position_error_m(state: Dict[str, Any], target_pos: np.ndarray) -> float:
-        current_xyz = np.asarray(state["tcp_pose"]["xyz"], dtype=float)
-        return float(np.linalg.norm(np.asarray(target_pos, dtype=float) - current_xyz))
+    def open_gripper(self, *, duration: float = 1.0, wait: bool = True, timeout: float | None = None) -> dict[str, Any]:
+        return self.set_gripper(open_ratio=1.0, duration=duration, wait=wait, timeout=timeout)
 
-    @staticmethod
-    def _smooth_fraction(fraction: float) -> float:
-        t = min(1.0, max(0.0, float(fraction)))
-        return t * t * (3.0 - 2.0 * t)
+    def close_gripper(self, *, duration: float = 1.0, wait: bool = True, timeout: float | None = None) -> dict[str, Any]:
+        return self.set_gripper(open_ratio=0.0, duration=duration, wait=wait, timeout=timeout)
 
-    @staticmethod
-    def _finalize_trace(trace_steps: list[Dict[str, Any]]) -> Dict[str, Any]:
-        if not trace_steps:
-            return {"steps": [], "summary": {"steps": 0}}
-        joint_names = list(JOINTS)
-        max_abs_joint_error_deg = {
-            name: max(abs(float(step.get("joint_error_deg", {}).get(name, 0.0))) for step in trace_steps)
-            for name in joint_names
+    def meta(self) -> AttrDict:
+        startup_raw = {
+            joint_name: state.startup_raw
+            for joint_name, state in self._joint_runtime_state.items()
         }
-        max_abs_raw_delta = {
-            name: max(abs(int(step.get("raw_present_position_delta", {}).get(name, 0))) for step in trace_steps)
-            for name in joint_names
-        }
-        return {
-            "steps": trace_steps,
-            "summary": {
-                "steps": len(trace_steps),
-                "max_abs_joint_error_deg": max_abs_joint_error_deg,
-                "max_abs_raw_delta": max_abs_raw_delta,
-            },
-        }
+        return _as_attrdict(
+            {
+                "joint_limits_deg": {},
+                "joint_scales": dict(self.config.joint_scales),
+                "model_offsets_deg": dict(self.config.model_offsets_deg),
+                "bounded_single_turn_joints": list(BOUNDED_SINGLE_TURN_JOINTS),
+                "multi_turn_joints": list(MULTI_TURN_JOINTS),
+                "startup_raw_position": startup_raw,
+                "gripper": to_jsonable(self._build_gripper_state()),
+                "config": {
+                    "port": self.config.port,
+                    "robot_id": self.config.robot_id,
+                    "calibration_path": self.config.calibration_path,
+                    "urdf_path": self.config.urdf_path,
+                },
+            }
+        )
+
+
+Robot = SoArmMoceController
+
+
+__all__ = [
+    "BOUNDED_SINGLE_TURN_JOINTS",
+    "CapabilityError",
+    "DEFAULT_MODEL_OFFSETS_DEG",
+    "HardwareError",
+    "JOINTS",
+    "MULTI_TURN_ABSOLUTE_RAW_LIMIT",
+    "MULTI_TURN_DISABLED_LIMIT_RAW",
+    "MULTI_TURN_JOINTS",
+    "MULTI_TURN_PHASE_VALUE",
+    "POSITION_MODE_VALUE",
+    "Robot",
+    "SKILL_ROOT",
+    "SoArmMoceConfig",
+    "SoArmMoceController",
+    "ValidationError",
+    "resolve_config",
+]

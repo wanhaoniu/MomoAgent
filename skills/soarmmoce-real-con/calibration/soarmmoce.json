@@ -2,60 +2,78 @@
   "shoulder_pan": {
     "id": 1,
     "drive_mode": 0,
-    "homing_offset": -1899,
-    "range_min": 1120,
-    "range_max": 3135
+    "homing_offset": 2011,
+    "range_min": 1142,
+    "range_max": 3339,
+    "operating_mode": 0
   },
   "shoulder_lift": {
     "id": 2,
     "drive_mode": 0,
     "homing_offset": 0,
+    "phase": 28,
     "range_min": 0,
-    "range_max": 4095,
-    "home_wrapped_raw": 1228,
-    "home_tolerance_raw": 96,
-    "min_relative_raw": -8984,
-    "max_relative_raw": 1
+    "range_max": 0,
+    "operating_mode": 0,
+    "home_present_raw": 4499,
+    "home_present_wrapped_raw": 403
   },
   "elbow_flex": {
     "id": 3,
     "drive_mode": 0,
     "homing_offset": 0,
+    "phase": 28,
     "range_min": 0,
-    "range_max": 4095,
-    "home_wrapped_raw": 661,
-    "home_tolerance_raw": 96,
-    "min_relative_raw": -6258,
-    "max_relative_raw": 4003
+    "range_max": 0,
+    "operating_mode": 0,
+    "home_present_raw": 1763,
+    "home_present_wrapped_raw": 1763
   },
   "wrist_flex": {
     "id": 4,
     "drive_mode": 0,
-    "homing_offset": -529,
-    "range_min": 300,
-    "range_max": 2182
+    "homing_offset": 1237,
+    "range_min": 1110,
+    "range_max": 3065,
+    "operating_mode": 0
   },
   "wrist_roll": {
     "id": 5,
     "drive_mode": 0,
-    "homing_offset": 712,
-    "range_min": 1986,
-    "range_max": 3106
+    "homing_offset": -1881,
+    "range_min": 0,
+    "range_max": 4094,
+    "operating_mode": 0
   },
   "_meta": {
+    "generated_at_unix_s": 1775192718.150411,
+    "script": "soarmmoce_calibrate.py",
+    "bounded_single_turn_joints": [
+      "shoulder_pan",
+      "wrist_flex",
+      "wrist_roll"
+    ],
+    "absolute_raw_joints": [
+      "shoulder_lift",
+      "elbow_flex"
+    ],
     "home_joint_deg": {
       "shoulder_pan": 0.0,
       "shoulder_lift": 0.0,
       "elbow_flex": 0.0,
       "wrist_flex": 0.0,
       "wrist_roll": 0.0
+    },
+    "notes": {
+      "bounded_single_turn": "1/4/5 use half-turn homing plus manually recorded range limits.",
+      "absolute_raw": "2/3 use mode 0 with min/max limit 0 and phase 28; startup pose is the runtime reference."
     }
   },
   "gripper": {
     "id": 6,
     "drive_mode": 0,
     "homing_offset": -1966,
-    "range_min": 2047,
-    "range_max": 2049
+    "range_min": 0,
+    "range_max": 4095
   }
 }

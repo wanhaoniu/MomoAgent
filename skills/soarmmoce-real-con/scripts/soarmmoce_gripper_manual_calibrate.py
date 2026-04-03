@@ -12,7 +12,7 @@ from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 from lerobot.utils.utils import enter_pressed, move_cursor_up
 
-from soarmmoce_auto_calibrate import (
+from soarmmoce_calibrate import (
     DEFAULT_CONNECT_TIMEOUT_S,
     _build_single_turn_calibration_entry,
     _read_joint_snapshot,

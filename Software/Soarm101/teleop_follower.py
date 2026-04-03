@@ -30,7 +30,8 @@ ARM_JOINTS = [
 ]
 MULTI_TURN_JOINTS = {"shoulder_lift", "elbow_flex"}
 DEFAULT_FOLLOWER_CALIBRATION = Path(__file__).resolve().parent / "calibration" / "white_arm_follower.json"
-MULTI_TURN_RAW_RANGE = 900000
+MULTI_TURN_PHASE_VALUE = 28
+MULTI_TURN_DISABLED_LIMIT_RAW = 0
 
 
 def load_calibration(path: Path) -> dict[str, MotorCalibration]:
@@ -113,8 +114,8 @@ def setup_follower_bus(
     subset_calibration = {joint: calibration[joint] for joint in joints}
     raw_step_joints = {joint for joint in joints if joint in MULTI_TURN_JOINTS}
     for joint in raw_step_joints:
-        subset_calibration[joint].range_min = -MULTI_TURN_RAW_RANGE
-        subset_calibration[joint].range_max = MULTI_TURN_RAW_RANGE
+        subset_calibration[joint].range_min = MULTI_TURN_DISABLED_LIMIT_RAW
+        subset_calibration[joint].range_max = MULTI_TURN_DISABLED_LIMIT_RAW
 
     bus = FeetechMotorsBus(
         port=port,
@@ -138,9 +139,11 @@ def setup_follower_bus(
             if joint in raw_step_joints:
                 bus.write("Lock", joint, 0)
                 time.sleep(0.05)
-                bus.write("Min_Position_Limit", joint, 0)
-                bus.write("Max_Position_Limit", joint, 0)
-                bus.write("Operating_Mode", joint, 3)
+                bus.write("Homing_Offset", joint, 0)
+                bus.write("Phase", joint, MULTI_TURN_PHASE_VALUE)
+                bus.write("Min_Position_Limit", joint, MULTI_TURN_DISABLED_LIMIT_RAW)
+                bus.write("Max_Position_Limit", joint, MULTI_TURN_DISABLED_LIMIT_RAW)
+                bus.write("Operating_Mode", joint, OperatingMode.POSITION.value)
                 time.sleep(0.05)
                 bus.write("Lock", joint, 1)
             else:
@@ -188,8 +191,8 @@ def run(args: argparse.Namespace) -> None:
                 for joint in joints
                 if joint not in MULTI_TURN_JOINTS
             }
-            multi_turn_applied = {
-                joint: 0.0
+            multi_turn_start_raw = {
+                joint: int(follower_bus.read("Present_Position", joint, normalize=False))
                 for joint in joints
                 if joint in MULTI_TURN_JOINTS
             }
@@ -210,11 +213,8 @@ def run(args: argparse.Namespace) -> None:
 
                         scaled_target = float(leader_q[joint]) * scales[joint]
                         if joint in MULTI_TURN_JOINTS:
-                            delta = scaled_target - multi_turn_applied[joint]
-                            raw_step = int(round(delta * 4096.0 / 360.0))
-                            if raw_step != 0:
-                                command[joint] = raw_step
-                                multi_turn_applied[joint] += raw_step * 360.0 / 4096.0
+                            raw_offset = int(round(scaled_target * 4096.0 / 360.0))
+                            command[joint] = int(multi_turn_start_raw[joint]) + raw_offset
                         else:
                             command[joint] = single_turn_start[joint] + scaled_target
 

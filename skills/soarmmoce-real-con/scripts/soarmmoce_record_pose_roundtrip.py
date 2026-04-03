@@ -18,6 +18,7 @@ from soarmmoce_sdk import JOINTS, MULTI_TURN_JOINTS, SoArmMoceController, Valida
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SAVE_PATH = SKILL_ROOT / "workspace" / "runtime" / "recorded_pose_sequence.json"
+DEFAULT_POSE_COUNT = 2
 AUTO_FLIP_REPLAY_JOINTS = {"elbow_flex"}
 LIMIT_ERROR_LINE_RE = re.compile(
     r"^(?P<joint>[A-Za-z0-9_]+): target=(?P<target>[+-]?\d+(?:\.\d+)?) deg"
@@ -57,6 +58,48 @@ def _wait_for_enter(
                     arm.get_state()
                 except Exception:
                     pass
+    finally:
+        if close_stream and stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+
+def _prompt_pose_count(*, default: int = DEFAULT_POSE_COUNT) -> int:
+    default = max(1, int(default))
+    stream = sys.stdin
+    close_stream = False
+    try:
+        if stream is None or getattr(stream, "closed", False) or not stream.isatty():
+            try:
+                stream = open("/dev/tty", "r", encoding="utf-8", errors="ignore")
+                close_stream = True
+            except Exception:
+                return default
+
+        while True:
+            print(
+                f"[record-pose] 请输入要录制的姿态数量，直接回车默认 {default}: ",
+                file=sys.stderr,
+                flush=True,
+                end="",
+            )
+            line = stream.readline()
+            if line == "":
+                return default
+            raw = line.strip()
+            if not raw:
+                return default
+            try:
+                value = int(raw)
+            except ValueError:
+                print("[record-pose][warn] 请输入一个正整数。", file=sys.stderr, flush=True)
+                continue
+            if value <= 0:
+                print("[record-pose][warn] 姿态数量必须大于 0。", file=sys.stderr, flush=True)
+                continue
+            return int(value)
     finally:
         if close_stream and stream is not None:
             try:
@@ -340,11 +383,87 @@ def _print_move_result_summary(
             flush=True,
         )
     except Exception as exc:
+            print(
+                f"[record-pose][warn] {label} failed to capture multi-turn debug info: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
+def _print_gripper_result_summary(
+    *,
+    arm: SoArmMoceController,
+    label: str,
+    target_raw: int | None,
+) -> None:
+    if target_raw is None:
+        return
+    try:
+        actual_raw = arm.read_gripper_raw()
+    except Exception as exc:
         print(
-            f"[record-pose][warn] {label} failed to capture multi-turn debug info: {exc}",
+            f"[record-pose][warn] {label} failed to read gripper raw: {exc}",
             file=sys.stderr,
             flush=True,
         )
+        return
+    if actual_raw is None:
+        return
+    error_raw = int(actual_raw) - int(target_raw)
+    print(
+        f"[record-pose] {label} gripper target_raw={int(target_raw)} actual_raw={int(actual_raw)} error_raw={int(error_raw)}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _register_56_signed_snapshot(
+    *,
+    arm: SoArmMoceController,
+    bus,
+) -> Dict[str, int]:
+    raw_present = arm._read_raw_present_position(bus)
+    return {
+        joint_name: int(raw_present[joint_name])
+        for joint_name in MULTI_TURN_JOINTS
+        if joint_name in raw_present
+    }
+
+
+def _extract_pose_gripper_raw(pose: Dict[str, Any]) -> int | None:
+    gripper = pose.get("gripper")
+    if not isinstance(gripper, dict):
+        return None
+    value = gripper.get("present_raw")
+    if not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _restore_torque_with_current_hold(*, arm: SoArmMoceController, bus) -> Dict[str, Any]:
+    # Record the exact raw position while torque is still disabled, program that
+    # hold target first, then re-enable torque. This avoids the gripper snapping
+    # to a stale previous goal before the replay phase starts.
+    hold_state = arm.capture_hold_state(bus)
+    arm.apply_hold_state(hold_state, bus=bus)
+    arm.enable_torque()
+    arm.set_manual_multi_turn_readback(False)
+    arm.apply_hold_state(hold_state, bus=bus)
+    return hold_state
+
+
+def _lock_current_pose_before_exit(*, arm: SoArmMoceController) -> bool:
+    try:
+        bus = arm._ensure_bus()
+        _restore_torque_with_current_hold(arm=arm, bus=bus)
+        return True
+    except Exception as exc:
+        print(
+            f"[record-pose][warn] 结束时未能重新锁住当前位置: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
 
 
 def record_pose_sequence(
@@ -354,6 +473,7 @@ def record_pose_sequence(
     move_duration_sec: float,
     wait_for_record_enter: bool,
     wait_between_poses: bool,
+    wait_before_return_to_pose_1: bool,
     save_path: Path,
     skip_home: bool,
 ) -> Dict[str, Any]:
@@ -362,9 +482,15 @@ def record_pose_sequence(
 
     arm = SoArmMoceController()
     torque_was_disabled = False
+    keep_torque_locked_on_close = False
     try:
         bus = arm._ensure_bus()
-        bus.disable_torque()
+        gripper_available = arm.has_gripper()
+        if gripper_available:
+            print("[record-pose] 检测到 gripper，已纳入同一总线，本次会一起录制与回放。", file=sys.stderr, flush=True)
+        else:
+            print("[record-pose] 未检测到 gripper，本次自动跳过夹爪。", file=sys.stderr, flush=True)
+        arm.disable_torque()
         arm.set_manual_multi_turn_readback(True)
         torque_was_disabled = True
 
@@ -378,23 +504,44 @@ def record_pose_sequence(
             state = arm.get_state()
             joint_targets = _record_joint_targets(state)
             raw_present = arm._read_raw_present_position(bus)
+            register_56_signed = _register_56_signed_snapshot(arm=arm, bus=bus)
             multi_turn_state = arm._snapshot_multi_turn_state()
+            gripper_raw = arm.read_gripper_raw()
             pose_payload = {
                 "index": int(pose_index),
                 "joint_targets_deg": joint_targets,
                 "tcp_pose": to_jsonable(state.get("tcp_pose")),
                 "raw_present_position": to_jsonable(raw_present),
+                "register_56_signed": to_jsonable(register_56_signed),
                 "multi_turn_state": to_jsonable(multi_turn_state),
+                "gripper": {
+                    "available": gripper_raw is not None,
+                    "present_raw": None if gripper_raw is None else int(gripper_raw),
+                },
             }
             recorded_poses.append(pose_payload)
             print(
                 f"[record-pose] 已录制姿态 {pose_index}："
-                + json.dumps(joint_targets, ensure_ascii=False),
+                + json.dumps(
+                    {
+                        **joint_targets,
+                        **({"gripper_raw": int(gripper_raw)} if gripper_raw is not None else {}),
+                    },
+                    ensure_ascii=False,
+                ),
                 file=sys.stderr,
                 flush=True,
             )
+            if gripper_raw is not None:
+                print(
+                    f"[record-pose] 姿态 {pose_index} gripper_present_raw={int(gripper_raw)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             print(
-                f"[record-pose] 姿态 {pose_index} raw_multi_turn="
+                f"[record-pose] 姿态 {pose_index} register_56_signed="
+                + json.dumps(register_56_signed, ensure_ascii=False)
+                + " raw_multi_turn="
                 + json.dumps({name: raw_present.get(name) for name in MULTI_TURN_JOINTS}, ensure_ascii=False)
                 + " state_multi_turn="
                 + json.dumps(
@@ -407,12 +554,19 @@ def record_pose_sequence(
 
         saved_path = _save_recorded_poses(save_path, recorded_poses=recorded_poses)
 
-        hold_cmd = arm._build_raw_hold_command(bus)
-        bus.enable_torque()
-        arm.set_manual_multi_turn_readback(False)
-        torque_was_disabled = False
-        if hold_cmd:
-            bus.sync_write("Goal_Position", hold_cmd)
+        recorded_pose_register_56_signed = {
+            f"pose_{int(pose['index'])}": {
+                joint_name: int(value)
+                for joint_name, value in dict(pose.get("register_56_signed", {})).items()
+                if isinstance(value, (int, float))
+            }
+            for pose in recorded_poses
+        }
+        recorded_pose_gripper_raw = {
+            f"pose_{int(pose['index'])}": _extract_pose_gripper_raw(pose)
+            for pose in recorded_poses
+            if _extract_pose_gripper_raw(pose) is not None
+        }
 
         meta = arm.meta()
         joint_limits_deg = meta.get("joint_limits_deg")
@@ -455,11 +609,19 @@ def record_pose_sequence(
 
         pose_1_state: Dict[str, Any] | None = None
         if not bool(skip_home):
+            if bool(wait_before_return_to_pose_1):
+                _wait_for_enter(
+                    f"[record-pose] 已录制完 {len(recorded_poses)} 个姿态，按 Enter 返回姿态 1...",
+                    arm=arm,
+                )
+            _restore_torque_with_current_hold(arm=arm, bus=bus)
+            torque_was_disabled = False
             print(
                 f"[record-pose] 正在返回姿态 1，duration={float(return_duration_sec):.2f}s",
                 file=sys.stderr,
                 flush=True,
             )
+            arm.write_gripper_raw(_extract_pose_gripper_raw(first_pose), bus=bus)
             # 用正常的 wait=True 轨迹让多圈关节有机会做收敛修正，避免“回到姿态 1 太快、
             # 后续姿态 2 不对位”的情况。
             pose_1_result, pose_1_targets, pose_1_multi_turn_targets = _move_joints_best_effort(
@@ -478,7 +640,14 @@ def record_pose_sequence(
                 targets_deg=pose_1_targets,
                 state=pose_1_state,
             )
+            _print_gripper_result_summary(
+                arm=arm,
+                label="pose=1 reached",
+                target_raw=_extract_pose_gripper_raw(first_pose),
+            )
         else:
+            _restore_torque_with_current_hold(arm=arm, bus=bus)
+            torque_was_disabled = False
             pose_1_state = arm.get_state()
 
         final_state = pose_1_state if pose_1_state is not None else arm.get_state()
@@ -503,6 +672,7 @@ def record_pose_sequence(
                 file=sys.stderr,
                 flush=True,
             )
+            arm.write_gripper_raw(_extract_pose_gripper_raw(pose), bus=bus)
             move_result, final_replay_targets, final_replay_multi_turn_targets = _move_joints_best_effort(
                 arm=arm,
                 targets_deg=replay_targets,
@@ -519,10 +689,19 @@ def record_pose_sequence(
                 targets_deg=final_replay_targets,
                 state=final_state,
             )
+            _print_gripper_result_summary(
+                arm=arm,
+                label=f"pose={pose_index} reached",
+                target_raw=_extract_pose_gripper_raw(pose),
+            )
+
+        keep_torque_locked_on_close = _lock_current_pose_before_exit(arm=arm)
 
         return {
             "action": "record_pose_sequence",
             "pose_count": len(recorded_poses),
+            "recorded_pose_register_56_signed": recorded_pose_register_56_signed,
+            "recorded_pose_gripper_raw": recorded_pose_gripper_raw,
             "recorded_poses": recorded_poses,
             "replay_warnings": replay_warnings,
             "saved_pose_path": str(saved_path),
@@ -532,39 +711,35 @@ def record_pose_sequence(
         }
     finally:
         if torque_was_disabled:
-            try:
-                bus = arm._ensure_bus()
-                bus.enable_torque()
-                arm.set_manual_multi_turn_readback(False)
-                hold_cmd = arm._build_raw_hold_command(bus)
-                if hold_cmd:
-                    bus.sync_write("Goal_Position", hold_cmd)
-            except Exception:
-                pass
-        arm.close()
+            keep_torque_locked_on_close = _lock_current_pose_before_exit(arm=arm) or keep_torque_locked_on_close
+        arm.close(disable_torque=not bool(keep_torque_locked_on_close))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Record multiple arm poses, return to pose 1, then replay them in order",
     )
-    parser.add_argument("--pose-count", type=int, default=2)
-    parser.add_argument("--return-duration-sec", "--home-duration-sec", type=float, default=2.0)
-    parser.add_argument("--move-duration-sec", type=float, default=1.5)
+    parser.add_argument("--pose-count", type=int, default=None)
+    parser.add_argument("--return-duration-sec", "--home-duration-sec", type=float, default=5.0)
+    parser.add_argument("--move-duration-sec", type=float, default=8.0)
     parser.add_argument("--wait-for-record-enter", type=cli_bool, default=True)
     parser.add_argument("--wait-between-poses", type=cli_bool, default=True)
+    parser.add_argument("--wait-before-return-to-pose-1", type=cli_bool, default=True)
     parser.add_argument("--skip-home", type=cli_bool, default=False)
     parser.add_argument("--save-path", default=str(DEFAULT_SAVE_PATH))
     args = parser.parse_args()
 
+    pose_count = int(args.pose_count) if args.pose_count is not None else _prompt_pose_count()
+
     try:
         print_success(
             record_pose_sequence(
-                pose_count=int(args.pose_count),
+                pose_count=int(pose_count),
                 return_duration_sec=float(args.return_duration_sec),
                 move_duration_sec=float(args.move_duration_sec),
                 wait_for_record_enter=bool(args.wait_for_record_enter),
                 wait_between_poses=bool(args.wait_between_poses),
+                wait_before_return_to_pose_1=bool(args.wait_before_return_to_pose_1),
                 save_path=Path(str(args.save_path)).expanduser(),
                 skip_home=bool(args.skip_home),
             )
