@@ -131,6 +131,41 @@ def _save_recorded_poses(path: Path, *, recorded_poses: List[Dict[str, Any]]) ->
     return path
 
 
+def _resolve_pose_file_path(path: Path, *, require_exists: bool) -> Path:
+    candidate = Path(path).expanduser()
+    if candidate.exists() and candidate.is_dir():
+        candidate = candidate / DEFAULT_SAVE_PATH.name
+    elif not candidate.exists() and candidate.suffix.lower() != ".json":
+        candidate = candidate / DEFAULT_SAVE_PATH.name
+    candidate = candidate.resolve()
+    if require_exists:
+        if not candidate.exists():
+            raise FileNotFoundError(f"录制文件不存在: {candidate}")
+        if not candidate.is_file():
+            raise ValidationError(f"录制路径不是文件: {candidate}")
+    return candidate
+
+
+def _load_recorded_poses(path: Path) -> tuple[Path, List[Dict[str, Any]]]:
+    resolved_path = _resolve_pose_file_path(path, require_exists=True)
+    payload = json.loads(resolved_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValidationError(f"录制文件格式无效，顶层必须是对象: {resolved_path}")
+    poses = payload.get("poses")
+    if not isinstance(poses, list) or not poses:
+        raise ValidationError(f"录制文件中没有可回放的 poses: {resolved_path}")
+
+    normalized_poses: List[Dict[str, Any]] = []
+    for index, pose in enumerate(poses, start=1):
+        if not isinstance(pose, dict):
+            raise ValidationError(f"录制文件中的 pose[{index}] 必须是对象: {resolved_path}")
+        pose_payload = dict(pose)
+        pose_payload.setdefault("index", int(index))
+        normalized_poses.append(pose_payload)
+
+    return resolved_path, normalized_poses
+
+
 def _limit_violations(
     *,
     joint_targets: Dict[str, float],
@@ -270,6 +305,41 @@ def _build_replay_multi_turn_continuous_raw(
             continue
         overrides[joint_name] = float(continuous_raw)
     return overrides
+
+
+def _prepare_recorded_poses_for_replay(
+    *,
+    arm: SoArmMoceController,
+    recorded_poses: List[Dict[str, Any]],
+) -> List[str]:
+    meta = arm.meta()
+    joint_limits_deg = meta.get("joint_limits_deg")
+    if not isinstance(joint_limits_deg, dict):
+        joint_limits_deg = {}
+
+    replay_warnings: List[str] = []
+    for pose_index, pose in enumerate(recorded_poses, start=1):
+        pose.setdefault("index", int(pose_index))
+        joint_targets = pose.get("joint_targets_deg")
+        if not isinstance(joint_targets, dict):
+            raise ValidationError(f"姿态 {pose_index} 缺少 joint_targets_deg，无法回放")
+        replay_targets, pose_warnings, pose_violations = _normalize_targets_for_replay(
+            pose_index=int(pose["index"]),
+            joint_targets=joint_targets,
+            joint_limits_deg=joint_limits_deg,
+        )
+        pose["replay_joint_targets_deg"] = replay_targets
+        pose["replay_multi_turn_continuous_raw"] = _build_replay_multi_turn_continuous_raw(
+            pose=pose,
+            replay_targets_deg=replay_targets,
+        )
+        replay_warnings.extend(pose_warnings)
+        if pose_violations:
+            pose["replay_limit_violations"] = list(pose_violations)
+        else:
+            pose.pop("replay_limit_violations", None)
+
+    return replay_warnings
 
 
 def _move_joints_best_effort(
@@ -476,10 +546,12 @@ def record_pose_sequence(
     wait_before_return_to_pose_1: bool,
     save_path: Path,
     skip_home: bool,
+    replay_path: Path | None = None,
 ) -> Dict[str, Any]:
-    if int(pose_count) <= 0:
+    if replay_path is None and int(pose_count) <= 0:
         raise ValidationError("--pose-count must be >= 1")
 
+    resolved_save_path = _resolve_pose_file_path(save_path, require_exists=False)
     arm = SoArmMoceController()
     torque_was_disabled = False
     keep_torque_locked_on_close = False
@@ -490,69 +562,83 @@ def record_pose_sequence(
             print("[record-pose] 检测到 gripper，已纳入同一总线，本次会一起录制与回放。", file=sys.stderr, flush=True)
         else:
             print("[record-pose] 未检测到 gripper，本次自动跳过夹爪。", file=sys.stderr, flush=True)
-        arm.disable_torque()
-        arm.set_manual_multi_turn_readback(True)
-        torque_was_disabled = True
 
-        recorded_poses: List[Dict[str, Any]] = []
-        for pose_index in range(1, int(pose_count) + 1):
-            if bool(wait_for_record_enter):
-                _wait_for_enter(
-                    f"[record-pose] 力矩已解锁，请把机械臂摆到姿态 {pose_index}，按 Enter 录制...",
-                    arm=arm,
-                )
-            state = arm.get_state()
-            joint_targets = _record_joint_targets(state)
-            raw_present = arm._read_raw_present_position(bus)
-            register_56_signed = _register_56_signed_snapshot(arm=arm, bus=bus)
-            multi_turn_state = arm._snapshot_multi_turn_state()
-            gripper_raw = arm.read_gripper_raw()
-            pose_payload = {
-                "index": int(pose_index),
-                "joint_targets_deg": joint_targets,
-                "tcp_pose": to_jsonable(state.get("tcp_pose")),
-                "raw_present_position": to_jsonable(raw_present),
-                "register_56_signed": to_jsonable(register_56_signed),
-                "multi_turn_state": to_jsonable(multi_turn_state),
-                "gripper": {
-                    "available": gripper_raw is not None,
-                    "present_raw": None if gripper_raw is None else int(gripper_raw),
-                },
-            }
-            recorded_poses.append(pose_payload)
+        mode = "record_and_replay"
+        loaded_pose_path: Path | None = None
+        recorded_poses: List[Dict[str, Any]]
+        if replay_path is not None:
+            loaded_pose_path, recorded_poses = _load_recorded_poses(replay_path)
+            saved_path = loaded_pose_path
+            mode = "replay_only"
             print(
-                f"[record-pose] 已录制姿态 {pose_index}："
-                + json.dumps(
-                    {
-                        **joint_targets,
-                        **({"gripper_raw": int(gripper_raw)} if gripper_raw is not None else {}),
-                    },
-                    ensure_ascii=False,
-                ),
+                f"[record-pose] 已加载录制文件 {loaded_pose_path}，跳过录制，直接回放。",
                 file=sys.stderr,
                 flush=True,
             )
-            if gripper_raw is not None:
+        else:
+            arm.disable_torque()
+            arm.set_manual_multi_turn_readback(True)
+            torque_was_disabled = True
+
+            recorded_poses = []
+            for pose_index in range(1, int(pose_count) + 1):
+                if bool(wait_for_record_enter):
+                    _wait_for_enter(
+                        f"[record-pose] 力矩已解锁，请把机械臂摆到姿态 {pose_index}，按 Enter 录制...",
+                        arm=arm,
+                    )
+                state = arm.get_state()
+                joint_targets = _record_joint_targets(state)
+                raw_present = arm._read_raw_present_position(bus)
+                register_56_signed = _register_56_signed_snapshot(arm=arm, bus=bus)
+                multi_turn_state = arm._snapshot_multi_turn_state()
+                gripper_raw = arm.read_gripper_raw()
+                pose_payload = {
+                    "index": int(pose_index),
+                    "joint_targets_deg": joint_targets,
+                    "tcp_pose": to_jsonable(state.get("tcp_pose")),
+                    "raw_present_position": to_jsonable(raw_present),
+                    "register_56_signed": to_jsonable(register_56_signed),
+                    "multi_turn_state": to_jsonable(multi_turn_state),
+                    "gripper": {
+                        "available": gripper_raw is not None,
+                        "present_raw": None if gripper_raw is None else int(gripper_raw),
+                    },
+                }
+                recorded_poses.append(pose_payload)
                 print(
-                    f"[record-pose] 姿态 {pose_index} gripper_present_raw={int(gripper_raw)}",
+                    f"[record-pose] 已录制姿态 {pose_index}："
+                    + json.dumps(
+                        {
+                            **joint_targets,
+                            **({"gripper_raw": int(gripper_raw)} if gripper_raw is not None else {}),
+                        },
+                        ensure_ascii=False,
+                    ),
                     file=sys.stderr,
                     flush=True,
                 )
-            print(
-                f"[record-pose] 姿态 {pose_index} register_56_signed="
-                + json.dumps(register_56_signed, ensure_ascii=False)
-                + " raw_multi_turn="
-                + json.dumps({name: raw_present.get(name) for name in MULTI_TURN_JOINTS}, ensure_ascii=False)
-                + " state_multi_turn="
-                + json.dumps(
-                    {name: multi_turn_state.get(name) for name in MULTI_TURN_JOINTS},
-                    ensure_ascii=False,
-                ),
-                file=sys.stderr,
-                flush=True,
-            )
+                if gripper_raw is not None:
+                    print(
+                        f"[record-pose] 姿态 {pose_index} gripper_present_raw={int(gripper_raw)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                print(
+                    f"[record-pose] 姿态 {pose_index} register_56_signed="
+                    + json.dumps(register_56_signed, ensure_ascii=False)
+                    + " raw_multi_turn="
+                    + json.dumps({name: raw_present.get(name) for name in MULTI_TURN_JOINTS}, ensure_ascii=False)
+                    + " state_multi_turn="
+                    + json.dumps(
+                        {name: multi_turn_state.get(name) for name in MULTI_TURN_JOINTS},
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
 
-        saved_path = _save_recorded_poses(save_path, recorded_poses=recorded_poses)
+            saved_path = _save_recorded_poses(resolved_save_path, recorded_poses=recorded_poses)
 
         recorded_pose_register_56_signed = {
             f"pose_{int(pose['index'])}": {
@@ -568,33 +654,18 @@ def record_pose_sequence(
             if _extract_pose_gripper_raw(pose) is not None
         }
 
-        meta = arm.meta()
-        joint_limits_deg = meta.get("joint_limits_deg")
-        if not isinstance(joint_limits_deg, dict):
-            joint_limits_deg = {}
-
-        replay_warnings: List[str] = []
-        for pose in recorded_poses:
-            replay_targets, pose_warnings, pose_violations = _normalize_targets_for_replay(
-                pose_index=int(pose["index"]),
-                joint_targets=pose["joint_targets_deg"],
-                joint_limits_deg=joint_limits_deg,
-            )
-            pose["replay_joint_targets_deg"] = replay_targets
-            pose["replay_multi_turn_continuous_raw"] = _build_replay_multi_turn_continuous_raw(
-                pose=pose,
-                replay_targets_deg=replay_targets,
-            )
-            replay_warnings.extend(pose_warnings)
-            if pose_violations:
-                pose["replay_limit_violations"] = list(pose_violations)
+        replay_warnings = _prepare_recorded_poses_for_replay(
+            arm=arm,
+            recorded_poses=recorded_poses,
+        )
 
         for warning in replay_warnings:
             print(f"[record-pose][warn] {warning}", file=sys.stderr, flush=True)
 
         # Save the enriched replay metadata too so the last recorded session can be
         # inspected directly when we need to debug sign/limit mismatches.
-        saved_path = _save_recorded_poses(save_path, recorded_poses=recorded_poses)
+        if mode != "replay_only":
+            saved_path = _save_recorded_poses(saved_path, recorded_poses=recorded_poses)
 
         first_pose = recorded_poses[0]
         first_pose_targets = first_pose.get("replay_joint_targets_deg", first_pose["joint_targets_deg"])
@@ -699,11 +770,13 @@ def record_pose_sequence(
 
         return {
             "action": "record_pose_sequence",
+            "mode": mode,
             "pose_count": len(recorded_poses),
             "recorded_pose_register_56_signed": recorded_pose_register_56_signed,
             "recorded_pose_gripper_raw": recorded_pose_gripper_raw,
             "recorded_poses": recorded_poses,
             "replay_warnings": replay_warnings,
+            "loaded_pose_path": None if loaded_pose_path is None else str(loaded_pose_path),
             "saved_pose_path": str(saved_path),
             "returned_to_pose_1": not bool(skip_home),
             "pose_1_state": pose_1_state,
@@ -721,15 +794,23 @@ def main() -> None:
     )
     parser.add_argument("--pose-count", type=int, default=None)
     parser.add_argument("--return-duration-sec", "--home-duration-sec", type=float, default=5.0)
-    parser.add_argument("--move-duration-sec", type=float, default=8.0)
+    parser.add_argument("--move-duration-sec", type=float, default=5.0)
     parser.add_argument("--wait-for-record-enter", type=cli_bool, default=True)
     parser.add_argument("--wait-between-poses", type=cli_bool, default=True)
     parser.add_argument("--wait-before-return-to-pose-1", type=cli_bool, default=True)
     parser.add_argument("--skip-home", type=cli_bool, default=False)
     parser.add_argument("--save-path", default=str(DEFAULT_SAVE_PATH))
+    parser.add_argument(
+        "--replay-path",
+        default=None,
+        help="已有录制 JSON 文件或其所在目录；提供后跳过录制直接回放",
+    )
     args = parser.parse_args()
 
-    pose_count = int(args.pose_count) if args.pose_count is not None else _prompt_pose_count()
+    replay_path = None if args.replay_path in {None, ""} else Path(str(args.replay_path)).expanduser()
+    pose_count = 0 if replay_path is not None else (
+        int(args.pose_count) if args.pose_count is not None else _prompt_pose_count()
+    )
 
     try:
         print_success(
@@ -742,6 +823,7 @@ def main() -> None:
                 wait_before_return_to_pose_1=bool(args.wait_before_return_to_pose_1),
                 save_path=Path(str(args.save_path)).expanduser(),
                 skip_home=bool(args.skip_home),
+                replay_path=replay_path,
             )
         )
     except Exception as exc:

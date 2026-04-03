@@ -1,14 +1,14 @@
 {
-  "saved_at": "2026-04-03 13:07:03",
-  "pose_count": 2,
+  "saved_at": "2026-04-03 13:57:28",
+  "pose_count": 7,
   "poses": [
     {
       "index": 1,
       "joint_targets_deg": {
-        "shoulder_pan": 2.98828125,
-        "shoulder_lift": 3.217128537735849,
-        "elbow_flex": -80.54547991071429,
-        "wrist_flex": 173.935546875,
+        "shoulder_pan": 0.791015625,
+        "shoulder_lift": 0.01658313679245283,
+        "elbow_flex": 12.712751116071429,
+        "wrist_flex": 4.21875,
         "wrist_roll": -0.17578125
       },
       "tcp_pose": {
@@ -24,60 +24,60 @@
         ]
       },
       "raw_present_position": {
-        "shoulder_pan": 2112,
-        "shoulder_lift": 4305,
-        "elbow_flex": 6894,
-        "wrist_flex": 3245,
-        "wrist_roll": 1131
+        "shoulder_pan": 2182,
+        "shoulder_lift": 4403,
+        "elbow_flex": 3045,
+        "wrist_flex": 3116,
+        "wrist_roll": 2216
       },
       "register_56_signed": {
-        "shoulder_lift": 4305,
-        "elbow_flex": 6894
+        "shoulder_lift": 4403,
+        "elbow_flex": 3045
       },
       "multi_turn_state": {
         "shoulder_lift": {
-          "startup_raw": 4499,
-          "current_raw": 4305,
-          "continuous_raw": -194,
-          "relative_raw": -194,
-          "motor_deg": -17.05078125,
-          "joint_deg": 3.217128537735849,
+          "startup_raw": 4404,
+          "current_raw": 4403,
+          "continuous_raw": -1,
+          "relative_raw": -1,
+          "motor_deg": -0.087890625,
+          "joint_deg": 0.01658313679245283,
           "goal_raw": null
         },
         "elbow_flex": {
-          "startup_raw": 1762,
-          "current_raw": 6894,
-          "continuous_raw": 5132,
-          "relative_raw": 5132,
-          "motor_deg": 451.0546875,
-          "joint_deg": -80.54547991071429,
+          "startup_raw": 3855,
+          "current_raw": 3045,
+          "continuous_raw": -810,
+          "relative_raw": -810,
+          "motor_deg": -71.19140625,
+          "joint_deg": 12.712751116071429,
           "goal_raw": null
         }
       },
       "gripper": {
         "available": true,
-        "present_raw": 1306
+        "present_raw": 2924
       },
       "replay_joint_targets_deg": {
-        "shoulder_pan": 2.98828125,
-        "shoulder_lift": 3.217128537735849,
-        "elbow_flex": -80.54547991071429,
-        "wrist_flex": 173.935546875,
+        "shoulder_pan": 0.791015625,
+        "shoulder_lift": 0.01658313679245283,
+        "elbow_flex": 12.712751116071429,
+        "wrist_flex": 4.21875,
         "wrist_roll": -0.17578125
       },
       "replay_multi_turn_continuous_raw": {
-        "shoulder_lift": -194.0,
-        "elbow_flex": 5132.0
+        "shoulder_lift": -1.0,
+        "elbow_flex": -810.0
       }
     },
     {
       "index": 2,
       "joint_targets_deg": {
-        "shoulder_pan": 96.50390625,
-        "shoulder_lift": 11.591612617924529,
-        "elbow_flex": -5.807059151785714,
-        "wrist_flex": 173.759765625,
-        "wrist_roll": 89.296875
+        "shoulder_pan": -94.658203125,
+        "shoulder_lift": 13.36600825471698,
+        "elbow_flex": 82.89969308035715,
+        "wrist_flex": -45.17578125,
+        "wrist_roll": 0.17578125
       },
       "tcp_pose": {
         "xyz": [
@@ -92,50 +92,390 @@
         ]
       },
       "raw_present_position": {
-        "shoulder_pan": 1048,
-        "shoulder_lift": 3800,
-        "elbow_flex": 2132,
-        "wrist_flex": 3243,
-        "wrist_roll": 2149
+        "shoulder_pan": 3268,
+        "shoulder_lift": 3598,
+        "elbow_flex": -1427,
+        "wrist_flex": 2554,
+        "wrist_roll": 2220
       },
       "register_56_signed": {
-        "shoulder_lift": 3800,
-        "elbow_flex": 2132
+        "shoulder_lift": 3598,
+        "elbow_flex": -1427
       },
       "multi_turn_state": {
         "shoulder_lift": {
-          "startup_raw": 4499,
-          "current_raw": 3800,
-          "continuous_raw": -699,
-          "relative_raw": -699,
-          "motor_deg": -61.435546875,
-          "joint_deg": 11.591612617924529,
+          "startup_raw": 4404,
+          "current_raw": 3598,
+          "continuous_raw": -806,
+          "relative_raw": -806,
+          "motor_deg": -70.83984375,
+          "joint_deg": 13.36600825471698,
           "goal_raw": null
         },
         "elbow_flex": {
-          "startup_raw": 1762,
-          "current_raw": 2132,
-          "continuous_raw": 370,
-          "relative_raw": 370,
-          "motor_deg": 32.51953125,
-          "joint_deg": -5.807059151785714,
+          "startup_raw": 3855,
+          "current_raw": -1427,
+          "continuous_raw": -5282,
+          "relative_raw": -5282,
+          "motor_deg": -464.23828125,
+          "joint_deg": 82.89969308035715,
           "goal_raw": null
         }
       },
       "gripper": {
         "available": true,
-        "present_raw": 1837
+        "present_raw": 2924
       },
       "replay_joint_targets_deg": {
-        "shoulder_pan": 96.50390625,
-        "shoulder_lift": 11.591612617924529,
-        "elbow_flex": -5.807059151785714,
-        "wrist_flex": 173.759765625,
-        "wrist_roll": 89.296875
+        "shoulder_pan": -94.658203125,
+        "shoulder_lift": 13.36600825471698,
+        "elbow_flex": 82.89969308035715,
+        "wrist_flex": -45.17578125,
+        "wrist_roll": 0.17578125
       },
       "replay_multi_turn_continuous_raw": {
-        "shoulder_lift": -699.0,
-        "elbow_flex": 370.0
+        "shoulder_lift": -806.0,
+        "elbow_flex": -5282.0
+      }
+    },
+    {
+      "index": 3,
+      "joint_targets_deg": {
+        "shoulder_pan": -95.09765625,
+        "shoulder_lift": 8.457399764150944,
+        "elbow_flex": 158.29729352678572,
+        "wrist_flex": -125.244140625,
+        "wrist_roll": -0.087890625
+      },
+      "tcp_pose": {
+        "xyz": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "raw_present_position": {
+        "shoulder_pan": 3273,
+        "shoulder_lift": 3894,
+        "elbow_flex": -6231,
+        "wrist_flex": 1643,
+        "wrist_roll": 2217
+      },
+      "register_56_signed": {
+        "shoulder_lift": 3894,
+        "elbow_flex": -6231
+      },
+      "multi_turn_state": {
+        "shoulder_lift": {
+          "startup_raw": 4404,
+          "current_raw": 3894,
+          "continuous_raw": -510,
+          "relative_raw": -510,
+          "motor_deg": -44.82421875,
+          "joint_deg": 8.457399764150944,
+          "goal_raw": null
+        },
+        "elbow_flex": {
+          "startup_raw": 3855,
+          "current_raw": -6231,
+          "continuous_raw": -10086,
+          "relative_raw": -10086,
+          "motor_deg": -886.46484375,
+          "joint_deg": 158.29729352678572,
+          "goal_raw": null
+        }
+      },
+      "gripper": {
+        "available": true,
+        "present_raw": 2924
+      },
+      "replay_joint_targets_deg": {
+        "shoulder_pan": -95.09765625,
+        "shoulder_lift": 8.457399764150944,
+        "elbow_flex": 158.29729352678572,
+        "wrist_flex": -125.244140625,
+        "wrist_roll": -0.087890625
+      },
+      "replay_multi_turn_continuous_raw": {
+        "shoulder_lift": -510.0,
+        "elbow_flex": -10086.0
+      }
+    },
+    {
+      "index": 4,
+      "joint_targets_deg": {
+        "shoulder_pan": -93.427734375,
+        "shoulder_lift": 8.473982900943396,
+        "elbow_flex": 158.29729352678572,
+        "wrist_flex": -125.068359375,
+        "wrist_roll": 0.439453125
+      },
+      "tcp_pose": {
+        "xyz": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "raw_present_position": {
+        "shoulder_pan": 3254,
+        "shoulder_lift": 3893,
+        "elbow_flex": -6231,
+        "wrist_flex": 1645,
+        "wrist_roll": 2223
+      },
+      "register_56_signed": {
+        "shoulder_lift": 3893,
+        "elbow_flex": -6231
+      },
+      "multi_turn_state": {
+        "shoulder_lift": {
+          "startup_raw": 4404,
+          "current_raw": 3893,
+          "continuous_raw": -511,
+          "relative_raw": -511,
+          "motor_deg": -44.912109375,
+          "joint_deg": 8.473982900943396,
+          "goal_raw": null
+        },
+        "elbow_flex": {
+          "startup_raw": 3855,
+          "current_raw": -6231,
+          "continuous_raw": -10086,
+          "relative_raw": -10086,
+          "motor_deg": -886.46484375,
+          "joint_deg": 158.29729352678572,
+          "goal_raw": null
+        }
+      },
+      "gripper": {
+        "available": true,
+        "present_raw": 2163
+      },
+      "replay_joint_targets_deg": {
+        "shoulder_pan": -93.427734375,
+        "shoulder_lift": 8.473982900943396,
+        "elbow_flex": 158.29729352678572,
+        "wrist_flex": -125.068359375,
+        "wrist_roll": 0.439453125
+      },
+      "replay_multi_turn_continuous_raw": {
+        "shoulder_lift": -511.0,
+        "elbow_flex": -10086.0
+      }
+    },
+    {
+      "index": 5,
+      "joint_targets_deg": {
+        "shoulder_pan": 90.966796875,
+        "shoulder_lift": 3.615123820754717,
+        "elbow_flex": 14.737374441964286,
+        "wrist_flex": 15.64453125,
+        "wrist_roll": 1.494140625
+      },
+      "tcp_pose": {
+        "xyz": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "raw_present_position": {
+        "shoulder_pan": 1156,
+        "shoulder_lift": 4186,
+        "elbow_flex": 2916,
+        "wrist_flex": 3246,
+        "wrist_roll": 2235
+      },
+      "register_56_signed": {
+        "shoulder_lift": 4186,
+        "elbow_flex": 2916
+      },
+      "multi_turn_state": {
+        "shoulder_lift": {
+          "startup_raw": 4404,
+          "current_raw": 4186,
+          "continuous_raw": -218,
+          "relative_raw": -218,
+          "motor_deg": -19.16015625,
+          "joint_deg": 3.615123820754717,
+          "goal_raw": null
+        },
+        "elbow_flex": {
+          "startup_raw": 3855,
+          "current_raw": 2916,
+          "continuous_raw": -939,
+          "relative_raw": -939,
+          "motor_deg": -82.529296875,
+          "joint_deg": 14.737374441964286,
+          "goal_raw": null
+        }
+      },
+      "gripper": {
+        "available": true,
+        "present_raw": 2164
+      },
+      "replay_joint_targets_deg": {
+        "shoulder_pan": 90.966796875,
+        "shoulder_lift": 3.615123820754717,
+        "elbow_flex": 14.737374441964286,
+        "wrist_flex": 15.64453125,
+        "wrist_roll": 1.494140625
+      },
+      "replay_multi_turn_continuous_raw": {
+        "shoulder_lift": -218.0,
+        "elbow_flex": -939.0
+      }
+    },
+    {
+      "index": 6,
+      "joint_targets_deg": {
+        "shoulder_pan": 91.0546875,
+        "shoulder_lift": 3.615123820754717,
+        "elbow_flex": 14.737374441964286,
+        "wrist_flex": 15.64453125,
+        "wrist_roll": 1.7578125
+      },
+      "tcp_pose": {
+        "xyz": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "raw_present_position": {
+        "shoulder_pan": 1155,
+        "shoulder_lift": 4186,
+        "elbow_flex": 2916,
+        "wrist_flex": 3246,
+        "wrist_roll": 2238
+      },
+      "register_56_signed": {
+        "shoulder_lift": 4186,
+        "elbow_flex": 2916
+      },
+      "multi_turn_state": {
+        "shoulder_lift": {
+          "startup_raw": 4404,
+          "current_raw": 4186,
+          "continuous_raw": -218,
+          "relative_raw": -218,
+          "motor_deg": -19.16015625,
+          "joint_deg": 3.615123820754717,
+          "goal_raw": null
+        },
+        "elbow_flex": {
+          "startup_raw": 3855,
+          "current_raw": 2916,
+          "continuous_raw": -939,
+          "relative_raw": -939,
+          "motor_deg": -82.529296875,
+          "joint_deg": 14.737374441964286,
+          "goal_raw": null
+        }
+      },
+      "gripper": {
+        "available": true,
+        "present_raw": 2751
+      },
+      "replay_joint_targets_deg": {
+        "shoulder_pan": 91.0546875,
+        "shoulder_lift": 3.615123820754717,
+        "elbow_flex": 14.737374441964286,
+        "wrist_flex": 15.64453125,
+        "wrist_roll": 1.7578125
+      },
+      "replay_multi_turn_continuous_raw": {
+        "shoulder_lift": -218.0,
+        "elbow_flex": -939.0
+      }
+    },
+    {
+      "index": 7,
+      "joint_targets_deg": {
+        "shoulder_pan": 87.5390625,
+        "shoulder_lift": 3.615123820754717,
+        "elbow_flex": 14.737374441964286,
+        "wrist_flex": 15.64453125,
+        "wrist_roll": 1.7578125
+      },
+      "tcp_pose": {
+        "xyz": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "raw_present_position": {
+        "shoulder_pan": 1196,
+        "shoulder_lift": 4186,
+        "elbow_flex": 2916,
+        "wrist_flex": 3246,
+        "wrist_roll": 2238
+      },
+      "register_56_signed": {
+        "shoulder_lift": 4186,
+        "elbow_flex": 2916
+      },
+      "multi_turn_state": {
+        "shoulder_lift": {
+          "startup_raw": 4404,
+          "current_raw": 4186,
+          "continuous_raw": -218,
+          "relative_raw": -218,
+          "motor_deg": -19.16015625,
+          "joint_deg": 3.615123820754717,
+          "goal_raw": null
+        },
+        "elbow_flex": {
+          "startup_raw": 3855,
+          "current_raw": 2916,
+          "continuous_raw": -939,
+          "relative_raw": -939,
+          "motor_deg": -82.529296875,
+          "joint_deg": 14.737374441964286,
+          "goal_raw": null
+        }
+      },
+      "gripper": {
+        "available": true,
+        "present_raw": 2751
+      },
+      "replay_joint_targets_deg": {
+        "shoulder_pan": 87.5390625,
+        "shoulder_lift": 3.615123820754717,
+        "elbow_flex": 14.737374441964286,
+        "wrist_flex": 15.64453125,
+        "wrist_roll": 1.7578125
+      },
+      "replay_multi_turn_continuous_raw": {
+        "shoulder_lift": -218.0,
+        "elbow_flex": -939.0
       }
     }
   ]
