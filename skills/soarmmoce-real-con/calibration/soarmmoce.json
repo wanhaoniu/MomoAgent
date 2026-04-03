@@ -2,9 +2,9 @@
   "shoulder_pan": {
     "id": 1,
     "drive_mode": 0,
-    "homing_offset": 2011,
-    "range_min": 1142,
-    "range_max": 3339,
+    "homing_offset": -1939,
+    "range_min": 982,
+    "range_max": 3321,
     "operating_mode": 0
   },
   "shoulder_lift": {
@@ -15,8 +15,8 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 4499,
-    "home_present_wrapped_raw": 403
+    "home_present_raw": 1228,
+    "home_present_wrapped_raw": 1228
   },
   "elbow_flex": {
     "id": 3,
@@ -26,36 +26,39 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 1763,
-    "home_present_wrapped_raw": 1763
+    "home_present_raw": 3215,
+    "home_present_wrapped_raw": 3215
   },
   "wrist_flex": {
     "id": 4,
     "drive_mode": 0,
-    "homing_offset": 1237,
-    "range_min": 1110,
-    "range_max": 3065,
+    "homing_offset": 2010,
+    "range_min": 1532,
+    "range_max": 3709,
     "operating_mode": 0
   },
   "wrist_roll": {
     "id": 5,
     "drive_mode": 0,
-    "homing_offset": -1881,
+    "homing_offset": 0,
+    "phase": 28,
     "range_min": 0,
-    "range_max": 4094,
-    "operating_mode": 0
+    "range_max": 0,
+    "operating_mode": 0,
+    "home_present_raw": 2598,
+    "home_present_wrapped_raw": 2598
   },
   "_meta": {
-    "generated_at_unix_s": 1775192718.150411,
+    "generated_at_unix_s": 1775211195.5312781,
     "script": "soarmmoce_calibrate.py",
     "bounded_single_turn_joints": [
       "shoulder_pan",
-      "wrist_flex",
-      "wrist_roll"
+      "wrist_flex"
     ],
     "absolute_raw_joints": [
       "shoulder_lift",
-      "elbow_flex"
+      "elbow_flex",
+      "wrist_roll"
     ],
     "home_joint_deg": {
       "shoulder_pan": 0.0,
@@ -65,8 +68,8 @@
       "wrist_roll": 0.0
     },
     "notes": {
-      "bounded_single_turn": "1/4/5 use half-turn homing plus manually recorded range limits.",
-      "absolute_raw": "2/3 use mode 0 with min/max limit 0 and phase 28; startup pose is the runtime reference."
+      "bounded_single_turn": "1/4 use half-turn homing plus manually recorded range limits.",
+      "absolute_raw": "2/3/5 use mode 0 with min/max limit 0 and phase 28; startup pose is the runtime reference."
     }
   },
   "gripper": {

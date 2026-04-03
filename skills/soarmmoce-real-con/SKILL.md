@@ -1,6 +1,6 @@
 ---
 name: soarmmoce-real-con
-description: 使用本技能通过本地 Python 脚本或本地 SDK 控制真实 soarmMoce 机械臂；适用于自然语言动作控制、连续小步笛卡尔移动、回零与状态查询。2/3 号关节按减速比 5.3/5.6 适配并运行在 mode 0 绝对位置配置，1/4/5 为单圈标定关节，可选夹爪单独处理。
+description: 使用本技能通过本地 Python 脚本或本地 SDK 控制真实 soarmMoce 机械臂；适用于自然语言动作控制、连续小步笛卡尔移动、回零与状态查询。2/3/5 号关节按减速比适配并运行在 mode 0 绝对位置配置，1/4 为单圈标定关节，可选夹爪单独处理。
 metadata:
   openclaw:
     emoji: "🤖"
@@ -20,9 +20,9 @@ metadata:
 - 当前 TCP 笛卡尔控制按 `5DOF position-only IK` 工作，只解末端位置 `x/y/z`，不再强行约束完整 6D 姿态。
 - 对 `delta/xyz` 这类笛卡尔移动，默认锁住 `wrist_flex + wrist_roll`，避免 4/5 号在只解 `xyz` 时自己乱补姿态。
 - 轨迹下发默认按时间频率连续插值，并使用平滑缓入缓出，避免单步跳变太大导致动作发卡。
-- 2 号关节 `shoulder_lift` 与 3 号关节 `elbow_flex` 已分别按减速比 `5.3 / 5.6` 做换算，底层统一运行在 `mode 0`；其中 2/3 通过 `Min/Max_Position_Limit=0` 加 `18(Phase)=28` 读取绝对位置值。
-- 1/4/5 使用单圈标定，采用半圈归中后手动扫范围的方式记录 `homing_offset + range_min/max`。
-- 夹爪如果存在，可以单独标定；不要把夹爪标定和 2/3 的绝对位置逻辑混在一起。
+- 2 号关节 `shoulder_lift`、3 号关节 `elbow_flex`、5 号关节 `wrist_roll` 底层统一运行在 `mode 0`；其中 2/3/5 通过 `Min/Max_Position_Limit=0` 加 `18(Phase)=28` 读取绝对位置值。
+- 1/4 使用单圈标定，采用半圈归中后手动扫范围的方式记录 `homing_offset + range_min/max`。
+- 夹爪如果存在，可以单独标定；不要把夹爪标定和 2/3/5 的绝对位置逻辑混在一起。
 
 ## 何时使用
 
@@ -55,9 +55,8 @@ python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_diag_ik.py --dx 
 ### 1.2) 标定
 
 运行前先确认：
-- `2/3` 不参与传统单圈标定，只会被写成固定的绝对位置配置
-- 需要真正手动标定的是 `1/4/5`
-- `wrist_roll(5)` 只在安全范围内转动，避免扭线
+- `2/3/5` 不参与传统单圈标定，只会被写成固定的绝对位置配置
+- 需要真正手动标定的是 `1/4`
 
 ```bash
 python3 ~/.openclaw/skills/soarmmoce-real-con/scripts/soarmmoce_calibrate.py

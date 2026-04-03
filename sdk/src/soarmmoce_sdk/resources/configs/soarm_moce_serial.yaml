@@ -1,6 +1,6 @@
 transport:
   type: serial
-  port: /dev/tty.usbmodem5B140305511
+  port: /dev/tty.usbmodem5B140315041
   baudrate: 115200
   timeout: 2.0
   robot_id: soarmmoce

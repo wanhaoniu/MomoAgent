@@ -219,6 +219,33 @@ class MultiTurnAbsoluteModeTests(unittest.TestCase):
         self.assertAlmostEqual(joint_deg, 45.0)
         self.assertEqual(controller._joint_runtime_state["shoulder_lift"].startup_raw, 1000)
 
+    def test_wrist_roll_uses_multi_turn_absolute_raw_semantics(self) -> None:
+        controller = _make_controller()
+        controller._prime_startup_references_from_current_pose(
+            _FakePrimeBus(
+                {
+                    "shoulder_pan": 0,
+                    "shoulder_lift": 0,
+                    "elbow_flex": 0,
+                    "wrist_flex": 0,
+                    "wrist_roll": 1000,
+                }
+            )
+        )
+
+        state = controller._build_state(
+            {
+                "shoulder_pan": 0,
+                "shoulder_lift": 0,
+                "elbow_flex": 0,
+                "wrist_flex": 0,
+                "wrist_roll": 5000,
+            }
+        )
+
+        self.assertEqual(state["relative_raw_position"]["wrist_roll"], 4000)
+        self.assertAlmostEqual(state["joint_state"]["wrist_roll"], 4000.0 * 360.0 / 4096.0)
+
     def test_multi_turn_goal_encoding_uses_startup_reference(self) -> None:
         controller = _make_controller()
         controller._prime_startup_references_from_current_pose(

@@ -353,8 +353,8 @@ def _build_meta(*, generated_at: float, home_joints: Mapping[str, Any]) -> dict[
         "absolute_raw_joints": list(MULTI_TURN_JOINTS),
         "home_joint_deg": {joint_name: float(home_joints.get(joint_name, 0.0)) for joint_name in JOINTS},
         "notes": {
-            "bounded_single_turn": "1/4/5 use half-turn homing plus manually recorded range limits.",
-            "absolute_raw": "2/3 use mode 0 with min/max limit 0 and phase 28; startup pose is the runtime reference.",
+            "bounded_single_turn": "1/4 use half-turn homing plus manually recorded range limits.",
+            "absolute_raw": "2/3/5 use mode 0 with min/max limit 0 and phase 28; startup pose is the runtime reference.",
         },
     }
 
@@ -388,7 +388,7 @@ def _calibrate(cfg: CalibrateConfig) -> Dict[str, Any]:
         if bool(robot_cfg.prompt_existing) and _has_complete_single_turn_entries(seed_payload):
             user_input = input(
                 f"Press ENTER to keep the existing bounded single-turn calibration for robot id {target_robot_id}, "
-                "or type 'c' and press ENTER to recalibrate 1/4/5: "
+                "or type 'c' and press ENTER to recalibrate 1/4: "
             )
             reuse_existing = user_input.strip().lower() != "c"
 
@@ -404,16 +404,16 @@ def _calibrate(cfg: CalibrateConfig) -> Dict[str, Any]:
                 }
         else:
             print(
-                "Torque is disabled. Move only shoulder_pan / wrist_flex / wrist_roll to the middle of their safe range,\n"
-                "then press ENTER. Do not try to calibrate shoulder_lift or elbow_flex here; 2/3 will stay in fixed absolute-raw mode."
+                "Torque is disabled. Move only shoulder_pan / wrist_flex to the middle of their safe range,\n"
+                "then press ENTER. Do not try to calibrate shoulder_lift / elbow_flex / wrist_roll here; 2/3/5 will stay in fixed absolute-raw mode."
             )
             input()
 
             homing_offsets = bus.set_half_turn_homings(list(BOUNDED_SINGLE_TURN_JOINTS))
 
             print(
-                "Now move shoulder_pan / wrist_flex / wrist_roll sequentially through their safe travel with torque disabled.\n"
-                "For wrist_roll, stay within the cable-safe range and do not over-rotate. Press ENTER again when the full range has been covered."
+                "Now move shoulder_pan / wrist_flex sequentially through their safe travel with torque disabled.\n"
+                "Press ENTER again when the full range has been covered."
             )
             range_mins, range_maxes = bus.record_ranges_of_motion(
                 list(BOUNDED_SINGLE_TURN_JOINTS),

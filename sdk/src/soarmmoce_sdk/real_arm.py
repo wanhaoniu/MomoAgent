@@ -58,7 +58,7 @@ GRIPPER_JOINT_NAME = "gripper"
 DEFAULT_GRIPPER_SETTLE_TOLERANCE_RAW = 12
 DEFAULT_GRIPPER_POLL_INTERVAL_S = 0.02
 JOINTS = tuple(DEFAULT_HOME_JOINTS.keys())
-MULTI_TURN_JOINTS = ("shoulder_lift", "elbow_flex")
+MULTI_TURN_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_roll")
 BOUNDED_SINGLE_TURN_JOINTS = tuple(joint_name for joint_name in JOINTS if joint_name not in MULTI_TURN_JOINTS)
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
