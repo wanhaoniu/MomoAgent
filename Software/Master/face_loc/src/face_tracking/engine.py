@@ -17,6 +17,7 @@ from face_tracking.result_store import ResultStore
 from face_tracking.schemas import FramePacket, compute_offset_payload, zero_offset_payload
 from face_tracking.selection import TargetSelector
 from face_tracking.smoothing import FaceTrackerSmoother
+from face_tracking.target_center import build_target_center_payload
 from face_tracking.video_source import VideoSource
 from face_tracking.visualizer import FrameVisualizer
 
@@ -197,8 +198,10 @@ class TrackingEngine:
         raw_payload = target.to_payload(frame_size)
         raw_area_ratio = float(raw_payload["area_ratio"])
         smoothed_state = self.smoother.update(tuple(raw_payload["center"]), raw_area_ratio)
-        raw_offset = compute_offset_payload(tuple(raw_payload["center"]), frame_size)
-        smoothed_offset = compute_offset_payload(smoothed_state.center, frame_size)
+        target_center_payload = build_target_center_payload(frame_size)
+        target_center = (float(target_center_payload["x"]), float(target_center_payload["y"]))
+        raw_offset = compute_offset_payload(tuple(raw_payload["center"]), frame_size, target_center=target_center)
+        smoothed_offset = compute_offset_payload(smoothed_state.center, frame_size, target_center=target_center)
         hint_payload = self.controller.compute(
             raw_offset=raw_offset,
             smoothed_offset=smoothed_offset,
@@ -214,6 +217,7 @@ class TrackingEngine:
             "detected": True,
             "faces_detected": len(detections),
             "target_selection_strategy": self.selector.strategy_name,
+            "target_center": target_center_payload,
             "target_face": raw_payload,
             "smoothed_target_face": {
                 "center": [round(smoothed_state.center[0], 3), round(smoothed_state.center[1], 3)],
@@ -258,6 +262,7 @@ class TrackingEngine:
             "detected": False,
             "faces_detected": faces_detected,
             "target_selection_strategy": self.selector.strategy_name,
+            "target_center": build_target_center_payload(frame_size),
             "target_face": None,
             "smoothed_target_face": None,
             "offset": zero_offset_payload(),

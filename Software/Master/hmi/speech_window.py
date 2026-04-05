@@ -59,8 +59,8 @@ GROQ_STT_MODEL_DEFAULT = "whisper-large-v3"
 
 MIMO_API_KEY_FALLBACK = os.getenv("MIMO_API_KEY")
 MIMO_TTS_URL_DEFAULT = "https://api.xiaomimimo.com/v1/chat/completions"
-MIMO_TTS_MODEL_DEFAULT = "mimo-v2-audio-tts"
-MIMO_TTS_VOICE_DEFAULT = "default_zh"
+MIMO_TTS_MODEL_DEFAULT = "mimo-v2-tts"
+MIMO_TTS_VOICE_DEFAULT = "mimo_default"
 MIMO_TTS_RESPONSE_FORMAT_DEFAULT = "wav"
 MIMO_TTS_TIMEOUT_SEC_DEFAULT = 45.0
 MIMO_TTS_MAX_CHARS_DEFAULT = 180
@@ -1072,11 +1072,11 @@ def mimo_text_to_speech(
         "model": str(model or "").strip() or MIMO_TTS_MODEL_DEFAULT,
         # MIMO 的 TTS 模型会朗读 assistant 消息内容，而不是 input 字段。
         "messages": [{"role": "assistant", "content": content}],
-        "response_format": str(response_format or "").strip() or MIMO_TTS_RESPONSE_FORMAT_DEFAULT,
+        "audio": {
+            "format": str(response_format or "").strip() or MIMO_TTS_RESPONSE_FORMAT_DEFAULT,
+            "voice": str(voice or "").strip() or MIMO_TTS_VOICE_DEFAULT,
+        },
     }
-    voice_value = str(voice or "").strip() or MIMO_TTS_VOICE_DEFAULT
-    if voice_value:
-        payload["voice"] = voice_value
 
     response = requests.post(
         url,
@@ -1094,7 +1094,7 @@ def mimo_text_to_speech(
         raise RuntimeError(f"MIMO TTS returned non-JSON response: {exc}") from exc
     return _extract_mimo_audio_bytes(
         response_payload,
-        response_format=payload["response_format"],
+        response_format=str(payload["audio"].get("format", "")),
     )
 
 

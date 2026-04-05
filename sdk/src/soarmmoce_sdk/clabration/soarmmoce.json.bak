@@ -2,9 +2,9 @@
   "shoulder_pan": {
     "id": 1,
     "drive_mode": 0,
-    "homing_offset": -1994,
-    "range_min": 1172,
-    "range_max": 3456,
+    "homing_offset": -1939,
+    "range_min": 982,
+    "range_max": 3321,
     "operating_mode": 0
   },
   "shoulder_lift": {
@@ -15,8 +15,8 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 3541,
-    "home_present_wrapped_raw": 3541
+    "home_present_raw": 1228,
+    "home_present_wrapped_raw": 1228
   },
   "elbow_flex": {
     "id": 3,
@@ -26,15 +26,15 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 358,
-    "home_present_wrapped_raw": 358
+    "home_present_raw": 3215,
+    "home_present_wrapped_raw": 3215
   },
   "wrist_flex": {
     "id": 4,
     "drive_mode": 0,
-    "homing_offset": -1489,
-    "range_min": 982,
-    "range_max": 2956,
+    "homing_offset": 2010,
+    "range_min": 1532,
+    "range_max": 3709,
     "operating_mode": 0
   },
   "wrist_roll": {
@@ -45,11 +45,11 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 738,
-    "home_present_wrapped_raw": 738
+    "home_present_raw": 2598,
+    "home_present_wrapped_raw": 2598
   },
   "_meta": {
-    "generated_at_unix_s": 1775379026.48611,
+    "generated_at_unix_s": 1775211195.5312781,
     "script": "soarmmoce_calibrate.py",
     "bounded_single_turn_joints": [
       "shoulder_pan",
@@ -60,10 +60,16 @@
       "elbow_flex",
       "wrist_roll"
     ],
+    "home_joint_deg": {
+      "shoulder_pan": 0.0,
+      "shoulder_lift": 0.0,
+      "elbow_flex": 0.0,
+      "wrist_flex": 0.0,
+      "wrist_roll": 0.0
+    },
     "notes": {
       "bounded_single_turn": "1/4 use half-turn homing plus manually recorded range limits.",
-      "absolute_raw": "2/3/5 use mode 0 with min/max limit 0 and phase 28; startup pose is the runtime reference.",
-      "home": "home() returns every joint to zero relative angle, which is the startup pose reference."
+      "absolute_raw": "2/3/5 use mode 0 with min/max limit 0 and phase 28; startup pose is the runtime reference."
     }
   },
   "gripper": {

@@ -4,6 +4,7 @@ import math
 
 from face_tracking.config import SelectionConfig
 from face_tracking.schemas import FaceDetection
+from face_tracking.target_center import resolve_target_center
 
 
 class TargetSelector:
@@ -23,7 +24,7 @@ class TargetSelector:
 
         if self.config.strategy == "closest_to_center":
             frame_height, frame_width = frame_shape[:2]
-            frame_center = (frame_width / 2.0, frame_height / 2.0)
+            frame_center = resolve_target_center((frame_width, frame_height))
             return min(
                 detections,
                 key=lambda item: math.hypot(item.center[0] - frame_center[0], item.center[1] - frame_center[1]),

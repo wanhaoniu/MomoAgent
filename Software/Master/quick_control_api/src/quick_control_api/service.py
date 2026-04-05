@@ -107,7 +107,10 @@ class QuickControlService:
 
             try:
                 robot = self._build_robot(config_path)
-                robot.connect()
+                try:
+                    robot.connect(passive=True)
+                except TypeError:
+                    robot.connect()
             except Exception as exc:  # noqa: BLE001
                 self._set_runtime(mode="disconnected", config_path=config_path, last_connect_error=str(exc))
                 raise QuickControlError("CONNECT_FAILED", str(exc), 500) from exc

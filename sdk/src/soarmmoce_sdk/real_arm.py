@@ -11,6 +11,11 @@ from typing import Any
 
 import yaml
 
+try:
+    import fcntl
+except Exception:  # pragma: no cover - Windows fallback
+    fcntl = None
+
 from .json_utils import to_jsonable
 from .kinematics_pybullet import PYBULLET_AVAILABLE, PYBULLET_IMPORT_ERROR, PybulletKinematicsModel
 
@@ -79,11 +84,29 @@ BOUNDED_SINGLE_TURN_JOINTS = tuple(joint_name for joint_name in JOINTS if joint_
 PACKAGE_ROOT = Path(__file__).resolve().parent
 SDK_ROOT = PACKAGE_ROOT.parent.parent
 REPO_ROOT = SDK_ROOT.parent
-SKILL_ROOT = REPO_ROOT / "skills" / "soarmmoce-real-con"
 DEFAULT_CONFIG_PATH = PACKAGE_ROOT / "resources" / "configs" / "soarm_moce_serial.yaml"
 DEFAULT_URDF_PATH = PACKAGE_ROOT / "resources" / "urdf" / "soarmoce_urdf.urdf"
-DEFAULT_CALIB_DIR = SKILL_ROOT / "calibration"
-DEFAULT_RUNTIME_DIR = SKILL_ROOT / "workspace" / "runtime"
+SKILL_ROOT = REPO_ROOT / "skills" / "soarmmoce-real-con"
+PACKAGE_CALIB_DIR = PACKAGE_ROOT / "clabration"
+PACKAGE_RUNTIME_DIR = PACKAGE_ROOT / "runtime"
+LEGACY_CALIB_DIR = SKILL_ROOT / "calibration"
+LEGACY_RUNTIME_DIR = SKILL_ROOT / "workspace" / "runtime"
+
+
+def _resolve_default_calib_dir() -> Path:
+    if PACKAGE_CALIB_DIR.exists():
+        return PACKAGE_CALIB_DIR.resolve()
+    return LEGACY_CALIB_DIR.resolve()
+
+
+def _resolve_default_runtime_dir() -> Path:
+    if LEGACY_RUNTIME_DIR.exists():
+        return LEGACY_RUNTIME_DIR.resolve()
+    return PACKAGE_RUNTIME_DIR.resolve()
+
+
+DEFAULT_CALIB_DIR = _resolve_default_calib_dir()
+DEFAULT_RUNTIME_DIR = _resolve_default_runtime_dir()
 
 
 class ValidationError(ValueError):
@@ -405,6 +428,8 @@ class SoArmMoceController:
         self._kinematics_init_attempted = False
         self._kinematics_error_text = ""
         self._bus: Any | None = None
+        self._session_lock_handle: Any | None = None
+        self._session_lock_path: Path | None = None
         self.robot_model = _as_attrdict(
             {
                 "joint_names": list(JOINTS),
@@ -435,6 +460,7 @@ class SoArmMoceController:
                         pass
             self._bus = None
             self._gripper_integrated = False
+        self._release_session_lock()
 
         if self._kinematics is not None:
             try:
@@ -588,38 +614,139 @@ class SoArmMoceController:
     def _ensure_bus(self):
         if self._bus is not None:
             return self._bus
+        self._acquire_session_lock()
 
         try:
             from lerobot.motors import Motor, MotorNormMode
             from lerobot.motors.feetech import FeetechMotorsBus
         except ImportError as exc:
+            self._release_session_lock()
             raise HardwareError(
                 "Real arm transport requires the optional 'lerobot' dependency, which is not installed in this Python environment."
             ) from exc
 
-        motors = {
-            joint_name: Motor(spec.motor_id, self.config.motor_model, MotorNormMode.DEGREES)
-            for joint_name, spec in self._joint_specs.items()
-        }
-        self._gripper_integrated = False
-        if self._probe_gripper_presence():
-            motors[self._gripper_spec.name] = Motor(
-                self._gripper_spec.motor_id,
-                self.config.motor_model,
-                MotorNormMode.DEGREES,
-            )
-            self._gripper_integrated = True
-        bus = FeetechMotorsBus(port=self.config.port, motors=motors)
-        connect = getattr(bus, "connect", None)
-        if callable(connect):
-            connect()
+        try:
+            motors = {
+                joint_name: Motor(spec.motor_id, self.config.motor_model, MotorNormMode.DEGREES)
+                for joint_name, spec in self._joint_specs.items()
+            }
+            self._gripper_integrated = False
+            if self._probe_gripper_presence():
+                motors[self._gripper_spec.name] = Motor(
+                    self._gripper_spec.motor_id,
+                    self.config.motor_model,
+                    MotorNormMode.DEGREES,
+                )
+                self._gripper_integrated = True
+            bus = FeetechMotorsBus(port=self.config.port, motors=motors)
+            connect = getattr(bus, "connect", None)
+            if callable(connect):
+                connect()
 
-        self._bus = bus
-        self._apply_position_mode_registers(bus)
-        self._apply_gripper_registers(bus)
-        self._prime_startup_references_from_current_pose(bus)
-        self.apply_hold_state(self.capture_hold_state(bus), bus=bus)
-        return bus
+            self._bus = bus
+            self._apply_position_mode_registers(bus)
+            self._apply_gripper_registers(bus)
+            self._prime_startup_references_from_current_pose(bus)
+            self.apply_hold_state(self.capture_hold_state(bus), bus=bus)
+            return bus
+        except Exception:
+            self._bus = None
+            self._gripper_integrated = False
+            self._release_session_lock()
+            raise
+
+    def _session_lock_key(self) -> str:
+        raw = str(self.config.port or self.config.robot_id or "soarmmoce").strip().lower()
+        safe = "".join(ch if ch.isalnum() else "_" for ch in raw)
+        safe = safe.strip("_")
+        return safe or "soarmmoce"
+
+    def _session_lock_file(self) -> Path:
+        return (self.config.runtime_dir / f"real_arm_session_{self._session_lock_key()}.lock").resolve()
+
+    def _session_lock_payload(self) -> dict[str, Any]:
+        return {
+            "pid": int(os.getpid()),
+            "port": str(self.config.port or ""),
+            "robot_id": str(self.config.robot_id or ""),
+            "timestamp": float(time.time()),
+            "cwd": str(Path.cwd()),
+            "cmdline": " ".join(str(arg) for arg in os.sys.argv),
+        }
+
+    def _read_session_lock_payload(self, path: Path) -> dict[str, Any]:
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except Exception:
+            return {}
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _acquire_session_lock(self) -> None:
+        if self._session_lock_handle is not None:
+            return
+        if fcntl is None:
+            return
+
+        self.config.runtime_dir.mkdir(parents=True, exist_ok=True)
+        path = self._session_lock_file()
+        handle = path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            owner = self._read_session_lock_payload(path)
+            handle.close()
+            owner_bits = []
+            if owner.get("pid") is not None:
+                owner_bits.append(f"pid={owner['pid']}")
+            if owner.get("cmdline"):
+                owner_bits.append(f"cmdline={owner['cmdline']}")
+            owner_text = ", ".join(owner_bits) if owner_bits else f"lock_file={path}"
+            raise HardwareError(
+                "The real arm is already controlled by another local process. "
+                f"Close the other controller first ({owner_text})."
+            ) from exc
+
+        payload = self._session_lock_payload()
+        handle.seek(0)
+        handle.truncate()
+        handle.write(json.dumps(payload, ensure_ascii=True))
+        handle.flush()
+        self._session_lock_handle = handle
+        self._session_lock_path = path
+
+    def _release_session_lock(self) -> None:
+        handle = self._session_lock_handle
+        path = self._session_lock_path
+        self._session_lock_handle = None
+        self._session_lock_path = None
+        if handle is None:
+            return
+        try:
+            if fcntl is not None:
+                try:
+                    handle.seek(0)
+                    handle.truncate()
+                    handle.flush()
+                except Exception:
+                    pass
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            try:
+                handle.close()
+            except Exception:
+                pass
+        if path is not None:
+            try:
+                if path.exists() and path.stat().st_size == 0:
+                    path.unlink()
+            except Exception:
+                pass
 
     def _apply_position_mode_registers(self, bus) -> None:
         for joint_name, spec in self._joint_specs.items():
