@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - lightweight import fallback for tests
 
     draccus = _DraccusCompat()
 
-from soarmmoce_cli_common import run_and_print
+from soarmmoce_sdk.cli_common import run_and_print
 from soarmmoce_sdk import (
     BOUNDED_SINGLE_TURN_JOINTS,
     JOINTS,

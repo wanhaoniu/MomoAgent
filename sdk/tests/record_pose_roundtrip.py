@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-from soarmmoce_cli_common import cli_bool, print_error, print_success
+from soarmmoce_sdk.cli_common import cli_bool, print_error, print_success
 from soarmmoce_sdk import JOINTS, MULTI_TURN_JOINTS, SoArmMoceController, ValidationError, to_jsonable
 
 

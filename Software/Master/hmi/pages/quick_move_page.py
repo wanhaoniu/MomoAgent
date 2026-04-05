@@ -94,7 +94,7 @@ class QuickMovePage(QWidget):
         self.step_mode_combo.setCurrentIndex(0)
         self.step_dist_spin = QDoubleSpinBox()
         self.step_dist_spin.setRange(0.1, 200.0)
-        self.step_dist_spin.setValue(5.0)
+        self.step_dist_spin.setValue(20.0)
         self.step_dist_spin.setSuffix(" mm")
         self.step_angle_spin = QDoubleSpinBox()
         self.step_angle_spin.setRange(0.1, 180.0)

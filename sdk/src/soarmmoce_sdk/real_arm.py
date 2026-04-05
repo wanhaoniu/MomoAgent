@@ -1388,26 +1388,29 @@ class SoArmMoceController:
         wait: bool = True,
         timeout: float | None = None,
         trace: bool = False,
+        constrain_orientation: bool | None = None,
     ) -> dict[str, Any]:
-        if (
-            abs(float(dx)) <= 1e-12
-            and abs(float(dy)) <= 1e-12
-            and abs(float(dz)) <= 1e-12
-            and abs(float(drx)) <= 1e-12
-            and abs(float(dry)) <= 1e-12
-            and abs(float(drz)) <= 1e-12
-        ):
+        dx_value = float(dx)
+        dy_value = float(dy)
+        dz_value = float(dz)
+        drx_value = float(drx)
+        dry_value = float(dry)
+        drz_value = float(drz)
+        has_translation_delta = any(abs(value) > 1e-12 for value in (dx_value, dy_value, dz_value))
+        has_rotation_delta = any(abs(value) > 1e-12 for value in (drx_value, dry_value, drz_value))
+        if not has_translation_delta and not has_rotation_delta:
             return {
                 "action": "move_delta",
                 "frame": str(frame),
                 "delta": {
-                    "dx": float(dx),
-                    "dy": float(dy),
-                    "dz": float(dz),
-                    "drx": float(drx),
-                    "dry": float(dry),
-                    "drz": float(drz),
+                    "dx": dx_value,
+                    "dy": dy_value,
+                    "dz": dz_value,
+                    "drx": drx_value,
+                    "dry": dry_value,
+                    "drz": drz_value,
                 },
+                "orientation_constraint": "position_only",
                 "state": self.get_state(),
             }
         kinematics = self._ensure_kinematics(required=True)
@@ -1416,13 +1419,17 @@ class SoArmMoceController:
         target_xyz, target_rpy = kinematics.compose_delta_target(
             current_xyz=current_pose["xyz"],
             current_rpy=current_pose["rpy"],
-            delta_xyz=[float(dx), float(dy), float(dz)],
-            delta_rpy=[float(drx), float(dry), float(drz)],
+            delta_xyz=[dx_value, dy_value, dz_value],
+            delta_rpy=[drx_value, dry_value, drz_value],
             frame=str(frame),
         )
+        if constrain_orientation is None:
+            should_constrain_orientation = has_rotation_delta
+        else:
+            should_constrain_orientation = bool(constrain_orientation)
         result = self.move_pose(
             xyz=target_xyz.tolist(),
-            rpy=target_rpy.tolist(),
+            rpy=target_rpy.tolist() if should_constrain_orientation else None,
             duration=float(duration),
             wait=bool(wait),
             timeout=timeout,
@@ -1431,15 +1438,19 @@ class SoArmMoceController:
         result["action"] = "move_delta"
         result["frame"] = "tool" if str(frame or "").strip().lower() == "tool" else "base"
         result["delta"] = {
-            "dx": float(dx),
-            "dy": float(dy),
-            "dz": float(dz),
-            "drx": float(drx),
-            "dry": float(dry),
-            "drz": float(drz),
+            "dx": dx_value,
+            "dy": dy_value,
+            "dz": dz_value,
+            "drx": drx_value,
+            "dry": dry_value,
+            "drz": drz_value,
         }
+        result["orientation_constraint"] = "constrained" if should_constrain_orientation else "position_only"
         result["target_xyz_m"] = [float(value) for value in target_xyz.tolist()]
-        result["target_rpy_rad"] = [float(value) for value in target_rpy.tolist()]
+        result["target_rpy_rad"] = (
+            [float(value) for value in target_rpy.tolist()] if should_constrain_orientation else None
+        )
+        result["composed_target_rpy_rad"] = [float(value) for value in target_rpy.tolist()]
         return result
 
     def write_gripper_raw(self, goal_raw: int | None, *, bus=None) -> bool:
