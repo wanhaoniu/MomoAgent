@@ -39,5 +39,5 @@ class CartesianJogRequest(BaseModel):
 
 
 class HomeRequest(BaseModel):
-    source: Literal["home", "origin"] = "home"
+    source: Literal["home", "origin", "zero", "startup"] = "home"
     speed_percent: int = Field(50, ge=1, le=100)

@@ -18,8 +18,8 @@ if SDK_SRC.exists():
 from soarmmoce_sdk import SoArmMoceController
 
 
-JOINT_NAME = "elbow_flex"
-MOTOR_ID = 3
+JOINT_NAME = "wrist_roll"
+MOTOR_ID = 5
 GOAL_POSITION_ADDRESS = 42
 PRESENT_POSITION_ADDRESS = 56
 SIGN_BIT_INDEX = 15
@@ -131,7 +131,7 @@ def main() -> None:
     try:
         bus = arm._ensure_bus()
         print(
-            f"Interactive motor-3 tester ready: joint={JOINT_NAME} motor_id={MOTOR_ID}.",
+            f"Interactive {JOINT_NAME} tester ready: joint={JOINT_NAME} motor_id={MOTOR_ID}.",
             flush=True,
         )
         print(

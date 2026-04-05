@@ -23,5 +23,8 @@ python /Users/moce/Documents/Project/MomoAgent/Software/Master/quick_control_api
 
 ## Notes
 
-- Default behavior prefers the real serial config and can fall back to mock simulation.
+- Default behavior now targets the rebuilt local serial SDK runtime directly.
+- Mock simulation fallback has been removed from this API because the current SDK no longer exposes the old mock transport path.
+- Cartesian jog is routed to the rebuilt SDK `move_delta()` path and uses the same base/tool frame semantics as the current shell tools.
+- `POST /api/v1/motion/home` accepts `source=home|origin|zero|startup`. All of them map to the rebuilt runtime "startup pose is the reference home" behavior; the field is mainly kept for UI/API compatibility.
 - This skeleton only targets the Quick Move page; Job/recording APIs are intentionally excluded.

@@ -1,7 +1,6 @@
 transport:
   type: serial
-  port: /dev/tty.usbmodem5B140315041
-  baudrate: 115200
+  port: /dev/tty.usbmodem5B140314861
   timeout: 2.0
   robot_id: soarmmoce
   calibration_path: ""
@@ -20,7 +19,6 @@ calibration:
   path: ""
 
 robot:
-  base_link: base
   end_link: wrist_roll
   joint_name_aliases:
     shoulder_pan: shoulder
@@ -29,27 +27,27 @@ robot:
     wrist_flex: wrist
     wrist_roll: wrist_roll
   joint_scales:
-    shoulder_pan: -1.0
+    shoulder_pan: 1.0
     shoulder_lift: -5.3
-    elbow_flex: -5.6
-    wrist_flex: 1.0
+    elbow_flex: 5.6
+    wrist_flex: -1.0
     wrist_roll: 1.0
   sim_joint_offsets_deg:
     shoulder_lift: 0.0
     wrist_flex: 0.0
-  multi_turn_joints: [shoulder_lift, elbow_flex]
-  cartesian_locked_joints: [wrist_flex, wrist_roll]
-  gui_rotvec_to_joint:
-    wrist_roll: [0.0, 0.0, 1.0]
 
 control:
   hz: 25.0
   timeout: 2.0
+  linear_step_m: 0.01
+  joint_step_deg: 5.0
+  cartesian_settle_time_s: 0.15
 
 ik:
   max_iters: 200
   damping: 0.05
   step_scale: 0.8
+  joint_step_deg: 8.0
   pos_tol: 0.001
   rot_tol: 0.02
   orientation_weight: 0.35
@@ -59,12 +57,6 @@ ik:
   max_step_rad: 0.15
   seed_bias: 0.02
   max_pos_error_m: 0.03
-
-permissions:
-  allow_motion: true
-  allow_gripper: true
-  allow_home: true
-  allow_stop: true
 
 protocol:
   unit: deg

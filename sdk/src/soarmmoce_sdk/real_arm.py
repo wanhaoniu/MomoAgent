@@ -12,6 +12,7 @@ from typing import Any
 import yaml
 
 from .json_utils import to_jsonable
+from .kinematics_pybullet import PYBULLET_AVAILABLE, PYBULLET_IMPORT_ERROR, PybulletKinematicsModel
 
 
 RAW_COUNTS_PER_REV = 4096
@@ -24,28 +25,33 @@ MULTI_TURN_PHASE_VALUE = 28
 MULTI_TURN_DISABLED_LIMIT_RAW = 0
 MULTI_TURN_ABSOLUTE_RAW_LIMIT = 30719
 DEFAULT_SERIAL_TIMEOUT_S = 2.0
-DEFAULT_SERIAL_BAUDRATE = 115200
 DEFAULT_MOTOR_MODEL = "sts3215"
-DEFAULT_HOME_JOINTS = {
-    "shoulder_pan": 0.0,
-    "shoulder_lift": 0.0,
-    "elbow_flex": 0.0,
-    "wrist_flex": 0.0,
-    "wrist_roll": 0.0,
-}
+DEFAULT_LINEAR_STEP_M = 0.01
+DEFAULT_JOINT_STEP_DEG = 5.0
+DEFAULT_CARTESIAN_SETTLE_TIME_S = 0.15
+DEFAULT_IK_JOINT_STEP_DEG = 8.0
 DEFAULT_JOINT_SCALES = {
-    "shoulder_pan": -1.0,
+    "shoulder_pan": 1.0,
     "shoulder_lift": -5.3,
-    "elbow_flex": -5.6,
-    "wrist_flex": 1.0,
+    "elbow_flex": 5.6,
+    "wrist_flex": -1.0,
     "wrist_roll": 1.0,
 }
+# Model offsets are only for URDF/display-side zero alignment.
+# They are not servo homing offsets and are not written to hardware registers.
 DEFAULT_MODEL_OFFSETS_DEG = {
     "shoulder_pan": 0.0,
     "shoulder_lift": 0.0,
     "elbow_flex": 0.0,
     "wrist_flex": 0.0,
     "wrist_roll": 0.0,
+}
+DEFAULT_JOINT_NAME_ALIASES = {
+    "shoulder_pan": "shoulder",
+    "shoulder_lift": "shoulder_lift",
+    "elbow_flex": "elbow",
+    "wrist_flex": "wrist",
+    "wrist_roll": "wrist_roll",
 }
 DEFAULT_MOTOR_IDS = {
     "shoulder_pan": 1,
@@ -54,10 +60,19 @@ DEFAULT_MOTOR_IDS = {
     "wrist_flex": 4,
     "wrist_roll": 5,
 }
+DEFAULT_JOINT_SETTLE_TOLERANCE_RAW = 16
+DEFAULT_JOINT_POLL_INTERVAL_S = 0.02
+DEFAULT_JOINT_WAIT_TIMEOUT_S = 2.5
 GRIPPER_JOINT_NAME = "gripper"
 DEFAULT_GRIPPER_SETTLE_TOLERANCE_RAW = 12
 DEFAULT_GRIPPER_POLL_INTERVAL_S = 0.02
-JOINTS = tuple(DEFAULT_HOME_JOINTS.keys())
+JOINTS = (
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+)
 MULTI_TURN_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_roll")
 BOUNDED_SINGLE_TURN_JOINTS = tuple(joint_name for joint_name in JOINTS if joint_name not in MULTI_TURN_JOINTS)
 
@@ -80,6 +95,10 @@ class HardwareError(RuntimeError):
 
 
 class CapabilityError(RuntimeError):
+    pass
+
+
+class IKError(RuntimeError):
     pass
 
 
@@ -143,6 +162,15 @@ def _signed_single_turn_delta(current_raw: int | float, startup_raw: int | float
     return int(delta)
 
 
+def _coerce_vector3(values: Iterable[Any] | None, *, name: str) -> list[float]:
+    if values is None:
+        raise ValidationError(f"{name} is required")
+    payload = list(values)
+    if len(payload) != 3:
+        raise ValidationError(f"{name} must contain exactly 3 values, got {len(payload)}")
+    return [float(payload[0]), float(payload[1]), float(payload[2])]
+
+
 @dataclass(slots=True)
 class SoArmMoceConfig:
     port: str = ""
@@ -151,26 +179,26 @@ class SoArmMoceConfig:
     urdf_path: Path = field(default_factory=lambda: DEFAULT_URDF_PATH)
     runtime_dir: Path = field(default_factory=lambda: DEFAULT_RUNTIME_DIR)
     target_frame: str = "wrist_roll"
-    home_joints: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_HOME_JOINTS))
     joint_scales: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_JOINT_SCALES))
     model_offsets_deg: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_MODEL_OFFSETS_DEG))
+    joint_name_aliases: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_JOINT_NAME_ALIASES))
     arm_p_coefficient: int = 16
     arm_d_coefficient: int = 8
     max_ee_pos_err_m: float = 0.03
-    linear_step_m: float = 0.01
-    joint_step_deg: float = 5.0
-    cartesian_settle_time_s: float = 0.15
-    cartesian_update_hz: float = 25.0
-    joint_update_hz: float = 25.0
-    ik_target_tol_m: float = 0.001
+    linear_step_m: float = DEFAULT_LINEAR_STEP_M
+    joint_step_deg: float = DEFAULT_JOINT_STEP_DEG
+    cartesian_settle_time_s: float = DEFAULT_CARTESIAN_SETTLE_TIME_S
+    cartesian_update_hz: float = 25.0 #笛卡尔控制更新频率
+    joint_update_hz: float = 25.0 #插值发送频率
+    ik_target_tol_m: float = 0.02
     ik_max_iters: int = 200
-    ik_damping: float = 0.05
-    ik_step_scale: float = 0.8
-    ik_joint_step_deg: float = 8.0
+    ik_damping: float = 0.05 #阻尼系数，增加数值会使IK解更平滑但可能无法完全收敛到目标
+    ik_step_scale: float = 0.8 #IK每次迭代的步长缩放，过大可能导致震荡，过小则收敛过慢
+    ik_joint_step_deg: float = DEFAULT_IK_JOINT_STEP_DEG
+    ik_orientation_tol_rad: float = 0.02
     ik_seed_bias: float = 0.02
     gripper_available: bool = True
     serial_timeout_s: float = DEFAULT_SERIAL_TIMEOUT_S
-    serial_baudrate: int = DEFAULT_SERIAL_BAUDRATE
     motor_model: str = DEFAULT_MOTOR_MODEL
 
     def __post_init__(self) -> None:
@@ -180,10 +208,13 @@ class SoArmMoceConfig:
         self.port = str(self.port or "").strip()
         self.robot_id = str(self.robot_id or "soarmmoce").strip() or "soarmmoce"
         self.target_frame = str(self.target_frame or "wrist_roll").strip() or "wrist_roll"
-        self.home_joints = {joint: float(self.home_joints.get(joint, 0.0)) for joint in JOINTS}
         self.joint_scales = {joint: float(self.joint_scales.get(joint, DEFAULT_JOINT_SCALES[joint])) for joint in JOINTS}
         self.model_offsets_deg = {
             joint: float(self.model_offsets_deg.get(joint, DEFAULT_MODEL_OFFSETS_DEG[joint])) for joint in JOINTS
+        }
+        self.joint_name_aliases = {
+            joint: str(self.joint_name_aliases.get(joint, DEFAULT_JOINT_NAME_ALIASES[joint]))
+            for joint in JOINTS
         }
 
     @property
@@ -320,26 +351,26 @@ def resolve_config(path: str | Path | None = None) -> SoArmMoceConfig:
         urdf_path=urdf_path,
         runtime_dir=DEFAULT_RUNTIME_DIR,
         target_frame=str(robot.get("end_link", "wrist_roll")),
-        home_joints=dict(DEFAULT_HOME_JOINTS),
         joint_scales={**DEFAULT_JOINT_SCALES, **dict(robot.get("joint_scales", {}))},
         model_offsets_deg={**DEFAULT_MODEL_OFFSETS_DEG, **dict(robot.get("sim_joint_offsets_deg", {}))},
+        joint_name_aliases={**DEFAULT_JOINT_NAME_ALIASES, **dict(robot.get("joint_name_aliases", {}))},
         arm_p_coefficient=int(transport.get("arm_p_coefficient", 16)),
         arm_d_coefficient=int(transport.get("arm_d_coefficient", 8)),
         max_ee_pos_err_m=float(ik.get("max_pos_error_m", 0.03)),
-        linear_step_m=0.01,
-        joint_step_deg=5.0,
-        cartesian_settle_time_s=0.15,
+        linear_step_m=float(control.get("linear_step_m", DEFAULT_LINEAR_STEP_M)),
+        joint_step_deg=float(control.get("joint_step_deg", DEFAULT_JOINT_STEP_DEG)),
+        cartesian_settle_time_s=float(control.get("cartesian_settle_time_s", DEFAULT_CARTESIAN_SETTLE_TIME_S)),
         cartesian_update_hz=float(control.get("hz", transport.get("update_hz", 25.0))),
         joint_update_hz=float(control.get("hz", transport.get("update_hz", 25.0))),
         ik_target_tol_m=float(ik.get("pos_tol", 0.001)),
         ik_max_iters=int(ik.get("max_iters", 200)),
         ik_damping=float(ik.get("damping", 0.05)),
         ik_step_scale=float(ik.get("step_scale", 0.8)),
-        ik_joint_step_deg=8.0,
+        ik_joint_step_deg=float(ik.get("joint_step_deg", DEFAULT_IK_JOINT_STEP_DEG)),
+        ik_orientation_tol_rad=float(ik.get("rot_tol", 0.02)),
         ik_seed_bias=float(ik.get("seed_bias", 0.02)),
         gripper_available=bool(transport.get("gripper_available", True)),
         serial_timeout_s=float(transport.get("timeout", DEFAULT_SERIAL_TIMEOUT_S)),
-        serial_baudrate=int(transport.get("baudrate", DEFAULT_SERIAL_BAUDRATE)),
         motor_model=str(transport.get("motor_model", DEFAULT_MOTOR_MODEL)),
     )
 
@@ -355,8 +386,7 @@ class SoArmMoceController:
       set register 18 (Phase) to 28, which exposes the signed absolute range
       `-30719 .. 30719` required by the hardware.
     - Startup position is recorded once and used as the runtime zero reference.
-      This intentionally removes the old init-home, cross-turn accumulation, and
-      power-loss recovery logic.
+      
     """
 
     def __init__(self, config: SoArmMoceConfig | None = None) -> None:
@@ -367,12 +397,13 @@ class SoArmMoceController:
         self._joint_runtime_state: dict[str, JointRuntimeState] = {}
         self._multi_turn_state: dict[str, dict[str, float | int | None]] = {}
         self._last_multi_turn_goal_raw_mod: dict[str, int] = {}
-        self._last_multi_turn_goal_continuous_raw: dict[str, float] = {}
-        self._last_multi_turn_goal_joint_deg: dict[str, float] = {}
         self._gripper_integrated = False
         self._gripper_probe_result: bool | None = None
         self._last_gripper_goal_raw: int | None = None
         self._manual_multi_turn_readback = False
+        self._kinematics: PybulletKinematicsModel | None = None
+        self._kinematics_init_attempted = False
+        self._kinematics_error_text = ""
         self._bus: Any | None = None
         self.robot_model = _as_attrdict(
             {
@@ -392,19 +423,26 @@ class SoArmMoceController:
         self.close()
 
     def close(self, *, disable_torque: bool = True) -> None:
-        if self._bus is None:
-            return
-        disconnect = getattr(self._bus, "disconnect", None)
-        if callable(disconnect):
-            try:
-                disconnect(disable_torque=bool(disable_torque))
-            except Exception:
+        if self._bus is not None:
+            disconnect = getattr(self._bus, "disconnect", None)
+            if callable(disconnect):
                 try:
-                    disconnect()
+                    disconnect(disable_torque=bool(disable_torque))
                 except Exception:
-                    pass
-        self._bus = None
-        self._gripper_integrated = False
+                    try:
+                        disconnect()
+                    except Exception:
+                        pass
+            self._bus = None
+            self._gripper_integrated = False
+
+        if self._kinematics is not None:
+            try:
+                self._kinematics.close()
+            except Exception:
+                pass
+        self._kinematics = None
+        self._kinematics_init_attempted = False
 
     def _build_joint_specs(self) -> dict[str, JointSpec]:
         specs: dict[str, JointSpec] = {}
@@ -422,6 +460,59 @@ class SoArmMoceController:
                 policy=policy,
             )
         return specs
+
+    def _ensure_kinematics(self, *, required: bool = False) -> PybulletKinematicsModel | None:
+        if self._kinematics is not None:
+            return self._kinematics
+
+        if not self._kinematics_init_attempted:
+            self._kinematics_init_attempted = True
+            try:
+                self._kinematics = PybulletKinematicsModel(
+                    urdf_path=self.config.urdf_path,
+                    sdk_joint_names=JOINTS,
+                    joint_name_aliases=self.config.joint_name_aliases,
+                    model_offsets_deg=self.config.model_offsets_deg,
+                    target_frame=self.config.target_frame,
+                )
+                self._kinematics_error_text = ""
+            except Exception as exc:
+                self._kinematics = None
+                self._kinematics_error_text = str(exc).strip() or exc.__class__.__name__
+
+        if required and self._kinematics is None:
+            base_message = "Cartesian motion requires the optional PyBullet URDF kinematics backend."
+            if not PYBULLET_AVAILABLE and PYBULLET_IMPORT_ERROR is not None:
+                raise CapabilityError(f"{base_message} Import error: {PYBULLET_IMPORT_ERROR}") from PYBULLET_IMPORT_ERROR
+            if self._kinematics_error_text:
+                raise CapabilityError(f"{base_message} {self._kinematics_error_text}")
+            raise CapabilityError(base_message)
+        return self._kinematics
+
+    def _compute_tcp_pose_from_joint_q(self, q_rad: Iterable[Any]) -> tuple[list[float], list[float]]:
+        kinematics = self._ensure_kinematics(required=False)
+        if kinematics is None:
+            return [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+
+        try:
+            fk = kinematics.forward([float(value) for value in q_rad])
+            return [float(value) for value in fk.xyz.tolist()], [float(value) for value in fk.rpy.tolist()]
+        except Exception as exc:
+            self._kinematics_error_text = str(exc).strip() or exc.__class__.__name__
+            return [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+
+    def get_end_effector_pose(self, q: Iterable[Any] | None = None) -> AttrDict:
+        if q is None:
+            state = self.get_state()
+            return _as_attrdict(
+                {
+                    "xyz": list(state["tcp_pose"]["xyz"]),
+                    "rpy": list(state["tcp_pose"]["rpy"]),
+                }
+            )
+
+        xyz, rpy = self._compute_tcp_pose_from_joint_q([float(value) for value in list(q)])
+        return _as_attrdict({"xyz": xyz, "rpy": rpy})
 
     def _build_gripper_spec(self) -> GripperSpec | None:
         if not bool(self.config.gripper_available):
@@ -757,6 +848,7 @@ class SoArmMoceController:
             motor_deg[joint_name] = float(self._relative_raw_to_motor_deg(relative_raw))
             output_deg[joint_name] = float(joint_deg)
 
+        tcp_xyz, tcp_rpy = self._compute_tcp_pose_from_joint_q(joint_state_rad)
         self._multi_turn_state = self._build_multi_turn_state(raw_present)
         gripper_state = self._build_gripper_state()
 
@@ -769,8 +861,8 @@ class SoArmMoceController:
                 "q": list(joint_state_rad),
             },
             "tcp_pose": {
-                "xyz": [0.0, 0.0, 0.0],
-                "rpy": [0.0, 0.0, 0.0],
+                "xyz": list(tcp_xyz),
+                "rpy": list(tcp_rpy),
             },
             "gripper_state": to_jsonable(gripper_state)
             if gripper_state is not None
@@ -829,6 +921,12 @@ class SoArmMoceController:
         raw_present = self._read_raw_present_position(bus or self._ensure_bus())
         return {joint_name: int(raw_present[joint_name]) for joint_name in JOINTS if joint_name in raw_present}
 
+    def _goal_error_raw(self, joint_name: str, present_raw: int | float, goal_raw: int | float) -> int:
+        spec = self._joint_specs[joint_name]
+        normalized_present = spec.policy.normalize_present_raw(present_raw)
+        normalized_goal = spec.policy.normalize_present_raw(goal_raw)
+        return int(spec.policy.relative_raw(current_raw=normalized_present, startup_raw=normalized_goal))
+
     def capture_hold_state(self, bus=None) -> dict[str, Any]:
         active_bus = bus or self._ensure_bus()
         payload: dict[str, Any] = {
@@ -872,25 +970,77 @@ class SoArmMoceController:
         if callable(enable):
             enable()
 
-    def _wait_for_motion(self, bus, goal_raw_by_joint: Mapping[str, int], duration: float, timeout: float | None) -> None:
+    def _wait_for_motion(self, bus, goal_raw_by_joint: Mapping[str, int], duration: float, timeout: float | None) -> dict[str, Any]:
+        if not goal_raw_by_joint:
+            return {
+                "settled": True,
+                "goal_raw_by_joint": {},
+                "present_raw_by_joint": {},
+                "error_by_joint": {},
+                "moving_flags": None,
+            }
+
         duration = max(0.0, float(duration))
-        deadline = time.monotonic() + (
-            float(timeout) if timeout is not None else max(duration * 2.0, 0.5)
+        wait_window_s = (
+            float(timeout)
+            if timeout is not None
+            else max(DEFAULT_JOINT_WAIT_TIMEOUT_S, duration + float(self.config.cartesian_settle_time_s) + 0.5)
         )
+        deadline = time.monotonic() + wait_window_s
         if duration > 0.0:
-            time.sleep(min(duration, 0.2))
+            time.sleep(min(duration, 0.1))
+
+        last_snapshot: dict[str, Any] = {
+            "settled": False,
+            "goal_raw_by_joint": {str(joint_name): int(goal_raw) for joint_name, goal_raw in goal_raw_by_joint.items()},
+            "present_raw_by_joint": {},
+            "error_by_joint": {},
+            "moving_flags": None,
+        }
 
         while time.monotonic() < deadline:
             try:
-                moving = [
+                raw_present = self._read_raw_present_position(bus)
+            except Exception:
+                last_snapshot["read_error"] = "present_position_read_failed"
+                return last_snapshot
+
+            error_by_joint = {
+                joint_name: self._goal_error_raw(
+                    joint_name,
+                    present_raw=raw_present[joint_name],
+                    goal_raw=goal_raw,
+                )
+                for joint_name, goal_raw in goal_raw_by_joint.items()
+            }
+            all_within_tolerance = all(
+                abs(int(error_raw)) <= int(DEFAULT_JOINT_SETTLE_TOLERANCE_RAW)
+                for error_raw in error_by_joint.values()
+            )
+
+            moving_flags: list[int] | None = None
+            try:
+                moving_flags = [
                     int(bus.read("Moving", joint_name, normalize=False))
                     for joint_name in goal_raw_by_joint
                 ]
             except Exception:
-                return
-            if not any(moving):
-                return
-            time.sleep(0.02)
+                moving_flags = None
+
+            last_snapshot = {
+                "settled": False,
+                "goal_raw_by_joint": {str(joint_name): int(goal_raw) for joint_name, goal_raw in goal_raw_by_joint.items()},
+                "present_raw_by_joint": {str(joint_name): int(raw_present[joint_name]) for joint_name in goal_raw_by_joint},
+                "error_by_joint": {str(joint_name): int(error_raw) for joint_name, error_raw in error_by_joint.items()},
+                "moving_flags": list(moving_flags) if moving_flags is not None else None,
+            }
+
+            if all_within_tolerance and (moving_flags is None or not any(moving_flags)):
+                last_snapshot["settled"] = True
+                return last_snapshot
+            time.sleep(DEFAULT_JOINT_POLL_INTERVAL_S)
+
+        return last_snapshot
 
     def _interpolate_raw_goal_positions(
         self,
@@ -994,11 +1144,29 @@ class SoArmMoceController:
         for joint_name, goal_raw in goal_raw_by_joint.items():
             if joint_name in MULTI_TURN_JOINTS:
                 self._last_multi_turn_goal_raw_mod[joint_name] = int(goal_raw)
-                self._last_multi_turn_goal_continuous_raw[joint_name] = float(effective_relative_raw[joint_name])
-                self._last_multi_turn_goal_joint_deg[joint_name] = float(accepted_target_deg[joint_name])
 
         if wait:
-            self._wait_for_motion(bus, goal_raw_by_joint, duration=0.0 if interpolated else float(duration), timeout=timeout)
+            wait_summary = self._wait_for_motion(bus, goal_raw_by_joint, duration=float(duration), timeout=timeout)
+            if not bool(wait_summary.get("settled", False)):
+                error_by_joint = dict(wait_summary.get("error_by_joint", {}))
+                present_raw_by_joint = dict(wait_summary.get("present_raw_by_joint", {}))
+                lines: list[str] = []
+                for joint_name, error_raw in sorted(
+                    error_by_joint.items(),
+                    key=lambda item: abs(int(item[1])),
+                    reverse=True,
+                ):
+                    lines.append(
+                        f"{joint_name}: present_raw={present_raw_by_joint.get(joint_name)}, "
+                        f"goal_raw={goal_raw_by_joint.get(joint_name)}, "
+                        f"error_raw={int(error_raw)}, "
+                        f"error_joint_deg={float(self._relative_raw_to_joint_deg(joint_name, int(error_raw))):.2f}"
+                    )
+                if not lines and wait_summary.get("read_error"):
+                    lines.append(str(wait_summary["read_error"]))
+                raise HardwareError(
+                    "Joint motion did not settle before timeout:\n" + "\n".join(lines or ["unknown motion wait failure"])
+                )
 
         state = self.get_state()
         result = {
@@ -1052,9 +1220,9 @@ class SoArmMoceController:
 
     def home(self, *, duration: float = 1.0, wait: bool = True, timeout: float | None = None) -> dict[str, Any]:
         # Startup position is intentionally the runtime zero reference, so "home"
-        # simply returns every joint to the startup pose captured at controller init.
+        # simply commands zero relative joint angle for every axis.
         result = self.move_joints(
-            dict(self.config.home_joints),
+            {joint_name: 0.0 for joint_name in JOINTS},
             duration=float(duration),
             wait=bool(wait),
             timeout=timeout,
@@ -1071,11 +1239,140 @@ class SoArmMoceController:
             "state": self._build_state(raw_present),
         }
 
-    def move_pose(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        raise CapabilityError("Cartesian move_pose is not implemented in the rebuilt real-arm controller.")
+    def _resolve_ik_seed_q(self, *, q0: Iterable[Any] | None, seed_policy: str) -> list[float]:
+        if q0 is not None:
+            payload = list(q0)
+            if len(payload) != len(JOINTS):
+                raise ValidationError(f"q0 must contain {len(JOINTS)} joint values, got {len(payload)}")
+            return [float(value) for value in payload]
+
+        policy = str(seed_policy or "current").strip().lower()
+        if policy in {"current", "now", ""}:
+            state = self.get_state()
+            return [float(value) for value in state["joint_state"]["q"]]
+        if policy in {"home", "startup", "zero"}:
+            return [0.0 for _ in JOINTS]
+        raise ValidationError(f"Unsupported IK seed_policy: {seed_policy}")
+
+    def move_pose(
+        self,
+        xyz: Iterable[Any],
+        rpy: Iterable[Any] | None = None,
+        *,
+        q0: Iterable[Any] | None = None,
+        seed_policy: str = "current",
+        duration: float = 1.0,
+        wait: bool = True,
+        timeout: float | None = None,
+        trace: bool = False,
+    ) -> dict[str, Any]:
+        target_xyz = _coerce_vector3(xyz, name="xyz")
+        target_rpy = _coerce_vector3(rpy, name="rpy") if rpy is not None else None
+        seed_q = self._resolve_ik_seed_q(q0=q0, seed_policy=seed_policy)
+        kinematics = self._ensure_kinematics(required=True)
+        assert kinematics is not None
+
+        ik_result = kinematics.inverse(
+            target_xyz=target_xyz,
+            target_rpy=target_rpy,
+            seed_q_user=seed_q,
+            max_iters=int(self.config.ik_max_iters),
+            residual_threshold=max(1e-6, float(self.config.ik_target_tol_m) * 0.5),
+        )
+
+        if trace:
+            self._append_sdk_debug_log(
+                "[IK] move_pose "
+                f"target_xyz_m={json.dumps([float(value) for value in target_xyz], ensure_ascii=False)} "
+                f"target_rpy_rad={json.dumps([float(value) for value in target_rpy], ensure_ascii=False) if target_rpy is not None else 'null'} "
+                f"seed_q_rad={json.dumps([float(value) for value in seed_q], ensure_ascii=False)} "
+                f"solution_q_rad={json.dumps([float(value) for value in ik_result.q_user.tolist()], ensure_ascii=False)} "
+                f"predicted_xyz_m={json.dumps([float(value) for value in ik_result.xyz.tolist()], ensure_ascii=False)} "
+                f"predicted_rpy_rad={json.dumps([float(value) for value in ik_result.rpy.tolist()], ensure_ascii=False)} "
+                f"pos_error_m={float(ik_result.pos_error_m):.6f} "
+                f"rot_error_rad={'null' if ik_result.rot_error_rad is None else f'{float(ik_result.rot_error_rad):.6f}'}"
+            )
+
+        if ik_result.pos_error_m > float(self.config.max_ee_pos_err_m):
+            raise IKError(
+                "IK solution position error exceeds the configured limit: "
+                f"{ik_result.pos_error_m:.4f} m > {float(self.config.max_ee_pos_err_m):.4f} m"
+            )
+        if (
+            target_rpy is not None
+            and ik_result.rot_error_rad is not None
+            and ik_result.rot_error_rad > float(self.config.ik_orientation_tol_rad)
+        ):
+            raise IKError(
+                "IK solution orientation error exceeds the configured limit: "
+                f"{ik_result.rot_error_rad:.4f} rad > {float(self.config.ik_orientation_tol_rad):.4f} rad"
+            )
+
+        move_result = self.move_joints(
+            ik_result.q_user.tolist(),
+            duration=float(duration),
+            wait=bool(wait),
+            timeout=timeout,
+            trace=trace,
+        )
+        move_result["action"] = "move_pose"
+        move_result["target_xyz_m"] = [float(value) for value in target_xyz]
+        move_result["target_rpy_rad"] = [float(value) for value in target_rpy] if target_rpy is not None else None
+        move_result["orientation_mode"] = "constrained" if target_rpy is not None else "position_only"
+        move_result["ik"] = {
+            "seed_q_rad": [float(value) for value in seed_q],
+            "solution_q_rad": [float(value) for value in ik_result.q_user.tolist()],
+            "predicted_xyz_m": [float(value) for value in ik_result.xyz.tolist()],
+            "predicted_rpy_rad": [float(value) for value in ik_result.rpy.tolist()],
+            "position_error_m": float(ik_result.pos_error_m),
+            "orientation_error_rad": (
+                float(ik_result.rot_error_rad) if ik_result.rot_error_rad is not None else None
+            ),
+            "backend": "pybullet",
+        }
+        return move_result
 
     def move_to(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        raise CapabilityError("Cartesian move_to is not implemented in the rebuilt real-arm controller.")
+        return self.move_pose(*args, **kwargs)
+
+    def move_tcp(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        rpy: Iterable[Any] | None = None,
+        *,
+        frame: str = "base",
+        duration: float = 1.0,
+        wait: bool = True,
+        timeout: float | None = None,
+        trace: bool = False,
+    ) -> dict[str, Any]:
+        frame_norm = "tool" if str(frame or "").strip().lower() == "tool" else "base"
+        if frame_norm == "tool":
+            delta_rpy = _coerce_vector3(rpy, name="rpy") if rpy is not None else [0.0, 0.0, 0.0]
+            return self.move_delta(
+                dx=float(x),
+                dy=float(y),
+                dz=float(z),
+                drx=float(delta_rpy[0]),
+                dry=float(delta_rpy[1]),
+                drz=float(delta_rpy[2]),
+                frame="tool",
+                duration=float(duration),
+                wait=bool(wait),
+                timeout=timeout,
+                trace=trace,
+            )
+
+        return self.move_pose(
+            xyz=[float(x), float(y), float(z)],
+            rpy=rpy,
+            duration=float(duration),
+            wait=bool(wait),
+            timeout=timeout,
+            trace=trace,
+        )
 
     def move_delta(
         self,
@@ -1083,19 +1380,67 @@ class SoArmMoceController:
         dx: float = 0.0,
         dy: float = 0.0,
         dz: float = 0.0,
+        drx: float = 0.0,
+        dry: float = 0.0,
+        drz: float = 0.0,
         frame: str = "base",
         duration: float = 1.0,
         wait: bool = True,
         timeout: float | None = None,
+        trace: bool = False,
     ) -> dict[str, Any]:
-        if abs(float(dx)) <= 1e-12 and abs(float(dy)) <= 1e-12 and abs(float(dz)) <= 1e-12:
+        if (
+            abs(float(dx)) <= 1e-12
+            and abs(float(dy)) <= 1e-12
+            and abs(float(dz)) <= 1e-12
+            and abs(float(drx)) <= 1e-12
+            and abs(float(dry)) <= 1e-12
+            and abs(float(drz)) <= 1e-12
+        ):
             return {
                 "action": "move_delta",
                 "frame": str(frame),
-                "delta": {"dx": float(dx), "dy": float(dy), "dz": float(dz)},
+                "delta": {
+                    "dx": float(dx),
+                    "dy": float(dy),
+                    "dz": float(dz),
+                    "drx": float(drx),
+                    "dry": float(dry),
+                    "drz": float(drz),
+                },
                 "state": self.get_state(),
             }
-        raise CapabilityError("Cartesian move_delta is not implemented in the rebuilt real-arm controller.")
+        kinematics = self._ensure_kinematics(required=True)
+        assert kinematics is not None
+        current_pose = self.get_end_effector_pose()
+        target_xyz, target_rpy = kinematics.compose_delta_target(
+            current_xyz=current_pose["xyz"],
+            current_rpy=current_pose["rpy"],
+            delta_xyz=[float(dx), float(dy), float(dz)],
+            delta_rpy=[float(drx), float(dry), float(drz)],
+            frame=str(frame),
+        )
+        result = self.move_pose(
+            xyz=target_xyz.tolist(),
+            rpy=target_rpy.tolist(),
+            duration=float(duration),
+            wait=bool(wait),
+            timeout=timeout,
+            trace=trace,
+        )
+        result["action"] = "move_delta"
+        result["frame"] = "tool" if str(frame or "").strip().lower() == "tool" else "base"
+        result["delta"] = {
+            "dx": float(dx),
+            "dy": float(dy),
+            "dz": float(dz),
+            "drx": float(drx),
+            "dry": float(dry),
+            "drz": float(drz),
+        }
+        result["target_xyz_m"] = [float(value) for value in target_xyz.tolist()]
+        result["target_rpy_rad"] = [float(value) for value in target_rpy.tolist()]
+        return result
 
     def write_gripper_raw(self, goal_raw: int | None, *, bus=None) -> bool:
         if goal_raw is None:
@@ -1189,10 +1534,17 @@ class SoArmMoceController:
                 "joint_limits_deg": {},
                 "joint_scales": dict(self.config.joint_scales),
                 "model_offsets_deg": dict(self.config.model_offsets_deg),
+                "joint_name_aliases": dict(self.config.joint_name_aliases),
                 "bounded_single_turn_joints": list(BOUNDED_SINGLE_TURN_JOINTS),
                 "multi_turn_joints": list(MULTI_TURN_JOINTS),
                 "startup_raw_position": startup_raw,
                 "gripper": to_jsonable(self._build_gripper_state()),
+                "kinematics": {
+                    "available": bool(self._ensure_kinematics(required=False) is not None),
+                    "backend": "pybullet" if PYBULLET_AVAILABLE else None,
+                    "target_frame": str(self.config.target_frame),
+                    "error": self._kinematics_error_text or None,
+                },
                 "config": {
                     "port": self.config.port,
                     "robot_id": self.config.robot_id,
@@ -1209,8 +1561,10 @@ Robot = SoArmMoceController
 __all__ = [
     "BOUNDED_SINGLE_TURN_JOINTS",
     "CapabilityError",
+    "DEFAULT_JOINT_NAME_ALIASES",
     "DEFAULT_MODEL_OFFSETS_DEG",
     "HardwareError",
+    "IKError",
     "JOINTS",
     "MULTI_TURN_ABSOLUTE_RAW_LIMIT",
     "MULTI_TURN_DISABLED_LIMIT_RAW",

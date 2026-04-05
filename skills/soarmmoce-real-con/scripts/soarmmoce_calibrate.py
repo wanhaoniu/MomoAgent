@@ -290,7 +290,6 @@ def _resolve_paths(robot_cfg: CalibrateRobotConfig) -> Dict[str, Any]:
         "robot_id": target_robot_id,
         "target_source_path": target_source_path,
         "output_path": output_path,
-        "home_joints": dict(base.home_joints),
     }
 
 
@@ -345,16 +344,16 @@ def _has_complete_single_turn_entries(payload: Mapping[str, Any]) -> bool:
     return True
 
 
-def _build_meta(*, generated_at: float, home_joints: Mapping[str, Any]) -> dict[str, Any]:
+def _build_meta(*, generated_at: float) -> dict[str, Any]:
     return {
         "generated_at_unix_s": float(generated_at),
         "script": "soarmmoce_calibrate.py",
         "bounded_single_turn_joints": list(BOUNDED_SINGLE_TURN_JOINTS),
         "absolute_raw_joints": list(MULTI_TURN_JOINTS),
-        "home_joint_deg": {joint_name: float(home_joints.get(joint_name, 0.0)) for joint_name in JOINTS},
         "notes": {
             "bounded_single_turn": "1/4 use half-turn homing plus manually recorded range limits.",
             "absolute_raw": "2/3/5 use mode 0 with min/max limit 0 and phase 28; startup pose is the runtime reference.",
+            "home": "home() returns every joint to zero relative angle, which is the startup pose reference.",
         },
     }
 
@@ -440,7 +439,6 @@ def _calibrate(cfg: CalibrateConfig) -> Dict[str, Any]:
             written_json[joint_name] = absolute_raw_results[joint_name]["entry"]
         written_json["_meta"] = _build_meta(
             generated_at=time.time(),
-            home_joints=context["home_joints"],
         )
 
         if robot_cfg.apply_registers:

@@ -4,7 +4,6 @@ import math
 import os
 import sys
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -24,7 +23,6 @@ if SDK_SRC.exists():
     sys.path.insert(0, sdk_src_str)
 
 DEFAULT_SDK_REAL_CONFIG_PATH = SDK_SRC / "soarmmoce_sdk" / "resources" / "configs" / "soarm_moce_serial.yaml"
-DEFAULT_SDK_SIM_CONFIG_PATH = SDK_SRC / "soarmmoce_sdk" / "resources" / "configs" / "soarm_moce.yaml"
 DEFAULT_JOINT_NAMES = [
     "shoulder_pan",
     "shoulder_lift",
@@ -34,9 +32,7 @@ DEFAULT_JOINT_NAMES = [
     "gripper",
 ]
 
-from soarmmoce_sdk import Robot as RuntimeRobot
-from soarmmoce_sdk.kinematics.fk import matrix_to_rpy
-from soarmmoce_sdk.kinematics.frames import rpy_to_matrix
+from soarmmoce_sdk.runtime_compat import CompatibleRuntimeRobot as RuntimeRobot
 
 
 class QuickControlError(RuntimeError):
@@ -60,12 +56,9 @@ class QuickControlService:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._robot: Optional[RuntimeRobot] = None
-        self._transport_override = str(os.getenv("SOARMMOCE_TRANSPORT", "")).strip().lower() or None
         env_sdk_config = str(os.getenv("SOARMMOCE_CONFIG", "")).strip()
         self._primary_config_path = env_sdk_config or (str(DEFAULT_SDK_REAL_CONFIG_PATH) if DEFAULT_SDK_REAL_CONFIG_PATH.exists() else "")
-        self._sim_config_path = str(DEFAULT_SDK_SIM_CONFIG_PATH) if DEFAULT_SDK_SIM_CONFIG_PATH.exists() else ""
         self._mode = "disconnected"
-        self._simulation_fallback = False
         self._transport_name = ""
         self._config_path = ""
         self._last_connect_error = ""
@@ -74,15 +67,11 @@ class QuickControlService:
     def close(self) -> None:
         self.disconnect()
 
-    def _build_robot(self, config_path: Optional[str], transport_override: Optional[str] = None) -> RuntimeRobot:
-        robot = RuntimeRobot.from_config(config_path) if config_path else RuntimeRobot()
-        if transport_override in ("mock", "tcp", "serial"):
-            robot.config.setdefault("transport", {})["type"] = str(transport_override)
-        return robot
+    def _build_robot(self, config_path: Optional[str]) -> RuntimeRobot:
+        return RuntimeRobot.from_config(config_path) if config_path else RuntimeRobot()
 
-    def _set_runtime(self, *, robot: Optional[RuntimeRobot] = None, mode: str = "disconnected", simulation_fallback: bool = False, config_path: str = "", last_connect_error: str = "") -> None:
+    def _set_runtime(self, *, robot: Optional[RuntimeRobot] = None, mode: str = "disconnected", config_path: str = "", last_connect_error: str = "") -> None:
         self._mode = str(mode or "disconnected")
-        self._simulation_fallback = bool(simulation_fallback)
         self._config_path = str(config_path or "")
         self._last_connect_error = str(last_connect_error or "")
         if robot is None:
@@ -95,7 +84,7 @@ class QuickControlService:
         return {
             "mode": self._mode,
             "connected": self._mode in ("connected", "simulation"),
-            "simulation_fallback": bool(self._simulation_fallback),
+            "simulation_fallback": False,
             "transport": self._transport_name,
             "config_path": self._config_path,
         }
@@ -106,54 +95,31 @@ class QuickControlService:
 
     def connect(self, *, prefer_real: bool = True, allow_sim_fallback: bool = True) -> dict[str, Any]:
         with self._lock:
+            del prefer_real
+            del allow_sim_fallback
             if self._robot is not None and getattr(self._robot, "connected", False):
                 return self._session_payload()
 
             self._disconnect_locked()
-            explicit_override = self._transport_override in ("mock", "tcp", "serial")
-            candidates: list[tuple[str, str, Optional[str], bool]] = []
+            config_path = self._primary_config_path
+            if not config_path:
+                raise QuickControlError("CONNECT_FAILED", "No SDK config available", 500)
 
-            if explicit_override:
-                cfg = self._primary_config_path or self._sim_config_path
-                if not cfg:
-                    raise QuickControlError("CONNECT_FAILED", "No SDK config available", 500)
-                candidates.append((cfg, str(self._transport_override), False, False))
-            else:
-                if prefer_real and self._primary_config_path:
-                    candidates.append((self._primary_config_path, "", False, False))
-                if self._sim_config_path and ((not prefer_real) or allow_sim_fallback):
-                    candidates.append((self._sim_config_path, "mock", True, bool(prefer_real and allow_sim_fallback and self._primary_config_path)))
+            try:
+                robot = self._build_robot(config_path)
+                robot.connect()
+            except Exception as exc:  # noqa: BLE001
+                self._set_runtime(mode="disconnected", config_path=config_path, last_connect_error=str(exc))
+                raise QuickControlError("CONNECT_FAILED", str(exc), 500) from exc
 
-            seen: set[tuple[str, str]] = set()
-            deduped: list[tuple[str, str, bool, bool]] = []
-            for cfg, override, is_sim, is_fallback in candidates:
-                key = (os.path.normpath(cfg), override)
-                if key in seen:
-                    continue
-                seen.add(key)
-                deduped.append((cfg, override, is_sim, is_fallback))
-
-            last_exc: Optional[Exception] = None
-            for cfg, override, is_sim, is_fallback in deduped:
-                try:
-                    robot = self._build_robot(cfg, override or None)
-                    robot.connect()
-                    mode = "simulation" if is_sim or "mock" in self._transport_name_from_robot(robot).lower() else "connected"
-                    self._robot = robot
-                    self._set_runtime(
-                        robot=robot,
-                        mode=mode,
-                        simulation_fallback=is_fallback,
-                        config_path=cfg,
-                        last_connect_error="" if mode == "connected" else (str(last_exc) if is_fallback and last_exc else ""),
-                    )
-                    return self._session_payload()
-                except Exception as exc:  # noqa: BLE001
-                    last_exc = exc
-                    continue
-
-            self._set_runtime(mode="disconnected", last_connect_error=str(last_exc or "connect failed"))
-            raise QuickControlError("CONNECT_FAILED", str(last_exc or "connect failed"), 500)
+            self._robot = robot
+            self._set_runtime(
+                robot=robot,
+                mode="connected",
+                config_path=config_path,
+                last_connect_error="",
+            )
+            return self._session_payload()
 
     def disconnect(self) -> dict[str, Any]:
         with self._lock:
@@ -177,6 +143,9 @@ class QuickControlService:
 
     @staticmethod
     def _transport_name_from_robot(robot: RuntimeRobot) -> str:
+        transport_name = getattr(robot, "transport_name", None)
+        if isinstance(transport_name, str) and transport_name.strip():
+            return transport_name
         transport = getattr(robot, "_transport", None)
         return type(transport).__name__ if transport is not None else ""
 
@@ -201,11 +170,6 @@ class QuickControlService:
         if jog_mode == "continuous":
             return float(np.clip(0.15 / speed_scale, 0.08, 0.50))
         return float(np.clip(0.20 / speed_scale, 0.08, 0.60))
-
-    @staticmethod
-    def _rotation_from_rpy_delta(delta_rot_local: np.ndarray) -> np.ndarray:
-        rx, ry, rz = [float(x) for x in np.asarray(delta_rot_local, dtype=float).reshape(3)]
-        return rpy_to_matrix(np.array([rx, ry, rz], dtype=float))
 
     def _read_robot_state_locked(self) -> Optional[Any]:
         robot = self._robot
@@ -289,9 +253,26 @@ class QuickControlService:
             robot = self._require_robot()
             state = robot.get_state()
             q_target = np.asarray(state.joint_state.q, dtype=float).copy()
-            if joint_index < 0 or joint_index >= q_target.shape[0]:
-                raise QuickControlError("INVALID_ARGUMENT", f"joint_index out of range: {joint_index}")
             joint_names = list(getattr(state.joint_state, "names", []) or getattr(robot.robot_model, "joint_names", []) or DEFAULT_JOINT_NAMES)
+            if joint_index < 0:
+                raise QuickControlError("INVALID_ARGUMENT", f"joint_index out of range: {joint_index}")
+            if joint_index >= q_target.shape[0]:
+                if joint_index == len(DEFAULT_JOINT_NAMES) - 1 and bool(getattr(state.gripper_state, "available", False)):
+                    current_ratio = getattr(state.gripper_state, "open_ratio", None)
+                    if current_ratio is None:
+                        current_ratio = 0.5
+                    ratio_step = 0.05 if float(delta_deg) >= 0.0 else -0.05
+                    robot.set_gripper(
+                        open_ratio=float(np.clip(float(current_ratio) + ratio_step, 0.0, 1.0)),
+                        wait=False,
+                    )
+                    return {
+                        "joint_index": int(joint_index),
+                        "joint_name": "gripper",
+                        "delta_deg": float(delta_deg),
+                        "accepted": True,
+                    }
+                raise QuickControlError("INVALID_ARGUMENT", f"joint_index out of range: {joint_index}")
             lo, hi = robot.robot_model.joint_limits[joint_index]
             q_target[joint_index] = float(np.clip(q_target[joint_index] + math.radians(float(delta_deg)), float(lo), float(hi)))
             duration = self._duration_from_speed(kind="joint_step", speed_percent=speed_percent)
@@ -304,26 +285,6 @@ class QuickControlService:
             }
 
     def cartesian_jog(self, *, axis: str, coord_frame: str, jog_mode: str, step_dist_mm: float, step_angle_deg: float, speed_percent: int) -> dict[str, Any]:
-        key_norm = str(axis).strip().upper()
-        trans_map = {
-            "+X": np.array([1.0, 0.0, 0.0], dtype=float),
-            "-X": np.array([-1.0, 0.0, 0.0], dtype=float),
-            "+Y": np.array([0.0, 1.0, 0.0], dtype=float),
-            "-Y": np.array([0.0, -1.0, 0.0], dtype=float),
-            "+Z": np.array([0.0, 0.0, 1.0], dtype=float),
-            "-Z": np.array([0.0, 0.0, -1.0], dtype=float),
-        }
-        rot_map = {
-            "+RX": np.array([1.0, 0.0, 0.0], dtype=float),
-            "-RX": np.array([-1.0, 0.0, 0.0], dtype=float),
-            "+RY": np.array([0.0, 1.0, 0.0], dtype=float),
-            "-RY": np.array([0.0, -1.0, 0.0], dtype=float),
-            "+RZ": np.array([0.0, 0.0, 1.0], dtype=float),
-            "-RZ": np.array([0.0, 0.0, -1.0], dtype=float),
-        }
-        if key_norm not in trans_map and key_norm not in rot_map:
-            raise QuickControlError("INVALID_ARGUMENT", f"Unsupported axis: {axis}")
-
         with self._lock:
             self._update_motion(
                 speed_percent=speed_percent,
@@ -333,34 +294,60 @@ class QuickControlService:
                 step_angle_deg=step_angle_deg,
             )
             robot = self._require_robot()
-            state = robot.get_state()
-            xyz_now = np.asarray(state.tcp_pose.xyz, dtype=float).reshape(3)
-            rpy_now = np.asarray(state.tcp_pose.rpy, dtype=float).reshape(3)
-            R_now = rpy_to_matrix(rpy_now)
-            delta_pos_local = np.zeros(3, dtype=float)
-            delta_rot_local = np.zeros(3, dtype=float)
-            if key_norm in trans_map:
-                delta_pos_local = trans_map[key_norm] * (float(step_dist_mm) / 1000.0)
-            else:
-                delta_rot_local = rot_map[key_norm] * math.radians(float(step_angle_deg))
+            axis_norm = str(axis or "").strip().upper()
+            trans_step_m = float(step_dist_mm) / 1000.0
+            rot_step_rad = math.radians(float(step_angle_deg))
+            delta_kwargs = {
+                "dx": 0.0,
+                "dy": 0.0,
+                "dz": 0.0,
+                "drx": 0.0,
+                "dry": 0.0,
+                "drz": 0.0,
+            }
+            axis_map = {
+                "+X": ("dx", 1.0),
+                "X": ("dx", 1.0),
+                "-X": ("dx", -1.0),
+                "+Y": ("dy", 1.0),
+                "Y": ("dy", 1.0),
+                "-Y": ("dy", -1.0),
+                "+Z": ("dz", 1.0),
+                "Z": ("dz", 1.0),
+                "-Z": ("dz", -1.0),
+                "+RX": ("drx", 1.0),
+                "RX": ("drx", 1.0),
+                "-RX": ("drx", -1.0),
+                "+RY": ("dry", 1.0),
+                "RY": ("dry", 1.0),
+                "-RY": ("dry", -1.0),
+                "+RZ": ("drz", 1.0),
+                "RZ": ("drz", 1.0),
+                "-RZ": ("drz", -1.0),
+            }
+            if axis_norm not in axis_map:
+                raise QuickControlError("INVALID_ARGUMENT", f"Unsupported cartesian axis: {axis}", 400)
 
-            use_tool = str(coord_frame).strip().lower() == "tool"
-            if use_tool:
-                target_xyz = xyz_now + (R_now @ delta_pos_local)
-                R_target = R_now @ self._rotation_from_rpy_delta(delta_rot_local)
-            else:
-                target_xyz = xyz_now + delta_pos_local
-                R_target = self._rotation_from_rpy_delta(delta_rot_local) @ R_now
+            key, sign = axis_map[axis_norm]
+            step_value = trans_step_m if key in {"dx", "dy", "dz"} else rot_step_rad
+            delta_kwargs[key] = float(sign) * float(step_value)
+            duration = self._duration_from_speed(kind="cartesian", speed_percent=speed_percent, jog_mode=jog_mode)
+            try:
+                robot.move_delta(
+                    frame=str(coord_frame or "base"),
+                    duration=duration,
+                    wait=False,
+                    **delta_kwargs,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise QuickControlError("CARTESIAN_FAILED", str(exc), 500) from exc
 
-            duration = self._duration_from_speed(kind="cartesian_jog", speed_percent=speed_percent, jog_mode=jog_mode)
-            if key_norm in trans_map:
-                robot.move_pose(xyz=target_xyz, rpy=None, duration=duration, wait=False)
-            else:
-                robot.move_pose(xyz=target_xyz, rpy=matrix_to_rpy(R_target), duration=duration, wait=False)
             return {
-                "axis": key_norm,
-                "coord_frame": "tool" if use_tool else "base",
+                "axis": axis_norm,
+                "coord_frame": "tool" if str(coord_frame).strip().lower() == "tool" else "base",
                 "jog_mode": "continuous" if str(jog_mode).strip().lower() == "continuous" else "step",
+                "step_dist_mm": float(step_dist_mm),
+                "step_angle_deg": float(step_angle_deg),
                 "accepted": True,
             }
 

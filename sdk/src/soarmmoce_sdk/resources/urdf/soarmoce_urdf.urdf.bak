@@ -2,10 +2,10 @@
 <robot name="soarmoce_urdf">
 
   <material name="white">
-    <color rgba="0.95 0.95 0.95 1.0" />
+    <color rgba="0.95 0.95 0.95 1.0"/>
   </material>
   <material name="light_purple">
-    <color rgba="0.7 0.5 0.9 1.0" /> </material>
+    <color rgba="0.7 0.5 0.9 1.0"/> </material>
 
   <link name="base">
     <inertial>
@@ -52,7 +52,7 @@
     <parent link="base" />
     <child link="shoulder" />
     <axis xyz="0 0 -1" />
-    <limit lower="-1.82543714" upper="2.03252454" effort="0" velocity="0" />
+    <limit lower="-1.80000000" upper="1.80000000" effort="0" velocity="0" />
   </joint>
 
   <link name="shoulder_lift">
@@ -76,11 +76,11 @@
   </link>
 
   <joint name="shoulder_lift" type="revolute">
-    <origin xyz="0.023908 -0.031327 0.098856" rpy="1.570800 0.000000 1.599500" />
+    <origin xyz="0.023908 -0.031327 0.098856" rpy="3.141593 1.570793 -3.112889" />
     <parent link="shoulder" />
     <child link="shoulder_lift" />
     <axis xyz="0 0 1" />
-    <limit lower="-1.72124222" upper="1.48738250" effort="0" velocity="0" />
+    <limit lower="-1.30000000" upper="1.30000000" effort="0" velocity="0" />
   </joint>
 
   <link name="elbow">
@@ -108,7 +108,7 @@
     <parent link="shoulder_lift" />
     <child link="elbow" />
     <axis xyz="0 0 1" />
-    <limit lower="-1.55342947" upper="1.65752103" effort="0" velocity="0" />
+    <limit lower="-1.30000000" upper="1.30000000" effort="0" velocity="0" />
   </joint>
 
   <link name="wrist">
@@ -132,11 +132,11 @@
   </link>
 
   <joint name="wrist" type="revolute">
-    <origin xyz="-0.152980 0.002177 -0.003775" rpy="0.000000 -0.000000 0.000000" />
+    <origin xyz="-0.152980 0.002177 -0.003775" rpy="0.000000 0.000000 -1.570796" />
     <parent link="elbow" />
     <child link="wrist" />
     <axis xyz="0 0 1" />
-    <limit lower="-1.59073808" upper="1.52937885" effort="0" velocity="0" />
+    <limit lower="-1.30000000" upper="1.31000000" effort="0" velocity="0" />
   </joint>
 
   <link name="wrist_roll">
@@ -164,7 +164,7 @@
     <parent link="wrist" />
     <child link="wrist_roll" />
     <axis xyz="0 0 -1" />
-    <limit lower="-3.41464123" upper="0.00920388" effort="0" velocity="0" />
+    <limit lower="-1.30000000" upper="1.30000000" effort="0" velocity="0" />
   </joint>
 
   <link name="gripper">

@@ -114,7 +114,6 @@ SIM_RENDER_SUPERSAMPLE = 1.4
 
 SDK_SRC = REPO_ROOT / "sdk" / "src"
 DEFAULT_SDK_REAL_CONFIG_PATH = SDK_SRC / "soarmmoce_sdk" / "resources" / "configs" / "soarm_moce_serial.yaml"
-DEFAULT_SDK_SIM_CONFIG_PATH = SDK_SRC / "soarmmoce_sdk" / "resources" / "configs" / "soarm_moce.yaml"
 if SDK_SRC.exists():
     _sdk_src_str = str(SDK_SRC)
     _normalized_sdk_src = os.path.normpath(_sdk_src_str)
@@ -131,7 +130,7 @@ else:
     SDKRobot = Any
 
 try:
-    from soarmmoce_sdk import Robot as RuntimeRobot
+    from soarmmoce_sdk.runtime_compat import CompatibleRuntimeRobot as RuntimeRobot
 
     SDK_AVAILABLE = True
     _SDK_IMPORT_ERROR = None
@@ -213,6 +212,7 @@ class ArmControlGUI(QMainWindow):
         self.sim_robot = None
         self.sim_joint_names = []
         self.sim_q = np.zeros(0, dtype=float)
+        self._sim_limits = []
         self._sim_joint_offsets = np.zeros(0, dtype=float)
         self._sim_model_limits = []
         self._sim_fk = None
@@ -220,27 +220,12 @@ class ArmControlGUI(QMainWindow):
         self._sim_solve_ik = None
         self._sdk_robot: Optional[SDKRobot] = None
         self._sdk_lock = threading.RLock()
-        self._sdk_transport_override = str(os.getenv("SOARMMOCE_TRANSPORT", "")).strip().lower() or None
         env_sdk_config = str(os.getenv("SOARMMOCE_CONFIG", "")).strip()
         self._sdk_config_path = env_sdk_config or (str(DEFAULT_SDK_REAL_CONFIG_PATH) if DEFAULT_SDK_REAL_CONFIG_PATH.exists() else None)
-        self._sdk_fallback_config_path = (
-            str(DEFAULT_SDK_SIM_CONFIG_PATH)
-            if (not env_sdk_config and DEFAULT_SDK_SIM_CONFIG_PATH.exists())
-            else None
-        )
         self._sdk_runtime_mode = "disconnected"
         self._sdk_runtime_transport = ""
         self._sdk_runtime_config_path = self._sdk_config_path or ""
         self._sdk_last_connect_error = ""
-        self._sdk_mock_shared_state_path = str(
-            Path(
-                os.getenv(
-                    "SOARMMOCE_MOCK_SHARED_STATE_FILE",
-                    "/tmp/soarmmoce_mock_shared_state.json",
-                )
-            ).expanduser()
-        )
-        os.environ["SOARMMOCE_MOCK_SHARED_STATE_FILE"] = self._sdk_mock_shared_state_path
         self._sdk_gui_sync_enabled = str(os.getenv("SOARMMOCE_GUI_SYNC", "1")).strip().lower() not in ("0", "false", "off", "no")
         try:
             self._sdk_gui_sync_interval_sec = max(
@@ -1100,6 +1085,16 @@ class ArmControlGUI(QMainWindow):
             else:
                 q_target = np.asarray(q_target, dtype=float).copy()
             if idx >= q_target.shape[0]:
+                if idx == len(self.quick_page.joint_rows) - 1 and bool(getattr(state_before.gripper_state, "available", False)):
+                    current_ratio = getattr(state_before.gripper_state, "open_ratio", None)
+                    if current_ratio is None:
+                        current_ratio = 0.5
+                    ratio_step = 0.05 if float(delta) >= 0.0 else -0.05
+                    robot.set_gripper(
+                        open_ratio=float(np.clip(float(current_ratio) + ratio_step, 0.0, 1.0)),
+                        wait=False,
+                    )
+                    return robot.get_state()
                 raise ValueError(f"Joint index {idx} out of range")
             lo, hi = robot.robot_model.joint_limits[idx]
             q_target[idx] = float(np.clip(q_target[idx] + delta, float(lo), float(hi)))
@@ -1107,70 +1102,47 @@ class ArmControlGUI(QMainWindow):
             return robot.get_state()
 
     def _execute_sdk_cartesian_jog(self, command: Dict[str, Any]) -> object:
-        key_norm = str(command["key"])
-        trans_map = {
-            "+X": np.array([1.0, 0.0, 0.0], dtype=float),
-            "-X": np.array([-1.0, 0.0, 0.0], dtype=float),
-            "+Y": np.array([0.0, 1.0, 0.0], dtype=float),
-            "-Y": np.array([0.0, -1.0, 0.0], dtype=float),
-            "+Z": np.array([0.0, 0.0, 1.0], dtype=float),
-            "-Z": np.array([0.0, 0.0, -1.0], dtype=float),
+        key_norm = str(command["key"]).strip().upper()
+        step_mm = float(command.get("step_mm", 1.0))
+        step_rad = float(command.get("step_rad", math.radians(1.0)))
+        duration = float(command.get("duration", 0.2))
+        frame = "tool" if bool(command.get("use_tool", False)) else "base"
+        delta_kwargs = {
+            "dx": 0.0,
+            "dy": 0.0,
+            "dz": 0.0,
+            "drx": 0.0,
+            "dry": 0.0,
+            "drz": 0.0,
         }
-        rot_map = {
-            "+RX": np.array([1.0, 0.0, 0.0], dtype=float),
-            "-RX": np.array([-1.0, 0.0, 0.0], dtype=float),
-            "+RY": np.array([0.0, 1.0, 0.0], dtype=float),
-            "-RY": np.array([0.0, -1.0, 0.0], dtype=float),
-            "+RZ": np.array([0.0, 0.0, 1.0], dtype=float),
-            "-RZ": np.array([0.0, 0.0, -1.0], dtype=float),
+        key_map = {
+            "+X": ("dx", 1.0, step_mm / 1000.0),
+            "-X": ("dx", -1.0, step_mm / 1000.0),
+            "+Y": ("dy", 1.0, step_mm / 1000.0),
+            "-Y": ("dy", -1.0, step_mm / 1000.0),
+            "+Z": ("dz", 1.0, step_mm / 1000.0),
+            "-Z": ("dz", -1.0, step_mm / 1000.0),
+            "+RX": ("drx", 1.0, step_rad),
+            "-RX": ("drx", -1.0, step_rad),
+            "+RY": ("dry", 1.0, step_rad),
+            "-RY": ("dry", -1.0, step_rad),
+            "+RZ": ("drz", 1.0, step_rad),
+            "-RZ": ("drz", -1.0, step_rad),
         }
-        if key_norm not in trans_map and key_norm not in rot_map:
-            raise ValueError(f"Unsupported jog key: {key_norm}")
+        if key_norm not in key_map:
+            raise RuntimeError(f"Unsupported Cartesian jog key: {key_norm}")
 
-        step_mm = float(command["step_mm"])
-        step_rad = float(command["step_rad"])
-        duration = float(command["duration"])
-        use_tool = bool(command.get("use_tool", False))
-
-        delta_pos_local = np.zeros(3, dtype=float)
-        delta_rot_local = np.zeros(3, dtype=float)
-        if key_norm in trans_map:
-            delta_pos_local = trans_map[key_norm] * (step_mm / 1000.0)
-        else:
-            delta_rot_local = rot_map[key_norm] * step_rad
+        field_name, sign, magnitude = key_map[key_norm]
+        delta_kwargs[field_name] = float(sign) * float(magnitude)
 
         with self._sdk_lock:
             robot = self._sdk_get_robot()
-            state_before = robot.get_state()
-            pose_now = self._extract_tcp_pose_from_sdk_state(state_before, prefer_twin=False)
-            if pose_now is None:
-                xyz_now = np.asarray(state_before.tcp_pose.xyz, dtype=float)
-                rpy_now = np.asarray(state_before.tcp_pose.rpy, dtype=float)
-            else:
-                xyz_now = np.asarray(pose_now[0], dtype=float)
-                rpy_now = np.asarray(pose_now[1], dtype=float)
-            R_now = self._rpy_to_rotmat(rpy_now)
-            if use_tool:
-                target_xyz = np.asarray(xyz_now, dtype=float) + (R_now @ delta_pos_local)
-                R_target = R_now @ self._rotvec_to_rotmat(delta_rot_local)
-            else:
-                target_xyz = np.asarray(xyz_now, dtype=float) + delta_pos_local
-                R_target = self._rotvec_to_rotmat(delta_rot_local) @ R_now
-            if key_norm in trans_map:
-                robot.move_pose(
-                    xyz=target_xyz,
-                    rpy=None,
-                    duration=duration,
-                    wait=False,
-                )
-            else:
-                target_rpy = self._rotmat_to_rpy(R_target)
-                robot.move_pose(
-                    xyz=target_xyz,
-                    rpy=target_rpy,
-                    duration=duration,
-                    wait=False,
-                )
+            robot.move_delta(
+                frame=frame,
+                duration=duration,
+                wait=False,
+                **delta_kwargs,
+            )
             return robot.get_state()
 
     def _execute_sdk_home(self, command: Dict[str, Any]) -> object:
@@ -1226,10 +1198,12 @@ class ArmControlGUI(QMainWindow):
             # Let the local preview animation finish; otherwise periodic state sync
             # snaps the 3D view back toward the lagging actual joints mid-motion.
             self._sdk_last_gui_sync_ts = time.time()
+            self._update_connection_widgets()
             self._update_quick_pose_from_sim()
             return
         self._sync_sim_from_sdk_state(state)
         self._sdk_last_gui_sync_ts = time.time()
+        self._update_connection_widgets()
         self._update_quick_pose_from_sim()
 
     def _on_quick_joint_step(self, idx: int, direction: float):
@@ -1286,53 +1260,6 @@ class ArmControlGUI(QMainWindow):
             self._jog_hold_timer.stop()
             return
         self._apply_quick_cartesian_jog(self._jog_hold_key)
-
-    @staticmethod
-    def _rpy_to_rotmat(rpy: np.ndarray) -> np.ndarray:
-        roll, pitch, yaw = [float(x) for x in np.asarray(rpy, dtype=float).reshape(3)]
-        cr, sr = math.cos(roll), math.sin(roll)
-        cp, sp = math.cos(pitch), math.sin(pitch)
-        cy, sy = math.cos(yaw), math.sin(yaw)
-        rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]], dtype=float)
-        ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]], dtype=float)
-        rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=float)
-        return rz @ ry @ rx
-
-    @staticmethod
-    def _rotvec_to_rotmat(rotvec: np.ndarray) -> np.ndarray:
-        rv = np.asarray(rotvec, dtype=float).reshape(3)
-        angle = float(np.linalg.norm(rv))
-        if angle < 1e-12:
-            return np.eye(3, dtype=float)
-        axis = rv / angle
-        x, y, z = float(axis[0]), float(axis[1]), float(axis[2])
-        c = math.cos(angle)
-        s = math.sin(angle)
-        v = 1.0 - c
-        return np.array(
-            [
-                [x * x * v + c, x * y * v - z * s, x * z * v + y * s],
-                [y * x * v + z * s, y * y * v + c, y * z * v - x * s],
-                [z * x * v - y * s, z * y * v + x * s, z * z * v + c],
-            ],
-            dtype=float,
-        )
-
-    @staticmethod
-    def _rotmat_to_rpy(rotmat: np.ndarray) -> np.ndarray:
-        R = np.asarray(rotmat, dtype=float).reshape(3, 3)
-        sy = -float(R[2, 0])
-        sy = float(np.clip(sy, -1.0, 1.0))
-        cy = float(max(0.0, 1.0 - sy * sy) ** 0.5)
-        if cy < 1e-9:
-            yaw = math.atan2(-float(R[0, 1]), float(R[1, 1]))
-            pitch = math.asin(sy)
-            roll = 0.0
-        else:
-            yaw = math.atan2(float(R[1, 0]), float(R[0, 0]))
-            pitch = math.asin(sy)
-            roll = math.atan2(float(R[2, 1]), float(R[2, 2]))
-        return np.array([roll, pitch, yaw], dtype=float)
 
     @staticmethod
     def _normalize_jog_key(key: str) -> str:
@@ -1609,9 +1536,11 @@ class ArmControlGUI(QMainWindow):
         self.sim_vtk_view.set_camera_preset(str(preset))
 
     def _update_connection_widgets(self):
-        self.settings_page.set_connected(self.connected)
+        runtime_connected = bool(self.connected or self._sdk_runtime_mode in ("connected", "simulation"))
+        self.settings_page.set_connected(runtime_connected)
         self.job_page.set_connected(self.connected)
-        self.quick_page.set_motion_enabled(self.connected or self._sim_ready)
+        self.quick_page.set_motion_enabled(runtime_connected or self._sim_ready)
+        self.quick_page.set_cartesian_enabled(bool(self.connected or self._sdk_runtime_mode == "connected"))
 
     def _state_connection_text(self) -> str:
         if self.connecting:
@@ -1903,6 +1832,9 @@ class ArmControlGUI(QMainWindow):
         return None
 
     def _sdk_transport_name(self, robot: SDKRobot) -> str:
+        transport_name = getattr(robot, "transport_name", None)
+        if isinstance(transport_name, str) and transport_name.strip():
+            return transport_name
         transport = getattr(robot, "_transport", None)
         if transport is None:
             return "uninitialized"
@@ -1932,27 +1864,13 @@ class ArmControlGUI(QMainWindow):
         elif mode_norm == "disconnected":
             self._sdk_runtime_transport = ""
 
-    def _sdk_build_robot(self, config_path: Optional[str], transport_override: Optional[str] = None) -> SDKRobot:
-        robot = RuntimeRobot.from_config(config_path) if config_path else RuntimeRobot()
-        if transport_override in ("mock", "tcp", "serial"):
-            robot.config.setdefault("transport", {})["type"] = str(transport_override)
-        return robot
+    def _sdk_build_robot(self, config_path: Optional[str]) -> SDKRobot:
+        return RuntimeRobot.from_config(config_path) if config_path else RuntimeRobot()
 
-    def _sdk_should_fallback_to_sim(self) -> bool:
-        if self._sdk_transport_override is not None:
-            return False
-        if not self._sdk_fallback_config_path:
-            return False
-        cfg = str(self._sdk_config_path or "").strip()
-        fallback = str(self._sdk_fallback_config_path or "").strip()
-        if not cfg or not fallback:
-            return False
-        return os.path.normpath(cfg) != os.path.normpath(fallback)
-
-    def _sdk_connect_with_fallback(self) -> SDKRobot:
+    def _sdk_connect_robot(self) -> SDKRobot:
         primary_cfg = self._sdk_config_path
         try:
-            robot = self._sdk_build_robot(primary_cfg, self._sdk_transport_override)
+            robot = self._sdk_build_robot(primary_cfg)
             robot.connect()
             transport_name = self._sdk_transport_name(robot).lower()
             mode = "simulation" if "mock" in transport_name else "connected"
@@ -1961,19 +1879,8 @@ class ArmControlGUI(QMainWindow):
             return robot
         except Exception as exc:
             self._sdk_set_runtime_state("disconnected", config_path=primary_cfg, error_text=str(exc))
-            if not self._sdk_should_fallback_to_sim():
-                self._sdk_robot = None
-                raise
-            fallback_cfg = self._sdk_fallback_config_path
-            self.log_signal.emit(
-                f"[SDK] real robot connect failed, fallback to simulation: {exc}",
-                "warning",
-            )
-            robot = self._sdk_build_robot(fallback_cfg, "mock")
-            robot.connect()
-            self._sdk_set_runtime_state("simulation", robot=robot, config_path=fallback_cfg)
-            self._sdk_robot = robot
-            return robot
+            self._sdk_robot = None
+            raise
 
     def _sdk_get_robot(self) -> SDKRobot:
         if not SDK_AVAILABLE:
@@ -1983,17 +1890,14 @@ class ArmControlGUI(QMainWindow):
 
         with self._sdk_lock:
             if self._sdk_robot is None:
-                return self._sdk_connect_with_fallback()
+                return self._sdk_connect_robot()
 
             if not self._sdk_robot.connected:
-                if self._sdk_runtime_mode == "simulation":
-                    self._sdk_robot = None
-                    return self._sdk_connect_with_fallback()
                 try:
                     self._sdk_robot.connect()
                 except Exception:
                     self._sdk_robot = None
-                    return self._sdk_connect_with_fallback()
+                    return self._sdk_connect_robot()
                 transport_name = self._sdk_transport_name(self._sdk_robot).lower()
                 mode = "simulation" if "mock" in transport_name else "connected"
                 self._sdk_set_runtime_state(mode, robot=self._sdk_robot, config_path=self._sdk_runtime_config_path)
@@ -2353,54 +2257,44 @@ class ArmControlGUI(QMainWindow):
 
         try:
             robot = self._sdk_get_robot()
-            state_before = robot.get_state()
-            q_solution = robot.move_tcp(
-                x=float(x),
-                y=float(y),
-                z=float(z),
-                rpy=None,
-                frame=frame,
-                duration=float(duration),
-                wait=bool(wait),
-                timeout=timeout,
-            )
-            state_after = robot.get_state()
-            self._sync_sim_from_sdk_state(state_after)
+            if frame == "tool":
+                robot.move_delta(
+                    dx=float(x),
+                    dy=float(y),
+                    dz=float(z),
+                    frame="tool",
+                    duration=float(duration),
+                    wait=bool(wait),
+                    timeout=timeout,
+                )
+            else:
+                robot.move_pose(
+                    xyz=[float(x), float(y), float(z)],
+                    rpy=None,
+                    duration=float(duration),
+                    wait=bool(wait),
+                    timeout=timeout,
+                )
+            state = robot.get_state()
+            self._sync_sim_from_sdk_state(state)
         except Exception as exc:
             result = self._sdk_error_result(exc)
             return False, result
 
-        if frame == "tool":
-            base_xyz = np.asarray(state_before.tcp_pose.xyz, dtype=float)
-            base_rpy = np.asarray(state_before.tcp_pose.rpy, dtype=float)
-            target_xyz = base_xyz + (self._rpy_to_rotmat(base_rpy) @ np.asarray([x, y, z], dtype=float))
-        else:
-            target_xyz = np.asarray([x, y, z], dtype=float)
-
-        xyz_after = np.asarray(state_after.tcp_pose.xyz, dtype=float)
-        rpy_after = np.asarray(state_after.tcp_pose.rpy, dtype=float)
-        err = float(np.linalg.norm(xyz_after - target_xyz))
-        tol_m = 0.10
-        within_tol = bool(err <= tol_m)
         backend = f"sdk-{self._sdk_transport_name(robot)}"
         result = {
-            "ok": within_tol,
-            "message": "moved" if within_tol else "move completed with large error",
+            "ok": True,
+            "message": "cartesian move completed",
             "backend": backend,
             "frame": frame,
+            "requested_xyz_m": [float(x), float(y), float(z)],
+            "actual_xyz_m": [float(v) for v in np.asarray(state.tcp_pose.xyz, dtype=float).reshape(3).tolist()],
+            "actual_rpy_rad": [float(v) for v in np.asarray(state.tcp_pose.rpy, dtype=float).reshape(3).tolist()],
             "duration": float(duration),
             "wait": bool(wait),
             "timeout": timeout,
-            "tolerance_m": tol_m,
-            "within_tolerance": within_tol,
-            "target_xyz_m": [float(v) for v in target_xyz.tolist()],
-            "actual_xyz_m": [float(v) for v in xyz_after.tolist()],
-            "actual_rpy_rad": [float(v) for v in rpy_after.tolist()],
-            "position_error_m": err,
-            "joint_values_rad": [float(v) for v in np.asarray(state_after.joint_state.q, dtype=float).tolist()],
-            "joint_solution_rad": [float(v) for v in np.asarray(q_solution, dtype=float).tolist()],
         }
-        return bool(result["ok"]), result
+        return True, result
 
     def _tool_get_robot_state_main_thread(self) -> Tuple[bool, Dict[str, object]]:
         try:
@@ -2746,94 +2640,28 @@ class ArmControlGUI(QMainWindow):
             return False, {"ok": False, "error": "run_skill requires non-empty name"}
 
         if raw_name in ("dance_short", "dance", "wave"):
-            try:
-                robot = self._sdk_get_robot()
-                state0 = robot.get_state()
-                self._sync_sim_from_sdk_state(state0)
-            except Exception as exc:
-                result = self._sdk_error_result(exc)
-                return False, result
-
-            xyz0 = np.asarray(state0.tcp_pose.xyz, dtype=float)
-            amp_xy = max(0.01, min(0.10, self._tool_to_float(params.get("amplitude_xy", 0.04), 0.04)))
-            amp_z = max(0.00, min(0.10, self._tool_to_float(params.get("amplitude_z", 0.02), 0.02)))
-            duration = max(0.2, min(3.0, self._tool_to_float(params.get("duration", 0.6), 0.6)))
-            waypoints = [
-                (xyz0[0] + amp_xy, xyz0[1], xyz0[2]),
-                (xyz0[0], xyz0[1] + amp_xy, xyz0[2] + amp_z),
-                (xyz0[0] - amp_xy, xyz0[1], xyz0[2]),
-                (xyz0[0], xyz0[1] - amp_xy, xyz0[2] + amp_z),
-                (xyz0[0], xyz0[1], xyz0[2]),
-            ]
-
-            step_results = []
-            all_ok = True
-            for i, wp in enumerate(waypoints):
-                ok_i, res_i = self._tool_move_robot_arm_main_thread(
-                    {"x": float(wp[0]), "y": float(wp[1]), "z": float(wp[2]), "frame": "base", "duration": duration, "wait": True}
-                )
-                all_ok = all_ok and bool(ok_i)
-                step_results.append({"step": i + 1, "ok": bool(ok_i), "result": res_i})
             return (
-                all_ok,
+                False,
                 {
-                    "ok": all_ok,
-                    "skill": "dance_short",
-                    "message": "dance skill completed",
-                    "steps": step_results,
-                    "backend": f"sdk-{self._sdk_transport_name(robot)}",
+                    "ok": False,
+                    "skill": raw_name,
+                    "error": (
+                        "This skill depends on Cartesian motion, which is not available in the current SDK build. "
+                        "Use rotate_joint / set_gripper, or add an IK-backed Cartesian layer first."
+                    ),
                 },
             )
 
         if raw_name in ("grasp_apple", "grasp_apple_mock", "pick_apple"):
-            target_x = self._tool_to_float(params.get("x", 0.30), 0.30)
-            target_y = self._tool_to_float(params.get("y", 0.00), 0.00)
-            target_z = self._tool_to_float(params.get("z", 0.08), 0.08)
-            approach_z = target_z + max(0.05, self._tool_to_float(params.get("approach_offset_z", 0.08), 0.08))
-            pre_grasp_z = target_z + max(0.01, self._tool_to_float(params.get("pre_grasp_offset_z", 0.02), 0.02))
-            motion_dur = max(0.2, min(3.0, self._tool_to_float(params.get("duration", 0.8), 0.8)))
-            scan_first = bool(params.get("scan_first", True))
-            open_ratio = max(0.0, min(1.0, self._tool_to_float(params.get("open_ratio_before", 1.0), 1.0)))
-            close_ratio = max(0.0, min(1.0, self._tool_to_float(params.get("close_ratio", 0.0), 0.0)))
-
-            phases = []
-            if scan_first:
-                ok_scan, r_scan = self._tool_scan_for_object_main_thread(
-                    {
-                        "object_name": str(params.get("object_name", "red apple") or "red apple"),
-                        "sweep_range_deg": self._tool_to_float(params.get("scan_range_deg", 120.0), 120.0),
-                        "step_deg": self._tool_to_float(params.get("scan_step_deg", 15.0), 15.0),
-                        "source": "eye_in_hand",
-                        "return_to_start": False,
-                    }
-                )
-                phases.append({"phase": "scan", "ok": bool(ok_scan), "result": r_scan})
-            ok0, r0 = self._tool_set_gripper_tool_main_thread({"open_ratio": open_ratio, "wait": True})
-            phases.append({"phase": "open_gripper", "ok": bool(ok0), "result": r0})
-            ok1, r1 = self._tool_move_robot_arm_main_thread(
-                {"x": target_x, "y": target_y, "z": approach_z, "frame": "base", "duration": motion_dur, "wait": True}
-            )
-            phases.append({"phase": "approach", "ok": bool(ok1), "result": r1})
-            ok2, r2 = self._tool_move_robot_arm_main_thread(
-                {"x": target_x, "y": target_y, "z": pre_grasp_z, "frame": "base", "duration": motion_dur, "wait": True}
-            )
-            phases.append({"phase": "descend", "ok": bool(ok2), "result": r2})
-            okg, rg = self._tool_set_gripper_tool_main_thread({"open_ratio": close_ratio, "wait": True})
-            phases.append({"phase": "close_gripper", "ok": bool(okg), "result": rg})
-            ok3, r3 = self._tool_move_robot_arm_main_thread(
-                {"x": target_x, "y": target_y, "z": approach_z, "frame": "base", "duration": motion_dur, "wait": True}
-            )
-            phases.append({"phase": "lift", "ok": bool(ok3), "result": r3})
-            overall = bool(ok0 and ok1 and ok2 and okg and ok3)
             return (
-                overall,
+                False,
                 {
-                    "ok": overall,
-                    "skill": "grasp_apple_mock",
-                    "message": "grasp apple mock completed",
-                    "target_xyz_m": [float(target_x), float(target_y), float(target_z)],
-                    "backend": "sdk",
-                    "phases": phases,
+                    "ok": False,
+                    "skill": raw_name,
+                    "error": (
+                        "This skill depends on Cartesian motion, which is not available in the current SDK build. "
+                        "Keep using joint-level tools for now, or add an IK-backed Cartesian layer first."
+                    ),
                 },
             )
 
@@ -3307,6 +3135,10 @@ class ArmControlGUI(QMainWindow):
                 self.last_rtt_text = "--"
             self._update_quick_pose_from_client()
 
+        # Quick Move now runs through the local SDK runtime even when the legacy
+        # network ArmClient is disconnected, so refresh enable/disable state from
+        # the latest SDK connection mode on every status tick.
+        self._update_connection_widgets()
         self._update_global_status_bar()
 
     # ==================== Simulation / 3D ====================

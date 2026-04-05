@@ -190,6 +190,10 @@ class QuickMovePage(QWidget):
 
         root.addLayout(bottom)
 
+        self._motion_enabled = False
+        self._cartesian_motion_enabled = False
+        self._refresh_motion_controls()
+
     def _make_jog_key(
         self,
         key: str,
@@ -431,14 +435,32 @@ class QuickMovePage(QWidget):
         self.sim_host_layout.addWidget(sim_widget)
 
     def set_motion_enabled(self, enabled: bool):
+        self._motion_enabled = bool(enabled)
+        self._refresh_motion_controls()
+
+    def set_cartesian_enabled(self, enabled: bool):
+        self._cartesian_motion_enabled = bool(enabled)
+        self._refresh_motion_controls()
+
+    def _refresh_motion_controls(self):
+        motion_enabled = bool(self._motion_enabled)
+        cartesian_enabled = bool(motion_enabled and self._cartesian_motion_enabled)
+
         for _, minus_btn, _, plus_btn in self.joint_rows:
-            minus_btn.setEnabled(enabled)
-            plus_btn.setEnabled(enabled)
+            minus_btn.setEnabled(motion_enabled)
+            plus_btn.setEnabled(motion_enabled)
+
+        self.goto_origin_btn.setEnabled(motion_enabled)
+        self.goto_zero_btn.setEnabled(motion_enabled)
+        self.step_angle_spin.setEnabled(motion_enabled)
+
         for btn in self.jog_buttons.values():
-            btn.setEnabled(enabled)
-        self.goto_origin_btn.setEnabled(enabled)
-        self.goto_zero_btn.setEnabled(enabled)
-        self.free_move_btn.setEnabled(enabled)
+            btn.setEnabled(cartesian_enabled)
+        self.step_mode_combo.setEnabled(cartesian_enabled)
+        self.step_dist_spin.setEnabled(cartesian_enabled)
+        self.coord_label.setEnabled(cartesian_enabled)
+        self.coord_combo.setEnabled(cartesian_enabled)
+        self.free_move_btn.setEnabled(cartesian_enabled)
 
     def set_status_light(self, level: str):
         color = {
