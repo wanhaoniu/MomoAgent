@@ -50,7 +50,8 @@ DEFAULT_LIMIT_MARGIN_RAW = 60
 DEFAULT_STICTION_EPS_DEG = 0.15
 DEFAULT_STICTION_FRAMES = 3
 DEFAULT_PAN_BREAKAWAY_STEP_DEG = 1.8
-DEFAULT_PAN_BREAKAWAY_STEP_NEG_DEG = 2.4
+DEFAULT_PAN_BREAKAWAY_STEP_NEG_DEG = 3.2
+DEFAULT_PAN_NEGATIVE_SCALE = 1.45
 DEFAULT_TILT_BREAKAWAY_STEP_DEG = 1.8
 
 
@@ -137,6 +138,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_PAN_BREAKAWAY_STEP_NEG_DEG,
         help="Optional pan breakaway step for negative commands. Defaults slightly higher because that side can need extra push.",
+    )
+    parser.add_argument(
+        "--pan-negative-scale",
+        type=float,
+        default=DEFAULT_PAN_NEGATIVE_SCALE,
+        help="Extra scale applied only to negative pan commands to compensate the slower/stickier side.",
     )
     parser.add_argument("--tilt-breakaway-step", type=float, default=DEFAULT_TILT_BREAKAWAY_STEP_DEG)
     parser.add_argument("--dry-run", action="store_true", help="Print intended joint updates without moving hardware.")
@@ -446,6 +453,13 @@ def main() -> int:
                 max_step_deg=float(args.max_pan_step),
                 sign=float(args.pan_sign),
             )
+            if pan_step_deg < 0.0:
+                negative_scale = max(1.0, float(args.pan_negative_scale))
+                pan_step_deg = _clamp(
+                    pan_step_deg * negative_scale,
+                    -abs(float(args.max_pan_step)) * negative_scale,
+                    abs(float(args.max_pan_step)),
+                )
             tilt_step_deg = _compute_joint_step(
                 axis_state=tilt_axis_state,
                 normalized_offset=ndy,

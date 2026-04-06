@@ -1,0 +1,683 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MomoAgent Agent Stream Test</title>
+    <style>
+      :root {
+        --bg: #f5efe4;
+        --panel: rgba(255, 250, 241, 0.94);
+        --panel-strong: #fffdf8;
+        --line: #d8c6a8;
+        --ink: #1f1a16;
+        --muted: rgba(31, 26, 22, 0.7);
+        --accent: #9a3412;
+        --accent-2: #b45309;
+        --good: #166534;
+        --warn: #9a3412;
+        --bad: #b91c1c;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        color: var(--ink);
+        font-family: "Noto Sans SC", "Source Han Sans SC", sans-serif;
+        background:
+          radial-gradient(circle at top right, rgba(154, 52, 18, 0.14), transparent 26%),
+          radial-gradient(circle at bottom left, rgba(180, 83, 9, 0.08), transparent 28%),
+          linear-gradient(180deg, #f8f2e7 0%, var(--bg) 100%);
+      }
+
+      main {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 28px 18px 40px;
+      }
+
+      .hero {
+        padding: 22px 24px;
+        border: 1px solid var(--line);
+        border-radius: 26px;
+        background: var(--panel);
+        box-shadow: 0 18px 42px rgba(72, 49, 25, 0.08);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(28px, 4vw, 42px);
+        line-height: 1.05;
+      }
+
+      .subtitle {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+        gap: 18px;
+        margin-top: 18px;
+      }
+
+      .panel {
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        background: var(--panel);
+        box-shadow: 0 14px 32px rgba(72, 49, 25, 0.06);
+      }
+
+      .panel-title {
+        margin: 0 0 12px;
+        font-size: 15px;
+        font-weight: 800;
+        letter-spacing: 0.02em;
+      }
+
+      label {
+        display: block;
+        margin: 12px 0 6px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      input,
+      textarea,
+      button {
+        width: 100%;
+        border-radius: 14px;
+        font: inherit;
+      }
+
+      input,
+      textarea {
+        padding: 12px 14px;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+      }
+
+      textarea {
+        min-height: 120px;
+        resize: vertical;
+      }
+
+      .actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      button {
+        padding: 12px 14px;
+        border: none;
+        font-weight: 700;
+        cursor: pointer;
+        color: white;
+        background: linear-gradient(135deg, var(--accent-2), var(--accent));
+        box-shadow: 0 10px 22px rgba(154, 52, 18, 0.18);
+      }
+
+      button.secondary {
+        background: linear-gradient(135deg, #475569, #334155);
+        box-shadow: 0 10px 22px rgba(51, 65, 85, 0.18);
+      }
+
+      button.ghost {
+        background: linear-gradient(135deg, #6b7280, #4b5563);
+        box-shadow: 0 10px 22px rgba(75, 85, 99, 0.18);
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.66;
+      }
+
+      .inline {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 14px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .inline input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        margin: 0;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(154, 52, 18, 0.10);
+        color: var(--accent);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .status-pill.good {
+        background: rgba(22, 101, 52, 0.10);
+        color: var(--good);
+      }
+
+      .status-pill.bad {
+        background: rgba(185, 28, 28, 0.10);
+        color: var(--bad);
+      }
+
+      .stack {
+        display: grid;
+        gap: 18px;
+      }
+
+      .log,
+      .reply {
+        min-height: 180px;
+        padding: 14px;
+        border: 1px dashed var(--line);
+        border-radius: 18px;
+        background: var(--panel-strong);
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.6;
+      }
+
+      .log {
+        max-height: 440px;
+        overflow: auto;
+        font-family: "SFMono-Regular", "JetBrains Mono", monospace;
+        font-size: 12px;
+      }
+
+      .meta-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .meta {
+        padding: 12px;
+        border-radius: 16px;
+        background: rgba(255, 253, 248, 0.85);
+        border: 1px solid rgba(216, 198, 168, 0.9);
+      }
+
+      .meta small {
+        display: block;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+
+      .meta strong {
+        display: block;
+        font-size: 18px;
+      }
+
+      .hint {
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      @media (max-width: 960px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        .meta-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <div id="statusPill" class="status-pill">未连接</div>
+        <h1>Agent Stream Test</h1>
+        <p class="subtitle">
+          这个页面会直接连接 `WS /api/v1/ws/agent-stream`，显示 agent 事件、TTS 片段，
+          并把 `audio_chunk` 里的 PCM16 音频实时播放出来。
+        </p>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <h2 class="panel-title">控制</h2>
+
+          <label for="serverBase">服务地址</label>
+          <input id="serverBase" />
+
+          <label for="messageInput">消息内容</label>
+          <textarea id="messageInput">你好，请用两三句自然中文介绍一下你自己。</textarea>
+
+          <div class="inline">
+            <input id="withTts" type="checkbox" checked />
+            <span>发送后同时请求流式 TTS</span>
+          </div>
+
+          <div class="inline">
+            <input id="compactMode" type="checkbox" checked />
+            <span>简洁模式：隐藏 `tts_llm_delta` 和 `audio_chunk` 调试日志</span>
+          </div>
+
+          <div class="actions">
+            <button id="connectBtn" type="button">连接</button>
+            <button id="disconnectBtn" class="secondary" type="button">断开</button>
+            <button id="statusBtn" class="ghost" type="button">读取状态</button>
+            <button id="askBtn" type="button">发送 Ask</button>
+            <button id="pingBtn" class="ghost" type="button">Ping</button>
+            <button id="clearBtn" class="secondary" type="button">清空日志</button>
+          </div>
+
+          <p class="hint">
+            如果你是从别的设备访问这个页面，请把服务地址改成控制器电脑的局域网 IP，
+            不要使用 `127.0.0.1`。
+          </p>
+        </div>
+
+        <div class="stack">
+          <section class="panel">
+            <h2 class="panel-title">回合摘要</h2>
+            <div class="meta-grid">
+              <div class="meta">
+                <small>收到音频块</small>
+                <strong id="audioChunkCount">0</strong>
+              </div>
+              <div class="meta">
+                <small>TTS 采样率</small>
+                <strong id="sampleRateText">--</strong>
+              </div>
+              <div class="meta">
+                <small>最后 TTS 状态</small>
+                <strong id="ttsStateText">--</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2 class="panel-title">Agent Reply</h2>
+            <div id="replyBox" class="reply">等待消息。</div>
+          </section>
+
+          <section class="panel">
+            <h2 class="panel-title">TTS Segments</h2>
+            <div id="ttsSegmentsBox" class="reply">等待 TTS 分段。</div>
+          </section>
+
+          <section class="panel">
+            <h2 class="panel-title">事件日志</h2>
+            <div id="logBox" class="log">等待连接。</div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const serverBaseInput = document.getElementById("serverBase");
+      const messageInput = document.getElementById("messageInput");
+      const withTtsInput = document.getElementById("withTts");
+      const compactModeInput = document.getElementById("compactMode");
+      const connectBtn = document.getElementById("connectBtn");
+      const disconnectBtn = document.getElementById("disconnectBtn");
+      const statusBtn = document.getElementById("statusBtn");
+      const askBtn = document.getElementById("askBtn");
+      const pingBtn = document.getElementById("pingBtn");
+      const clearBtn = document.getElementById("clearBtn");
+      const statusPill = document.getElementById("statusPill");
+      const logBox = document.getElementById("logBox");
+      const replyBox = document.getElementById("replyBox");
+      const ttsSegmentsBox = document.getElementById("ttsSegmentsBox");
+      const audioChunkCount = document.getElementById("audioChunkCount");
+      const sampleRateText = document.getElementById("sampleRateText");
+      const ttsStateText = document.getElementById("ttsStateText");
+
+      let ws = null;
+      let audioContext = null;
+      let nextPlayTime = 0;
+      let activeSources = new Set();
+      let chunkCount = 0;
+      let finishStateTimer = null;
+      const MIN_AUDIO_LEAD_SEC = 0.12;
+      const END_OF_STREAM_PAD_SEC = 0.12;
+
+      function defaultBaseUrl() {
+        return `${window.location.protocol}//${window.location.host}`;
+      }
+
+      function appendLog(payload) {
+        const now = new Date().toLocaleTimeString();
+        const text =
+          typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+        logBox.textContent += `${logBox.textContent ? "\n\n" : ""}[${now}] ${text}`;
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+
+      function appendSegment(text) {
+        const content = String(text || "").trim();
+        if (!content) {
+          return;
+        }
+        if (
+          ttsSegmentsBox.textContent === "等待 TTS 分段。" ||
+          ttsSegmentsBox.textContent === "未请求"
+        ) {
+          ttsSegmentsBox.textContent = content;
+          return;
+        }
+        ttsSegmentsBox.textContent += `\n${content}`;
+      }
+
+      function clearFinishStateTimer() {
+        if (finishStateTimer) {
+          clearTimeout(finishStateTimer);
+          finishStateTimer = null;
+        }
+      }
+
+      function setStatus(text, tone = "normal") {
+        statusPill.textContent = text;
+        statusPill.className = "status-pill";
+        if (tone === "good") {
+          statusPill.classList.add("good");
+        } else if (tone === "bad") {
+          statusPill.classList.add("bad");
+        }
+      }
+
+      function wsUrlFromBase(baseUrl) {
+        const url = new URL(baseUrl);
+        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+        url.pathname = "/api/v1/ws/agent-stream";
+        url.search = "";
+        url.hash = "";
+        return url.toString();
+      }
+
+      function resetTurnMetrics() {
+        clearFinishStateTimer();
+        chunkCount = 0;
+        audioChunkCount.textContent = "0";
+        sampleRateText.textContent = "--";
+        ttsStateText.textContent = "--";
+        ttsSegmentsBox.textContent = withTtsInput.checked ? "等待 TTS 分段。" : "未请求";
+      }
+
+      function stopScheduledAudio() {
+        clearFinishStateTimer();
+        for (const source of activeSources) {
+          try {
+            source.stop();
+          } catch (_error) {
+          }
+        }
+        activeSources = new Set();
+        if (audioContext) {
+          nextPlayTime = audioContext.currentTime;
+        } else {
+          nextPlayTime = 0;
+        }
+      }
+
+      function settleFinalTtsState(text) {
+        const content = String(text || "").trim() || "done";
+        clearFinishStateTimer();
+        if (!audioContext) {
+          ttsStateText.textContent = content;
+          return;
+        }
+        const remainingSec = Math.max(
+          0,
+          Number(nextPlayTime || 0) - Number(audioContext.currentTime || 0) + END_OF_STREAM_PAD_SEC
+        );
+        if (remainingSec <= 0.02) {
+          ttsStateText.textContent = content;
+          return;
+        }
+        ttsStateText.textContent = "收尾中";
+        finishStateTimer = window.setTimeout(() => {
+          finishStateTimer = null;
+          ttsStateText.textContent = content;
+        }, Math.round(remainingSec * 1000));
+      }
+
+      function base64ToArrayBuffer(base64) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) {
+          bytes[index] = binary.charCodeAt(index);
+        }
+        return bytes.buffer;
+      }
+
+      async function ensureAudioContext() {
+        if (!audioContext) {
+          audioContext = new AudioContext({ sampleRate: 44100 });
+          nextPlayTime = audioContext.currentTime;
+        }
+        await audioContext.resume();
+      }
+
+      async function schedulePcm16(base64, sampleRate) {
+        await ensureAudioContext();
+        const pcmBuffer = base64ToArrayBuffer(base64);
+        const pcm = new Int16Array(pcmBuffer);
+        const audioBuffer = audioContext.createBuffer(1, pcm.length, sampleRate);
+        const channel = audioBuffer.getChannelData(0);
+        for (let index = 0; index < pcm.length; index += 1) {
+          channel[index] = pcm[index] / 32768;
+        }
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        activeSources.add(source);
+        source.onended = () => activeSources.delete(source);
+        nextPlayTime = Math.max(nextPlayTime, audioContext.currentTime + MIN_AUDIO_LEAD_SEC);
+        source.start(nextPlayTime);
+        nextPlayTime += audioBuffer.duration;
+      }
+
+      function setButtonsConnected(connected) {
+        connectBtn.disabled = connected;
+        disconnectBtn.disabled = !connected;
+        statusBtn.disabled = !connected;
+        askBtn.disabled = !connected;
+        pingBtn.disabled = !connected;
+      }
+
+      function closeWs() {
+        if (!ws) {
+          return;
+        }
+        try {
+          ws.close();
+        } catch (_error) {
+        }
+        ws = null;
+      }
+
+      function handleEvent(event) {
+        if (event.type === "ready") {
+          appendLog(event);
+          setStatus("已连接", "good");
+          return;
+        }
+        if (event.type === "status") {
+          appendLog(event);
+          return;
+        }
+        if (event.type === "turn_started") {
+          appendLog(event);
+          resetTurnMetrics();
+          replyBox.textContent = "等待 agent 回复...";
+          ttsStateText.textContent = event.with_tts ? "准备中" : "未请求";
+          stopScheduledAudio();
+          return;
+        }
+        if (event.type === "agent_reply") {
+          appendLog(event);
+          const reply = event.data?.reply || "";
+          replyBox.textContent = reply || "(空回复)";
+          return;
+        }
+        if (event.type === "tts_started") {
+          appendLog(event);
+          ttsStateText.textContent = "已启动";
+          return;
+        }
+        if (event.type === "tts_unavailable") {
+          appendLog(event);
+          ttsStateText.textContent = event.data?.error || "不可用";
+          return;
+        }
+        if (event.type === "tts_session_ready") {
+          appendLog(event);
+          sampleRateText.textContent = String(event.sample_rate || "--");
+          ttsStateText.textContent = "流式中";
+          return;
+        }
+        if (event.type === "tts_llm_delta") {
+          if (!compactModeInput.checked) {
+            appendLog(event);
+          }
+          return;
+        }
+        if (event.type === "tts_segment") {
+          appendSegment(event.text);
+          appendLog(event);
+          return;
+        }
+        if (event.type === "tts_segment_done") {
+          appendLog(event);
+          return;
+        }
+        if (event.type === "audio_chunk") {
+          chunkCount += 1;
+          audioChunkCount.textContent = String(chunkCount);
+          sampleRateText.textContent = String(event.sample_rate || "--");
+          if (!compactModeInput.checked) {
+            appendLog({
+              type: "audio_chunk",
+              sample_rate: event.sample_rate,
+              num_samples: event.num_samples,
+              progress: event.progress,
+              chunk_index: chunkCount,
+            });
+          }
+          schedulePcm16(event.pcm16_base64, Number(event.sample_rate || 44100)).catch((error) => {
+            appendLog({ type: "audio_error", message: String(error?.message || error) });
+          });
+          return;
+        }
+        if (event.type === "done" || event.type === "turn_done") {
+          appendLog(event);
+          const finishReason =
+            event.finish_reason ||
+            event.data?.turn?.tts?.finish_reason ||
+            "done";
+          settleFinalTtsState(finishReason);
+          return;
+        }
+        if (event.type === "tts_warning") {
+          appendLog(event);
+          return;
+        }
+        if (event.type === "interrupted") {
+          appendLog(event);
+          settleFinalTtsState("interrupted");
+          return;
+        }
+        if (event.type === "error") {
+          appendLog(event);
+          setStatus("连接异常", "bad");
+          return;
+        }
+        appendLog(event);
+      }
+
+      function connectWs() {
+        closeWs();
+        stopScheduledAudio();
+        setStatus("连接中...");
+        const wsUrl = wsUrlFromBase(serverBaseInput.value.trim());
+        appendLog(`connecting ${wsUrl}`);
+        ws = new WebSocket(wsUrl);
+
+        ws.addEventListener("open", () => {
+          setButtonsConnected(true);
+        });
+
+        ws.addEventListener("message", (messageEvent) => {
+          try {
+            const data = JSON.parse(messageEvent.data);
+            handleEvent(data);
+          } catch (error) {
+            appendLog({
+              type: "parse_error",
+              message: String(error?.message || error),
+              raw: String(messageEvent.data || ""),
+            });
+          }
+        });
+
+        ws.addEventListener("close", (event) => {
+          appendLog({
+            type: "ws_close",
+            code: event.code,
+            reason: event.reason,
+          });
+          setButtonsConnected(false);
+          setStatus("已断开", "bad");
+          ws = null;
+        });
+
+        ws.addEventListener("error", () => {
+          appendLog({ type: "ws_error", message: "WebSocket 连接失败" });
+          setButtonsConnected(false);
+          setStatus("连接失败", "bad");
+        });
+      }
+
+      function sendJson(payload) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          appendLog({ type: "local_error", message: "请先连接 WebSocket" });
+          return;
+        }
+        ws.send(JSON.stringify(payload));
+      }
+
+      serverBaseInput.value = defaultBaseUrl();
+      setButtonsConnected(false);
+
+      connectBtn.addEventListener("click", () => connectWs());
+      disconnectBtn.addEventListener("click", () => closeWs());
+      statusBtn.addEventListener("click", () => sendJson({ type: "status" }));
+      pingBtn.addEventListener("click", () => sendJson({ type: "ping" }));
+      askBtn.addEventListener("click", () => {
+        sendJson({
+          type: "ask",
+          message: messageInput.value.trim(),
+          with_tts: withTtsInput.checked,
+        });
+      });
+      clearBtn.addEventListener("click", () => {
+        logBox.textContent = "";
+      });
+    </script>
+  </body>
+</html>

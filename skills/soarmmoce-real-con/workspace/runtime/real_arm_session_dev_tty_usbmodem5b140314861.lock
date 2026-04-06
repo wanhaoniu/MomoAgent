@@ -1,1 +1,0 @@
-{"pid": 56947, "port": "/dev/tty.usbmodem5B140314861", "robot_id": "soarmmoce", "timestamp": 1775383059.584304, "cwd": "/Users/moce/Documents/Project/MomoAgent", "cmdline": "sdk/tests/face_follow.py --pan-gain 5.6 --tilt-gain 7.0 --max-pan-step 1.4 --max-tilt-step 1.6"}
