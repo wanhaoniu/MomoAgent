@@ -28,16 +28,21 @@ Create a dedicated conda env first:
 ```bash
 cd /home/ubuntu/Code/MoceClaw/Software/Master/gesture_loc
 source /home/ubuntu/miniconda3/etc/profile.d/conda.sh
-conda env create -f environment.yml -n gestureloc
-conda activate gestureloc
+conda env create -f environment.yml -n gesture_loc
+conda activate gesture_loc
 ```
 
 `gesture_loc` is better isolated from `face_loc`: both use Python 3.10, but hand-tracking adds MediaPipe and its own OpenCV wheel set.
 
 ```bash
-PYTHONNOUSERSITE=1 conda run -n gestureloc python Software/Master/gesture_loc/main.py \
+PYTHONNOUSERSITE=1 conda run -n gesture_loc python Software/Master/gesture_loc/main.py \
   --config Software/Master/gesture_loc/configs/default.yaml
 ```
+
+If you want the local OpenCV preview window, add `--visualizer`. The environment uses
+GUI-enabled `opencv-contrib-python`, not the headless wheel. On macOS the preview is
+displayed from a dedicated process so `cv2.imshow(...)` does not run inside the
+tracking worker thread.
 
 Query the latest result:
 

@@ -32,6 +32,7 @@ python /Users/moce/Documents/Project/MomoAgent/Software/Master/quick_control_api
 - `POST /api/v1/agent/ask`
 - `WS /api/v1/ws/state`
 - `WS /api/v1/ws/agent`
+- `WS /api/v1/ws/agent-stream`
 
 ## Notes
 
@@ -41,6 +42,6 @@ python /Users/moce/Documents/Project/MomoAgent/Software/Master/quick_control_api
 - `POST /api/v1/motion/home` accepts `source=home|origin|zero|startup`. All of them map to the rebuilt runtime "startup pose is the reference home" behavior; the field is mainly kept for UI/API compatibility.
 - `follow/start` now launches a backend worker that polls `Software/Master/face_loc` `/latest` directly and runs the validated `sdk/tests/face_follow.py` control logic inside the API process. `follow/stop` stops that worker.
 - `follow` and `idle_scan` are behavior-layer APIs intended for agent/backend orchestration. Any manual `/motion/*` call will stop both.
-- Agent endpoints currently cover text turns, warmup, session reset, and status only. App-side STT / TTS should stay on the frontend for now.
+- `WS /api/v1/ws/agent-stream` is the recommended frontend entrypoint for text plus optional backend-bridged streaming TTS.
 - OpenClaw warm session state is persisted locally so repeated turns do not pay the full cold-start cost every time.
 - If your OpenClaw skill still controls hardware by grabbing the SDK directly, it may conflict with an already-connected robot session. The long-term fix is to make skill-side robot actions call this API instead of opening a second hardware session.

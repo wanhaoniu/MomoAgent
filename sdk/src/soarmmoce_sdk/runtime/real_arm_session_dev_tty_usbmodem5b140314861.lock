@@ -1,1 +1,0 @@
-{"pid": 3741, "port": "/dev/tty.usbmodem5B140314861", "robot_id": "soarmmoce", "timestamp": 1775528440.071916, "cwd": "/Users/moce/Documents/Project/MomoAgent", "cmdline": "/Users/moce/miniforge3/envs/soarmmoce/bin/uvicorn quick_control_api.app:create_app --factory --host 127.0.0.1 --port 8010"}

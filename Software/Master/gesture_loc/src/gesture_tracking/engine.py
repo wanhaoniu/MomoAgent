@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing as mproc
+import queue
 import time
 import urllib.request
 from collections import deque
@@ -97,6 +99,119 @@ class GestureStabilizer:
         return self._stable_name, self._stable_count
 
 
+def _visualizer_process_main(frame_queue: Any, window_name: str) -> None:
+    cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+    try:
+        while True:
+            try:
+                kind, payload = frame_queue.get(timeout=0.05)
+            except queue.Empty:
+                cv2.waitKey(1)
+                continue
+
+            if kind == "stop":
+                break
+            if kind != "frame":
+                continue
+
+            cv2.imshow(window_name, payload)
+            cv2.waitKey(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            cv2.destroyWindow(window_name)
+        except Exception:
+            pass
+
+
+class OpenCvVisualizer:
+    def __init__(self, enabled: bool, window_name: str) -> None:
+        self._enabled = bool(enabled)
+        self._window_name = str(window_name)
+        self._queue: Any | None = None
+        self._process: mproc.Process | None = None
+
+    def start(self) -> None:
+        if not self._enabled:
+            return
+        if self._process and self._process.is_alive():
+            return
+        ctx = mproc.get_context("spawn")
+        self._queue = ctx.Queue(maxsize=1)
+        self._process = ctx.Process(
+            target=_visualizer_process_main,
+            args=(self._queue, self._window_name),
+            name="gesture-visualizer",
+            daemon=True,
+        )
+        self._process.start()
+
+    def publish(self, frame: np.ndarray) -> None:
+        if not self._enabled or self._queue is None:
+            return
+        if self._process is not None and not self._process.is_alive():
+            return
+
+        message = ("frame", frame)
+        try:
+            self._queue.put_nowait(message)
+            return
+        except queue.Full:
+            pass
+        except (EOFError, OSError, ValueError):
+            return
+
+        try:
+            self._queue.get_nowait()
+        except queue.Empty:
+            pass
+        except (EOFError, OSError, ValueError):
+            return
+
+        try:
+            self._queue.put_nowait(message)
+        except queue.Full:
+            pass
+        except (EOFError, OSError, ValueError):
+            return
+
+    def stop(self) -> None:
+        if self._queue is not None:
+            try:
+                self._queue.put_nowait(("stop", None))
+            except queue.Full:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+                except (EOFError, OSError, ValueError):
+                    pass
+                try:
+                    self._queue.put_nowait(("stop", None))
+                except queue.Full:
+                    pass
+                except (EOFError, OSError, ValueError):
+                    pass
+            except (EOFError, OSError, ValueError):
+                pass
+
+        if self._process is not None:
+            self._process.join(timeout=2.0)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(timeout=1.0)
+            self._process = None
+
+        if self._queue is not None:
+            try:
+                self._queue.close()
+                self._queue.join_thread()
+            except (EOFError, OSError, ValueError):
+                pass
+            self._queue = None
+
+
 class GestureTrackingEngine:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -111,12 +226,17 @@ class GestureTrackingEngine:
             stability_frames=config.recognizer.stability_frames,
             missing_reset_frames=config.recognizer.missing_reset_frames,
         )
+        self._visualizer = OpenCvVisualizer(
+            enabled=config.visualizer.enabled,
+            window_name=config.visualizer.window_name,
+        )
         self.result_store.publish(self._build_empty_result(status="starting"))
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
+        self._visualizer.start()
         self._thread = Thread(target=self._run_loop, name="gesture-tracking-engine", daemon=True)
         self._thread.start()
 
@@ -124,6 +244,7 @@ class GestureTrackingEngine:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3.0)
+        self._visualizer.stop()
         self.source.close()
         self._running = False
         self.result_store.publish(self._build_empty_result(status="stopped", error=self._last_error))
@@ -166,6 +287,7 @@ class GestureTrackingEngine:
             self._last_error = str(exc)
             LOGGER.exception("Failed to start gesture tracking")
             self.result_store.publish(self._build_empty_result(status="source_error", error=str(exc)))
+            self._visualizer.stop()
             return
 
         options = vision.GestureRecognizerOptions(
@@ -196,10 +318,7 @@ class GestureTrackingEngine:
         finally:
             self._running = False
             self.source.close()
-            try:
-                cv2.destroyWindow(self.config.visualizer.window_name)
-            except Exception:
-                pass
+            self._visualizer.stop()
 
     def _process_frame(self, recognizer: vision.GestureRecognizer, packet: Any) -> dict[str, Any]:
         frame = packet.frame
@@ -212,7 +331,9 @@ class GestureTrackingEngine:
         fps = self._fps.tick(packet.timestamp)
         payload = self._build_result_from_recognition(result, frame_width, frame_height, fps, packet)
         if self.config.visualizer.enabled:
-            self._render_overlay(frame.copy(), payload)
+            # macOS HighGUI windows are unstable from this worker thread, so
+            # we render here and display from a dedicated visualizer process.
+            self._visualizer.publish(self._render_overlay(frame.copy(), payload))
         return payload
 
     def _build_result_from_recognition(
@@ -329,7 +450,7 @@ class GestureTrackingEngine:
             "error": error,
         }
 
-    def _render_overlay(self, frame: np.ndarray, payload: dict[str, Any]) -> None:
+    def _render_overlay(self, frame: np.ndarray, payload: dict[str, Any]) -> np.ndarray:
         gesture_name = payload.get("gesture_name") or "None"
         stable_name = payload.get("stable_gesture_name") or "None"
         cv2.putText(
@@ -373,5 +494,4 @@ class GestureTrackingEngine:
                 (255, 0, 0),
                 2,
             )
-        cv2.imshow(self.config.visualizer.window_name, frame)
-        cv2.waitKey(1)
+        return frame

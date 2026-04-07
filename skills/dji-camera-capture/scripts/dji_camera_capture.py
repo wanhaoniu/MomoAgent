@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Control DJI/OsmoPocket3 capture on macOS through a native AVFoundation helper."""
+"""Control macOS camera capture through a native AVFoundation helper."""
 
 from __future__ import annotations
 
@@ -23,7 +23,8 @@ CAPTURES_DIR = WORKSPACE_DIR / "captures"
 RUNTIME_DIR = WORKSPACE_DIR / "runtime"
 STATE_PATH = RUNTIME_DIR / "recording_state.json"
 LAST_STATE_PATH = RUNTIME_DIR / "last_recording_state.json"
-DEFAULT_CAMERA_NAME = "OsmoPocket3"
+PREFERRED_CAMERA_PATH = RUNTIME_DIR / "preferred_camera.json"
+AUTO_PREFERRED_CAMERA_NAME = "OsmoPocket3"
 DEFAULT_WIDTH = 1280
 DEFAULT_HEIGHT = 720
 DEFAULT_FPS = 30
@@ -54,11 +55,39 @@ def slugify(value: str) -> str:
     return text or now_stamp()
 
 
+def normalize_name(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
 def tail_text(path: Path, max_lines: int = 40) -> str:
     if not path.exists():
         return ""
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     return "\n".join(lines[-max_lines:])
+
+
+def load_preferred_camera() -> dict[str, Any] | None:
+    if not PREFERRED_CAMERA_PATH.exists():
+        return None
+    try:
+        data = json.loads(PREFERRED_CAMERA_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise CaptureError(f"Failed to parse preferred camera file: {PREFERRED_CAMERA_PATH}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise CaptureError(f"Preferred camera file is malformed: {PREFERRED_CAMERA_PATH}")
+    return data
+
+
+def save_preferred_camera(device: dict[str, Any], *, selection_reason: str) -> None:
+    ensure_dirs()
+    payload = {
+        "name": str(device.get("name") or "").strip(),
+        "unique_id": str(device.get("unique_id") or "").strip(),
+        "index": int(device.get("index", 0) or 0),
+        "selection_reason": selection_reason,
+        "saved_at": iso_now(),
+    }
+    PREFERRED_CAMERA_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def ffmpeg_path() -> str:
@@ -190,6 +219,143 @@ def invoke_native_helper(args: list[str], *, timeout_sec: float) -> dict[str, An
     return payload
 
 
+def require_device_list(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    items = payload.get(key)
+    if not isinstance(items, list):
+        raise CaptureError(f"Native helper payload is missing '{key}'.")
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            normalized.append(item)
+    return normalized
+
+
+def match_device_by_index(devices: list[dict[str, Any]], index: int) -> dict[str, Any] | None:
+    for item in devices:
+        if int(item.get("index", -1) or -1) == int(index):
+            return item
+    return None
+
+
+def match_device_by_name(devices: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    requested = normalize_name(name)
+    if not requested:
+        return None
+    for item in devices:
+        if normalize_name(str(item.get("name") or "")) == requested:
+            return item
+    for item in devices:
+        if requested in normalize_name(str(item.get("name") or "")):
+            return item
+    return None
+
+
+def match_device_by_unique_id(devices: list[dict[str, Any]], unique_id: str) -> dict[str, Any] | None:
+    needle = str(unique_id or "").strip()
+    if not needle:
+        return None
+    for item in devices:
+        if str(item.get("unique_id") or "").strip() == needle:
+            return item
+    return None
+
+
+def resolve_auto_video_device(devices: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str]:
+    preferred = load_preferred_camera()
+    if preferred:
+        matched = match_device_by_unique_id(devices, str(preferred.get("unique_id") or ""))
+        if matched is not None:
+            return matched, "preferred-camera"
+        preferred_name = str(preferred.get("name") or "").strip()
+        if preferred_name:
+            matched = match_device_by_name(devices, preferred_name)
+            if matched is not None:
+                return matched, "preferred-camera-name"
+    favorite = match_device_by_name(devices, AUTO_PREFERRED_CAMERA_NAME)
+    if favorite is not None:
+        return favorite, "preferred-osmo-pocket3"
+    if len(devices) == 1:
+        return devices[0], "single-camera"
+    return None, "ambiguous"
+
+
+def resolve_video_device(
+    devices: list[dict[str, Any]],
+    *,
+    camera_name: str,
+    video_index: int | None,
+    command_label: str,
+) -> tuple[dict[str, Any], str]:
+    if video_index is not None:
+        matched = match_device_by_index(devices, video_index)
+        if matched is None:
+            available = ", ".join(f"[{item['index']}] {item['name']}" for item in devices) or "<none>"
+            raise CaptureError(f"Video index {video_index} was not found. Available cameras: {available}")
+        return matched, "explicit-index"
+    if str(camera_name or "").strip():
+        matched = match_device_by_name(devices, camera_name)
+        if matched is None:
+            available = ", ".join(f"[{item['index']}] {item['name']}" for item in devices) or "<none>"
+            raise CaptureError(f"Camera '{camera_name}' was not found. Available cameras: {available}")
+        return matched, "explicit-name"
+    matched, reason = resolve_auto_video_device(devices)
+    if matched is not None:
+        return matched, reason
+    available = ", ".join(f"[{item['index']}] {item['name']}" for item in devices) or "<none>"
+    raise CaptureError(
+        f"Multiple cameras are available and no default camera has been selected for `{command_label}`.\n"
+        f"Available cameras: {available}\n"
+        "Run `python3 skills/dji-camera-capture/scripts/dji_camera_capture.py list` to inspect devices, "
+        "then choose one with `select-camera --camera-name ...`."
+    )
+
+
+def resolve_audio_device(
+    devices: list[dict[str, Any]],
+    *,
+    selected_video_device: dict[str, Any],
+    audio_index: int | None,
+) -> dict[str, Any]:
+    if audio_index is not None:
+        matched = match_device_by_index(devices, audio_index)
+        if matched is None:
+            available = ", ".join(f"[{item['index']}] {item['name']}" for item in devices) or "<none>"
+            raise CaptureError(f"Audio index {audio_index} was not found. Available audio devices: {available}")
+        return matched
+    video_name = str(selected_video_device.get("name") or "").strip()
+    matched = match_device_by_name(devices, video_name)
+    if matched is not None:
+        return matched
+    available = ", ".join(f"[{item['index']}] {item['name']}" for item in devices) or "<none>"
+    raise CaptureError(
+        f"No matching audio device was found for camera '{video_name}'. "
+        f"Available audio devices: {available}"
+    )
+
+
+def resolve_devices_for_capture(
+    *,
+    camera_name: str,
+    video_index: int | None,
+    with_audio: bool = False,
+    audio_index: int | None = None,
+    command_label: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None, str, dict[str, Any]]:
+    payload = invoke_native_helper(["list"], timeout_sec=20)
+    video_devices = require_device_list(payload, "video_devices")
+    audio_devices = require_device_list(payload, "audio_devices")
+    video_device, selection_reason = resolve_video_device(
+        video_devices,
+        camera_name=camera_name,
+        video_index=video_index,
+        command_label=command_label,
+    )
+    audio_device: dict[str, Any] | None = None
+    if with_audio:
+        audio_device = resolve_audio_device(audio_devices, selected_video_device=video_device, audio_index=audio_index)
+    return video_device, audio_device, selection_reason, payload
+
+
 def spawn_native_record(cmd: list[str], log_path: Path) -> subprocess.Popen[str]:
     log_handle = log_path.open("w", encoding="utf-8")
     try:
@@ -281,7 +447,41 @@ def remux_mov_to_mp4(raw_path: Path, final_path: Path) -> tuple[Path, str]:
 
 
 def list_devices() -> dict[str, Any]:
-    return invoke_native_helper(["list"], timeout_sec=20)
+    payload = invoke_native_helper(["list"], timeout_sec=20)
+    video_devices = require_device_list(payload, "video_devices")
+    default_device, selection_reason = resolve_auto_video_device(video_devices)
+    preferred_device: dict[str, Any] | None = None
+    preferred = load_preferred_camera()
+    if preferred:
+        preferred_device = match_device_by_unique_id(video_devices, str(preferred.get("unique_id") or ""))
+        if preferred_device is None:
+            preferred_name = str(preferred.get("name") or "").strip()
+            if preferred_name:
+                preferred_device = match_device_by_name(video_devices, preferred_name)
+    payload["default_video_device"] = default_device
+    payload["default_selection_reason"] = selection_reason if default_device is not None else ""
+    payload["preferred_video_device"] = preferred_device
+    return payload
+
+
+def select_camera(args: argparse.Namespace) -> dict[str, Any]:
+    video_device, _audio_device, selection_reason, _payload = resolve_devices_for_capture(
+        camera_name=args.camera_name,
+        video_index=args.video_index,
+        with_audio=False,
+        audio_index=None,
+        command_label="select-camera",
+    )
+    save_preferred_camera(video_device, selection_reason=selection_reason)
+    return {
+        "ok": True,
+        "action": "select-camera",
+        "camera_name": video_device.get("name"),
+        "camera_unique_id": video_device.get("unique_id"),
+        "video_index": video_device.get("index"),
+        "selection_reason": selection_reason,
+        "saved_at": iso_now(),
+    }
 
 
 def capture_photo(args: argparse.Namespace) -> dict[str, Any]:
@@ -291,14 +491,21 @@ def capture_photo(args: argparse.Namespace) -> dict[str, Any]:
             "A video recording is already running. Stop it before taking a still photo.\n"
             f"Current output: {active_state.get('recording_path') or active_state.get('output_path')}"
         )
+    video_device, _audio_device, selection_reason, _payload = resolve_devices_for_capture(
+        camera_name=args.camera_name,
+        video_index=args.video_index,
+        with_audio=False,
+        audio_index=None,
+        command_label="photo",
+    )
     session_name, session_dir, photos_dir, _videos_dir = create_session_dirs(args.session)
     photo_path = photos_dir / f"IMG_{now_stamp()}.jpg"
     helper_args = [
         "photo",
         "--output",
         str(photo_path),
-        "--camera-name",
-        args.camera_name,
+        "--video-unique-id",
+        str(video_device.get("unique_id") or ""),
         "--width",
         str(args.width),
         "--height",
@@ -306,16 +513,17 @@ def capture_photo(args: argparse.Namespace) -> dict[str, Any]:
         "--fps",
         str(args.fps),
     ]
-    if args.video_index is not None:
-        helper_args.extend(["--video-index", str(args.video_index)])
     payload = invoke_native_helper(helper_args, timeout_sec=30)
+    save_preferred_camera(video_device, selection_reason=selection_reason)
     return {
         "ok": True,
         "action": "photo",
         "session": session_name,
         "session_dir": str(session_dir.resolve()),
         "photo_path": str(photo_path.resolve()),
-        "camera_name": payload.get("camera_name") or args.camera_name,
+        "camera_name": payload.get("camera_name") or video_device.get("name"),
+        "camera_unique_id": str(video_device.get("unique_id") or ""),
+        "selection_reason": selection_reason,
         "width": args.width,
         "height": args.height,
         "fps": args.fps,
@@ -331,6 +539,13 @@ def start_video(args: argparse.Namespace) -> dict[str, Any]:
             f"Current output: {existing_state.get('recording_path') or existing_state.get('output_path')}"
         )
     binary = ensure_native_helper()
+    video_device, audio_device, selection_reason, _payload = resolve_devices_for_capture(
+        camera_name=args.camera_name,
+        video_index=args.video_index,
+        with_audio=args.with_audio,
+        audio_index=args.audio_index,
+        command_label="start-video",
+    )
     session_name, session_dir, _photos_dir, videos_dir = create_session_dirs(args.session)
     stamp = now_stamp()
     raw_output_path = videos_dir / f"VID_{stamp}.mov"
@@ -344,8 +559,8 @@ def start_video(args: argparse.Namespace) -> dict[str, Any]:
         str(raw_output_path),
         "--ready-path",
         str(ready_path),
-        "--camera-name",
-        args.camera_name,
+        "--video-unique-id",
+        str(video_device.get("unique_id") or ""),
         "--width",
         str(args.width),
         "--height",
@@ -353,14 +568,11 @@ def start_video(args: argparse.Namespace) -> dict[str, Any]:
         "--fps",
         str(args.fps),
     ]
-    if args.video_index is not None:
-        cmd.extend(["--video-index", str(args.video_index)])
-    if args.with_audio:
-        cmd.extend(["--with-audio", "true", "--audio-name", args.camera_name])
-    if args.audio_index is not None:
-        cmd.extend(["--audio-index", str(args.audio_index)])
+    if args.with_audio and audio_device is not None:
+        cmd.extend(["--with-audio", "true", "--audio-unique-id", str(audio_device.get("unique_id") or "")])
     process = spawn_native_record(cmd, log_path)
     ready_payload = wait_for_ready(process, ready_path, log_path, timeout_sec=12.0)
+    save_preferred_camera(video_device, selection_reason=selection_reason)
     state = {
         "pid": process.pid,
         "pgid": process.pid,
@@ -370,12 +582,16 @@ def start_video(args: argparse.Namespace) -> dict[str, Any]:
         "output_path": str(final_output_path.resolve()),
         "log_path": str(log_path.resolve()),
         "ready_path": str(ready_path.resolve()),
-        "camera_name": args.camera_name,
+        "camera_name": video_device.get("name"),
+        "camera_unique_id": str(video_device.get("unique_id") or ""),
         "with_audio": bool(args.with_audio),
+        "audio_name": audio_device.get("name") if audio_device is not None else "",
+        "audio_unique_id": str(audio_device.get("unique_id") or "") if audio_device is not None else "",
         "width": args.width,
         "height": args.height,
         "fps": args.fps,
         "started_at": iso_now(),
+        "selection_reason": selection_reason,
         "command": cmd,
     }
     write_state(state)
@@ -412,6 +628,8 @@ def stop_video(args: argparse.Namespace) -> dict[str, Any]:
         "recording_path": str(raw_output_path) if raw_output_path else "",
         "output_path": str(selected_output) if selected_output else "",
         "log_path": str(Path(log_path_str).resolve()) if log_path_str else "",
+        "camera_name": finished_state.get("camera_name"),
+        "camera_unique_id": finished_state.get("camera_unique_id"),
         "stopped_at": iso_now(),
         "started_at": finished_state.get("started_at"),
         "with_audio": finished_state.get("with_audio", False),
@@ -439,6 +657,8 @@ def status() -> dict[str, Any]:
         "recording_path": state.get("recording_path"),
         "output_path": state.get("output_path"),
         "log_path": state.get("log_path"),
+        "camera_name": state.get("camera_name"),
+        "camera_unique_id": state.get("camera_unique_id"),
         "started_at": state.get("started_at"),
         "with_audio": state.get("with_audio", False),
         "width": state.get("width"),
@@ -454,13 +674,16 @@ def status() -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Control a DJI/OsmoPocket3 camera on macOS using a native AVFoundation helper."
+        description="Control a macOS camera using a native AVFoundation helper."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    def add_common_camera_args(subparser: argparse.ArgumentParser) -> None:
-        subparser.add_argument("--camera-name", default=DEFAULT_CAMERA_NAME, help="Preferred camera name.")
+    def add_selection_args(subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument("--camera-name", default="", help="Optional camera name override.")
         subparser.add_argument("--video-index", type=int, default=None, help="Override video device index.")
+
+    def add_common_camera_args(subparser: argparse.ArgumentParser) -> None:
+        add_selection_args(subparser)
         subparser.add_argument("--width", type=int, default=DEFAULT_WIDTH, help="Capture width.")
         subparser.add_argument("--height", type=int, default=DEFAULT_HEIGHT, help="Capture height.")
         subparser.add_argument("--fps", type=int, default=DEFAULT_FPS, help="Capture frame rate.")
@@ -469,6 +692,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_parser = subparsers.add_parser("list", help="List native camera and audio devices.")
     list_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    select_parser = subparsers.add_parser("select-camera", help="Choose and save the default camera for future commands.")
+    add_selection_args(select_parser)
+    select_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     photo_parser = subparsers.add_parser("photo", help="Capture one still photo.")
     add_common_camera_args(photo_parser)
@@ -493,33 +720,55 @@ def emit(result: dict[str, Any], json_output: bool) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     command = str(result.get("action") or "")
+    if command == "select-camera":
+        print(f"Default camera selected: {result['camera_name']}")
+        print(f"Unique ID: {result['camera_unique_id']}")
+        return 0
     if command == "photo":
         print(f"Photo saved: {result['photo_path']}")
+        print(f"Camera: {result['camera_name']}")
         print(f"Session dir: {result['session_dir']}")
         return 0
     if command == "start-video":
         print(f"Recording started: {result['recording_path']}")
         print(f"Final MP4 target: {result['output_path']}")
+        print(f"Camera: {result['camera_name']}")
         print(f"PID: {result['pid']}")
         print(f"Session dir: {result['session_dir']}")
         return 0
     if command == "stop-video":
         print(f"Recording stopped: {result['output_path']}")
+        if result.get("camera_name"):
+            print(f"Camera: {result['camera_name']}")
         if result.get("file_size_bytes") is not None:
             print(f"File size: {result['file_size_bytes']} bytes")
         print(f"Session dir: {result['session_dir']}")
         return 0
     if "video_devices" in result:
+        default_unique_id = str((result.get("default_video_device") or {}).get("unique_id") or "")
+        preferred_unique_id = str((result.get("preferred_video_device") or {}).get("unique_id") or "")
         print("Video devices:")
         for item in result["video_devices"]:
-            print(f"  [{item['index']}] {item['name']} ({item['unique_id']})")
+            tags: list[str] = []
+            item_unique_id = str(item.get("unique_id") or "")
+            if item_unique_id and item_unique_id == default_unique_id:
+                tags.append("default")
+            if item_unique_id and item_unique_id == preferred_unique_id:
+                tags.append("saved")
+            suffix = f" [{' / '.join(tags)}]" if tags else ""
+            print(f"  [{item['index']}] {item['name']} ({item['unique_id']}){suffix}")
         print("Audio devices:")
         for item in result["audio_devices"]:
             print(f"  [{item['index']}] {item['name']} ({item['unique_id']})")
+        reason = str(result.get("default_selection_reason") or "").strip()
+        if reason and result.get("default_video_device"):
+            print(f"Auto default reason: {reason}")
         return 0
     if result.get("active"):
         print(f"Recording active: {result['recording_path']}")
         print(f"Final MP4 target: {result['output_path']}")
+        if result.get("camera_name"):
+            print(f"Camera: {result['camera_name']}")
         print(f"PID: {result['pid']}")
         return 0
     print("No active recording.")
@@ -533,6 +782,8 @@ def main() -> int:
     try:
         if args.command == "list":
             result = list_devices()
+        elif args.command == "select-camera":
+            result = select_camera(args)
         elif args.command == "photo":
             result = capture_photo(args)
         elif args.command == "start-video":

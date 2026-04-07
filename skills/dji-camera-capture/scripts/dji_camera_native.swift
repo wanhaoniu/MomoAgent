@@ -83,7 +83,13 @@ func audioDevices() -> [AVCaptureDevice] {
     ).devices
 }
 
-func pickDevice(devices: [AVCaptureDevice], name: String?, index: Int?) throws -> AVCaptureDevice {
+func pickDevice(devices: [AVCaptureDevice], name: String?, index: Int?, uniqueId: String?) throws -> AVCaptureDevice {
+    if let uniqueId, !uniqueId.isEmpty {
+        if let exact = devices.first(where: { $0.uniqueID == uniqueId }) {
+            return exact
+        }
+        throw CLIError(message: "Device unique ID '\(uniqueId)' was not found.")
+    }
     if let index {
         guard devices.indices.contains(index) else {
             throw CLIError(message: "Device index \(index) is out of range.")
@@ -176,10 +182,18 @@ final class FrameCaptureHandler: NSObject, AVCaptureVideoDataOutputSampleBufferD
     }
 }
 
-func capturePhoto(cameraName: String?, videoIndex: Int?, outputPath: String, width: Int, height: Int, fps: Int) throws {
+func capturePhoto(
+    cameraName: String?,
+    videoIndex: Int?,
+    videoUniqueId: String?,
+    outputPath: String,
+    width: Int,
+    height: Int,
+    fps: Int
+) throws {
     let session = AVCaptureSession()
     let devices = videoDevices()
-    let camera = try pickDevice(devices: devices, name: cameraName, index: videoIndex)
+    let camera = try pickDevice(devices: devices, name: cameraName, index: videoIndex, uniqueId: videoUniqueId)
     let input = try AVCaptureDeviceInput(device: camera)
     let videoOutput = AVCaptureVideoDataOutput()
     videoOutput.alwaysDiscardsLateVideoFrames = true
@@ -232,8 +246,10 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
     init(
         cameraName: String?,
         videoIndex: Int?,
+        videoUniqueId: String?,
         audioName: String?,
         audioIndex: Int?,
+        audioUniqueId: String?,
         outputPath: String,
         readyPath: String?,
         width: Int,
@@ -244,7 +260,7 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
         self.readyPath = readyPath
         self.outputURL = URL(fileURLWithPath: outputPath)
         self.keepAudio = withAudio
-        let video = try pickDevice(devices: videoDevices(), name: cameraName, index: videoIndex)
+        let video = try pickDevice(devices: videoDevices(), name: cameraName, index: videoIndex, uniqueId: videoUniqueId)
         self.selectedCameraName = video.localizedName
         super.init()
 
@@ -260,7 +276,7 @@ final class MovieRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
         }
         session.addInput(videoInput)
         if withAudio {
-            let audioDevice = try pickDevice(devices: audioDevices(), name: audioName, index: audioIndex)
+            let audioDevice = try pickDevice(devices: audioDevices(), name: audioName, index: audioIndex, uniqueId: audioUniqueId)
             let audioInput = try AVCaptureDeviceInput(device: audioDevice)
             if session.canAddInput(audioInput) {
                 session.addInput(audioInput)
@@ -380,10 +396,19 @@ do {
         }
         let cameraName = options["camera-name"]
         let videoIndex = options["video-index"].flatMap(Int.init)
+        let videoUniqueId = options["video-unique-id"]
         let width = options["width"].flatMap(Int.init) ?? 1280
         let height = options["height"].flatMap(Int.init) ?? 720
         let fps = options["fps"].flatMap(Int.init) ?? 30
-        try capturePhoto(cameraName: cameraName, videoIndex: videoIndex, outputPath: outputPath, width: width, height: height, fps: fps)
+        try capturePhoto(
+            cameraName: cameraName,
+            videoIndex: videoIndex,
+            videoUniqueId: videoUniqueId,
+            outputPath: outputPath,
+            width: width,
+            height: height,
+            fps: fps
+        )
     case "record":
         guard let outputPath = options["output"] else {
             throw CLIError(message: "--output is required for record.")
@@ -391,8 +416,10 @@ do {
         let recorder = try MovieRecorder(
             cameraName: options["camera-name"],
             videoIndex: options["video-index"].flatMap(Int.init),
+            videoUniqueId: options["video-unique-id"],
             audioName: options["audio-name"],
             audioIndex: options["audio-index"].flatMap(Int.init),
+            audioUniqueId: options["audio-unique-id"],
             outputPath: outputPath,
             readyPath: options["ready-path"],
             width: options["width"].flatMap(Int.init) ?? 1280,
