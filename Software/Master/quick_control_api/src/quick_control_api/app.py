@@ -268,6 +268,15 @@ def create_app() -> FastAPI:
                 pan_breakaway_step_neg=payload.pan_breakaway_step_neg,
                 pan_negative_scale=payload.pan_negative_scale,
                 tilt_breakaway_step=payload.tilt_breakaway_step,
+                enable_idle_scan_fallback=payload.enable_idle_scan_fallback,
+                lost_target_hold_sec=payload.lost_target_hold_sec,
+                idle_scan_speed_percent=payload.idle_scan_speed_percent,
+                idle_scan_pan_range_deg=payload.idle_scan_pan_range_deg,
+                idle_scan_tilt_range_deg=payload.idle_scan_tilt_range_deg,
+                idle_scan_move_duration_min_sec=payload.idle_scan_move_duration_min_sec,
+                idle_scan_move_duration_max_sec=payload.idle_scan_move_duration_max_sec,
+                idle_scan_dwell_sec_min=payload.idle_scan_dwell_sec_min,
+                idle_scan_dwell_sec_max=payload.idle_scan_dwell_sec_max,
             )
         )
 
@@ -286,6 +295,8 @@ def create_app() -> FastAPI:
         service: QuickControlService = request.app.state.quick_control_service
         return _ok(
             service.idle_scan_start(
+                pan_joint=payload.pan_joint,
+                tilt_joint=payload.tilt_joint,
                 speed_percent=payload.speed_percent,
                 pan_range_deg=payload.pan_range_deg,
                 tilt_range_deg=payload.tilt_range_deg,

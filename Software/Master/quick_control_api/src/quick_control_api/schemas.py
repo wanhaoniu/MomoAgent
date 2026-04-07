@@ -82,9 +82,20 @@ class FollowStartRequest(BaseModel):
     pan_breakaway_step_neg: float | None = Field(default=3.2, ge=0.0, le=20.0)
     pan_negative_scale: float = Field(1.45, ge=1.0, le=5.0)
     tilt_breakaway_step: float = Field(1.8, ge=0.0, le=20.0)
+    enable_idle_scan_fallback: bool = True
+    lost_target_hold_sec: float = Field(1.0, ge=0.0, le=30.0)
+    idle_scan_speed_percent: int = Field(25, ge=1, le=100)
+    idle_scan_pan_range_deg: float = Field(10.0, ge=1.0, le=45.0)
+    idle_scan_tilt_range_deg: float = Field(8.0, ge=1.0, le=30.0)
+    idle_scan_move_duration_min_sec: float = Field(1.2, ge=0.2, le=10.0)
+    idle_scan_move_duration_max_sec: float = Field(2.8, ge=0.2, le=10.0)
+    idle_scan_dwell_sec_min: float = Field(0.8, ge=0.0, le=20.0)
+    idle_scan_dwell_sec_max: float = Field(2.5, ge=0.0, le=20.0)
 
 
 class IdleScanStartRequest(BaseModel):
+    pan_joint: str = "shoulder_pan"
+    tilt_joint: str = "elbow_flex"
     speed_percent: int = Field(25, ge=1, le=100)
     pan_range_deg: float = Field(10.0, ge=1.0, le=45.0)
     tilt_range_deg: float = Field(8.0, ge=1.0, le=30.0)

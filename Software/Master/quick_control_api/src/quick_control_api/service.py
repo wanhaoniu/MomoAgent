@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import math
 import os
-import random
 import sys
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -37,19 +35,21 @@ DEFAULT_JOINT_NAMES = [
 ]
 CONTROL_MODE_NONE = "none"
 CONTROL_MODE_FOLLOW = "follow"
+CONTROL_MODE_ATTENTION = "attention"
 CONTROL_MODE_IDLE_SCAN = "idle_scan"
 
 from soarmmoce_sdk.runtime_compat import CompatibleRuntimeRobot as RuntimeRobot
 
 from .agent_service import AgentService
+from .attention_worker import AttentionConfig, AttentionWorker, build_default_attention_payload
 from .errors import QuickControlError
 from .face_follow_worker import (
     DEFAULT_PAN_JOINT as DEFAULT_FOLLOW_PAN_JOINT,
     DEFAULT_TILT_JOINT as DEFAULT_FOLLOW_TILT_JOINT,
     FaceFollowConfig,
     FaceFollowWorker,
-    build_default_follow_payload,
 )
+from .idle_scan_worker import IdleScanConfig, IdleScanWorker, build_default_idle_scan_payload
 
 
 @dataclass
@@ -59,24 +59,6 @@ class MotionConfig:
     jog_mode: str = "step"
     step_dist_mm: float = 5.0
     step_angle_deg: float = 5.0
-
-
-@dataclass
-class IdleScanConfig:
-    enabled: bool = False
-    speed_percent: int = 25
-    pan_range_deg: float = 10.0
-    tilt_range_deg: float = 8.0
-    move_duration_min_sec: float = 1.2
-    move_duration_max_sec: float = 2.8
-    dwell_sec_min: float = 0.8
-    dwell_sec_max: float = 2.5
-    phase: str = "none"
-    phase_deadline_monotonic: float = 0.0
-    anchor_pan_deg: Optional[float] = None
-    anchor_tilt_deg: Optional[float] = None
-    current_target_pan_deg: Optional[float] = None
-    current_target_tilt_deg: Optional[float] = None
 
 
 class QuickControlService:
@@ -95,24 +77,12 @@ class QuickControlService:
         self._motion = MotionConfig()
         self._control_mode = CONTROL_MODE_NONE
         self._control_error = ""
-        self._follow_worker: FaceFollowWorker | None = None
-        self._last_follow_payload: dict[str, Any] = build_default_follow_payload()
-        self._idle_scan = IdleScanConfig()
-        self._rng = random.Random()
-        self._control_loop_stop = threading.Event()
-        self._control_thread = threading.Thread(
-            target=self._control_loop,
-            name="QuickControlContinuousLoop",
-            daemon=True,
-        )
-        self._control_thread.start()
+        self._follow_worker: FaceFollowWorker | AttentionWorker | None = None
+        self._idle_scan_worker: IdleScanWorker | None = None
+        self._last_follow_payload: dict[str, Any] = build_default_attention_payload()
+        self._last_idle_scan_payload: dict[str, Any] = build_default_idle_scan_payload()
 
     def close(self) -> None:
-        self._control_loop_stop.set()
-        try:
-            self._control_thread.join(timeout=1.0)
-        except Exception:
-            pass
         self.disconnect()
         self._agent.close()
 
@@ -292,29 +262,12 @@ class QuickControlService:
         return dict(self._last_follow_payload)
 
     def _idle_scan_payload_locked(self) -> dict[str, Any]:
-        phase = str(self._idle_scan.phase or "none")
-        dwell_remaining_sec: Optional[float] = None
-        if phase == "dwell" and self._idle_scan.phase_deadline_monotonic > 0.0:
-            dwell_remaining_sec = max(
-                0.0,
-                float(self._idle_scan.phase_deadline_monotonic) - time.monotonic(),
-            )
-        return {
-            "enabled": bool(self._idle_scan.enabled),
-            "phase": phase,
-            "speed_percent": int(self._idle_scan.speed_percent),
-            "pan_range_deg": float(self._idle_scan.pan_range_deg),
-            "tilt_range_deg": float(self._idle_scan.tilt_range_deg),
-            "move_duration_min_sec": float(self._idle_scan.move_duration_min_sec),
-            "move_duration_max_sec": float(self._idle_scan.move_duration_max_sec),
-            "dwell_sec_min": float(self._idle_scan.dwell_sec_min),
-            "dwell_sec_max": float(self._idle_scan.dwell_sec_max),
-            "anchor_pan_deg": self._idle_scan.anchor_pan_deg,
-            "anchor_tilt_deg": self._idle_scan.anchor_tilt_deg,
-            "current_target_pan_deg": self._idle_scan.current_target_pan_deg,
-            "current_target_tilt_deg": self._idle_scan.current_target_tilt_deg,
-            "dwell_remaining_sec": dwell_remaining_sec,
-        }
+        worker = self._idle_scan_worker
+        if worker is not None:
+            payload = worker.status_payload()
+            self._last_idle_scan_payload = dict(payload)
+            return payload
+        return dict(self._last_idle_scan_payload)
 
     def _deactivate_control_locked(self) -> None:
         self._control_mode = CONTROL_MODE_NONE
@@ -324,11 +277,13 @@ class QuickControlService:
             self._last_follow_payload["running"] = False
             self._follow_worker.request_stop()
             self._follow_worker = None
-        self._idle_scan.enabled = False
-        self._idle_scan.phase = "none"
-        self._idle_scan.phase_deadline_monotonic = 0.0
-        self._idle_scan.current_target_pan_deg = None
-        self._idle_scan.current_target_tilt_deg = None
+        if self._idle_scan_worker is not None:
+            self._last_idle_scan_payload = self._idle_scan_worker.status_payload()
+            self._last_idle_scan_payload["enabled"] = False
+            self._last_idle_scan_payload["running"] = False
+            self._idle_scan_worker.request_stop()
+            self._idle_scan_worker = None
+        self._control_error = ""
 
     def _stop_for_manual_motion_locked(self) -> None:
         if self._control_mode != CONTROL_MODE_NONE:
@@ -338,6 +293,7 @@ class QuickControlService:
         with self._lock:
             state = self._read_robot_state_locked()
             follow_payload = self._follow_payload_locked()
+            idle_scan_payload = self._idle_scan_payload_locked()
             connected = state is not None and self._mode in ("connected", "simulation")
             status_light = "normal" if connected else "warning"
             state_text = "Normal" if connected else "Warning"
@@ -389,8 +345,10 @@ class QuickControlService:
                     }
 
             control_error = str(self._control_error or "").strip()
-            if self._control_mode == CONTROL_MODE_FOLLOW:
+            if self._control_mode in (CONTROL_MODE_FOLLOW, CONTROL_MODE_ATTENTION):
                 control_error = str(follow_payload.get("last_error", "") or "").strip()
+            elif self._control_mode == CONTROL_MODE_IDLE_SCAN:
+                control_error = str(idle_scan_payload.get("last_error", "") or "").strip()
 
             return {
                 "session": self._session_payload(),
@@ -408,7 +366,7 @@ class QuickControlService:
                     "step_angle_deg": float(self._motion.step_angle_deg),
                 },
                 "follow": follow_payload,
-                "idle_scan": self._idle_scan_payload_locked(),
+                "idle_scan": idle_scan_payload,
                 "joint_state": {
                     "names": names,
                     "values_rad": values_rad,
@@ -421,111 +379,6 @@ class QuickControlService:
                 "permissions": permissions,
                 "rtt_text": "--",
             }
-
-    def _move_named_joints_locked(
-        self,
-        *,
-        pan_target_deg: Optional[float] = None,
-        tilt_target_deg: Optional[float] = None,
-        speed_percent: int,
-        duration: Optional[float] = None,
-    ) -> dict[str, Any]:
-        robot = self._require_robot()
-        state = robot.get_state()
-        q_target = np.asarray(state.joint_state.q, dtype=float).copy()
-        joint_names = self._joint_names_from_state(state)
-        pan_index = self._joint_index_by_name(joint_names, DEFAULT_FOLLOW_PAN_JOINT)
-        tilt_index = self._joint_index_by_name(joint_names, DEFAULT_FOLLOW_TILT_JOINT)
-        if pan_target_deg is not None:
-            lo, hi = robot.robot_model.joint_limits[pan_index]
-            q_target[pan_index] = float(
-                np.clip(math.radians(float(pan_target_deg)), float(lo), float(hi))
-            )
-        if tilt_target_deg is not None:
-            lo, hi = robot.robot_model.joint_limits[tilt_index]
-            q_target[tilt_index] = float(
-                np.clip(math.radians(float(tilt_target_deg)), float(lo), float(hi))
-            )
-        move_duration = (
-            float(duration)
-            if duration is not None
-            else self._duration_from_speed(kind="continuous_joint", speed_percent=speed_percent)
-        )
-        robot.move_joints(q_target, duration=move_duration, wait=False)
-        return {
-            "joint_names": joint_names,
-            "target_q": q_target,
-            "duration": move_duration,
-        }
-
-    def _control_loop(self) -> None:
-        while not self._control_loop_stop.is_set():
-            try:
-                with self._lock:
-                    if self._control_mode == CONTROL_MODE_IDLE_SCAN:
-                        self._idle_scan_tick_locked()
-            except Exception as exc:  # noqa: BLE001
-                with self._lock:
-                    self._control_error = str(exc).strip() or "continuous controller failed"
-            self._control_loop_stop.wait(0.10)
-
-    def _idle_scan_tick_locked(self) -> None:
-        if not self._idle_scan.enabled:
-            return
-        robot = self._robot
-        if robot is None or not getattr(robot, "connected", False):
-            return
-        now = time.monotonic()
-        phase = str(self._idle_scan.phase or "none")
-        if phase == "moving":
-            if now < float(self._idle_scan.phase_deadline_monotonic):
-                return
-            dwell_duration = self._rng.uniform(
-                float(self._idle_scan.dwell_sec_min),
-                float(self._idle_scan.dwell_sec_max),
-            )
-            self._idle_scan.phase = "dwell"
-            self._idle_scan.phase_deadline_monotonic = now + float(dwell_duration)
-            self._control_error = ""
-            return
-        if phase == "dwell" and now < float(self._idle_scan.phase_deadline_monotonic):
-            return
-
-        state = robot.get_state()
-        joint_names = self._joint_names_from_state(state)
-        pan_index = self._joint_index_by_name(joint_names, DEFAULT_FOLLOW_PAN_JOINT)
-        tilt_index = self._joint_index_by_name(joint_names, DEFAULT_FOLLOW_TILT_JOINT)
-        q_current = np.asarray(state.joint_state.q, dtype=float).copy()
-        current_pan_deg = math.degrees(float(q_current[pan_index]))
-        current_tilt_deg = math.degrees(float(q_current[tilt_index]))
-        if self._idle_scan.anchor_pan_deg is None:
-            self._idle_scan.anchor_pan_deg = current_pan_deg
-        if self._idle_scan.anchor_tilt_deg is None:
-            self._idle_scan.anchor_tilt_deg = current_tilt_deg
-
-        target_pan_deg = float(self._idle_scan.anchor_pan_deg) + self._rng.uniform(
-            -float(self._idle_scan.pan_range_deg),
-            float(self._idle_scan.pan_range_deg),
-        )
-        target_tilt_deg = float(self._idle_scan.anchor_tilt_deg) + self._rng.uniform(
-            -float(self._idle_scan.tilt_range_deg),
-            float(self._idle_scan.tilt_range_deg),
-        )
-        duration = self._rng.uniform(
-            float(self._idle_scan.move_duration_min_sec),
-            float(self._idle_scan.move_duration_max_sec),
-        )
-        self._move_named_joints_locked(
-            pan_target_deg=target_pan_deg,
-            tilt_target_deg=target_tilt_deg,
-            speed_percent=int(self._idle_scan.speed_percent),
-            duration=duration,
-        )
-        self._idle_scan.phase = "moving"
-        self._idle_scan.phase_deadline_monotonic = now + float(duration) + 0.05
-        self._idle_scan.current_target_pan_deg = float(target_pan_deg)
-        self._idle_scan.current_target_tilt_deg = float(target_tilt_deg)
-        self._control_error = ""
 
     def joint_step(self, *, joint_index: int, delta_deg: float, speed_percent: int) -> dict[str, Any]:
         with self._lock:
@@ -741,56 +594,145 @@ class QuickControlService:
         pan_breakaway_step_neg: float | None,
         pan_negative_scale: float,
         tilt_breakaway_step: float,
+        enable_idle_scan_fallback: bool,
+        lost_target_hold_sec: float,
+        idle_scan_speed_percent: int,
+        idle_scan_pan_range_deg: float,
+        idle_scan_tilt_range_deg: float,
+        idle_scan_move_duration_min_sec: float,
+        idle_scan_move_duration_max_sec: float,
+        idle_scan_dwell_sec_min: float,
+        idle_scan_dwell_sec_max: float,
     ) -> dict[str, Any]:
         with self._lock:
             robot = self._require_robot()
             self._deactivate_control_locked()
-            worker = FaceFollowWorker(
-                robot=robot,
-                robot_lock=self._lock,
-                config=FaceFollowConfig(
-                    target_kind=str(target_kind or "face"),
-                    latest_url=str(latest_url or "").strip() or build_default_follow_payload()["latest_url"],
-                    poll_interval=float(max(0.01, poll_interval)),
-                    http_timeout=float(max(0.1, http_timeout)),
-                    move_duration=float(max(0.01, move_duration)),
-                    pan_joint=str(pan_joint or DEFAULT_FOLLOW_PAN_JOINT),
-                    tilt_joint=str(tilt_joint or DEFAULT_FOLLOW_TILT_JOINT),
-                    pan_sign=float(pan_sign),
-                    tilt_sign=float(tilt_sign),
-                    pan_gain=float(pan_gain),
-                    tilt_gain=float(tilt_gain),
-                    pan_dead_zone=float(max(0.0, pan_dead_zone)),
-                    tilt_dead_zone=float(max(0.0, tilt_dead_zone)),
-                    pan_resume_zone=float(max(0.0, pan_resume_zone)),
-                    tilt_resume_zone=float(max(0.0, tilt_resume_zone)),
-                    min_pan_step=float(max(0.0, min_pan_step)),
-                    min_tilt_step=float(max(0.0, min_tilt_step)),
-                    pan_min_step_zone=float(max(0.0, pan_min_step_zone)),
-                    tilt_min_step_zone=float(max(0.0, tilt_min_step_zone)),
-                    max_pan_step=float(max(0.0, max_pan_step)),
-                    max_tilt_step=float(max(0.0, max_tilt_step)),
-                    command_mode=(
-                        "settle"
-                        if str(command_mode).strip().lower() == "settle"
-                        else "stream"
-                    ),
-                    limit_margin_raw=int(max(0, limit_margin_raw)),
-                    stiction_eps_deg=float(max(0.0, stiction_eps_deg)),
-                    stiction_frames=int(max(1, stiction_frames)),
-                    pan_breakaway_step=float(max(0.0, pan_breakaway_step)),
-                    pan_breakaway_step_pos=(
-                        None if pan_breakaway_step_pos is None else float(max(0.0, pan_breakaway_step_pos))
-                    ),
-                    pan_breakaway_step_neg=(
-                        float(max(0.0, pan_breakaway_step_neg))
-                        if pan_breakaway_step_neg is not None
-                        else float(max(0.0, pan_breakaway_step))
-                    ),
-                    pan_negative_scale=float(max(1.0, pan_negative_scale)),
-                    tilt_breakaway_step=float(max(0.0, tilt_breakaway_step)),
-                ),
+            default_latest_url = str(build_default_attention_payload()["latest_url"])
+            idle_scan_move_min = float(
+                max(0.2, min(idle_scan_move_duration_min_sec, idle_scan_move_duration_max_sec))
             )
+            idle_scan_move_max = float(
+                max(idle_scan_move_min, idle_scan_move_duration_max_sec)
+            )
+            idle_scan_dwell_min = float(
+                max(0.0, min(idle_scan_dwell_sec_min, idle_scan_dwell_sec_max))
+            )
+            idle_scan_dwell_max = float(
+                max(idle_scan_dwell_min, idle_scan_dwell_sec_max)
+            )
+            if bool(enable_idle_scan_fallback):
+                worker = AttentionWorker(
+                    robot=robot,
+                    robot_lock=self._lock,
+                    config=AttentionConfig(
+                        target_kind=str(target_kind or "face"),
+                        latest_url=str(latest_url or "").strip() or default_latest_url,
+                        poll_interval=float(max(0.01, poll_interval)),
+                        http_timeout=float(max(0.1, http_timeout)),
+                        move_duration=float(max(0.01, move_duration)),
+                        pan_joint=str(pan_joint or DEFAULT_FOLLOW_PAN_JOINT),
+                        tilt_joint=str(tilt_joint or DEFAULT_FOLLOW_TILT_JOINT),
+                        pan_sign=float(pan_sign),
+                        tilt_sign=float(tilt_sign),
+                        pan_gain=float(pan_gain),
+                        tilt_gain=float(tilt_gain),
+                        pan_dead_zone=float(max(0.0, pan_dead_zone)),
+                        tilt_dead_zone=float(max(0.0, tilt_dead_zone)),
+                        pan_resume_zone=float(max(0.0, pan_resume_zone)),
+                        tilt_resume_zone=float(max(0.0, tilt_resume_zone)),
+                        min_pan_step=float(max(0.0, min_pan_step)),
+                        min_tilt_step=float(max(0.0, min_tilt_step)),
+                        pan_min_step_zone=float(max(0.0, pan_min_step_zone)),
+                        tilt_min_step_zone=float(max(0.0, tilt_min_step_zone)),
+                        max_pan_step=float(max(0.0, max_pan_step)),
+                        max_tilt_step=float(max(0.0, max_tilt_step)),
+                        command_mode=(
+                            "settle"
+                            if str(command_mode).strip().lower() == "settle"
+                            else "stream"
+                        ),
+                        limit_margin_raw=int(max(0, limit_margin_raw)),
+                        stiction_eps_deg=float(max(0.0, stiction_eps_deg)),
+                        stiction_frames=int(max(1, stiction_frames)),
+                        pan_breakaway_step=float(max(0.0, pan_breakaway_step)),
+                        pan_breakaway_step_pos=(
+                            None
+                            if pan_breakaway_step_pos is None
+                            else float(max(0.0, pan_breakaway_step_pos))
+                        ),
+                        pan_breakaway_step_neg=(
+                            float(max(0.0, pan_breakaway_step_neg))
+                            if pan_breakaway_step_neg is not None
+                            else float(max(0.0, pan_breakaway_step))
+                        ),
+                        pan_negative_scale=float(max(1.0, pan_negative_scale)),
+                        tilt_breakaway_step=float(max(0.0, tilt_breakaway_step)),
+                        enable_idle_scan_fallback=True,
+                        lost_target_hold_sec=float(max(0.0, lost_target_hold_sec)),
+                        idle_scan=IdleScanConfig(
+                            pan_joint=str(pan_joint or DEFAULT_FOLLOW_PAN_JOINT),
+                            tilt_joint=str(tilt_joint or DEFAULT_FOLLOW_TILT_JOINT),
+                            speed_percent=int(max(1, min(100, idle_scan_speed_percent))),
+                            pan_range_deg=float(np.clip(idle_scan_pan_range_deg, 1.0, 45.0)),
+                            tilt_range_deg=float(np.clip(idle_scan_tilt_range_deg, 1.0, 30.0)),
+                            move_duration_min_sec=idle_scan_move_min,
+                            move_duration_max_sec=idle_scan_move_max,
+                            dwell_sec_min=idle_scan_dwell_min,
+                            dwell_sec_max=idle_scan_dwell_max,
+                        ),
+                    ),
+                )
+                self._control_mode = CONTROL_MODE_ATTENTION
+            else:
+                worker = FaceFollowWorker(
+                    robot=robot,
+                    robot_lock=self._lock,
+                    config=FaceFollowConfig(
+                        target_kind=str(target_kind or "face"),
+                        latest_url=str(latest_url or "").strip() or default_latest_url,
+                        poll_interval=float(max(0.01, poll_interval)),
+                        http_timeout=float(max(0.1, http_timeout)),
+                        move_duration=float(max(0.01, move_duration)),
+                        pan_joint=str(pan_joint or DEFAULT_FOLLOW_PAN_JOINT),
+                        tilt_joint=str(tilt_joint or DEFAULT_FOLLOW_TILT_JOINT),
+                        pan_sign=float(pan_sign),
+                        tilt_sign=float(tilt_sign),
+                        pan_gain=float(pan_gain),
+                        tilt_gain=float(tilt_gain),
+                        pan_dead_zone=float(max(0.0, pan_dead_zone)),
+                        tilt_dead_zone=float(max(0.0, tilt_dead_zone)),
+                        pan_resume_zone=float(max(0.0, pan_resume_zone)),
+                        tilt_resume_zone=float(max(0.0, tilt_resume_zone)),
+                        min_pan_step=float(max(0.0, min_pan_step)),
+                        min_tilt_step=float(max(0.0, min_tilt_step)),
+                        pan_min_step_zone=float(max(0.0, pan_min_step_zone)),
+                        tilt_min_step_zone=float(max(0.0, tilt_min_step_zone)),
+                        max_pan_step=float(max(0.0, max_pan_step)),
+                        max_tilt_step=float(max(0.0, max_tilt_step)),
+                        command_mode=(
+                            "settle"
+                            if str(command_mode).strip().lower() == "settle"
+                            else "stream"
+                        ),
+                        limit_margin_raw=int(max(0, limit_margin_raw)),
+                        stiction_eps_deg=float(max(0.0, stiction_eps_deg)),
+                        stiction_frames=int(max(1, stiction_frames)),
+                        pan_breakaway_step=float(max(0.0, pan_breakaway_step)),
+                        pan_breakaway_step_pos=(
+                            None
+                            if pan_breakaway_step_pos is None
+                            else float(max(0.0, pan_breakaway_step_pos))
+                        ),
+                        pan_breakaway_step_neg=(
+                            float(max(0.0, pan_breakaway_step_neg))
+                            if pan_breakaway_step_neg is not None
+                            else float(max(0.0, pan_breakaway_step))
+                        ),
+                        pan_negative_scale=float(max(1.0, pan_negative_scale)),
+                        tilt_breakaway_step=float(max(0.0, tilt_breakaway_step)),
+                    ),
+                )
+                self._control_mode = CONTROL_MODE_FOLLOW
             worker.start()
             self._follow_worker = worker
             self._last_follow_payload = worker.status_payload()
@@ -800,7 +742,6 @@ class QuickControlService:
                     "running": True,
                 }
             )
-            self._control_mode = CONTROL_MODE_FOLLOW
             self._control_error = ""
             return self.follow_status()
 
@@ -820,6 +761,8 @@ class QuickControlService:
     def idle_scan_start(
         self,
         *,
+        pan_joint: str,
+        tilt_joint: str,
         speed_percent: int,
         pan_range_deg: float,
         tilt_range_deg: float,
@@ -830,43 +773,43 @@ class QuickControlService:
     ) -> dict[str, Any]:
         with self._lock:
             robot = self._require_robot()
-            state = robot.get_state()
-            joint_names = self._joint_names_from_state(state)
-            pan_index = self._joint_index_by_name(joint_names, DEFAULT_FOLLOW_PAN_JOINT)
-            tilt_index = self._joint_index_by_name(joint_names, DEFAULT_FOLLOW_TILT_JOINT)
-            q_current = np.asarray(state.joint_state.q, dtype=float).copy()
             self._deactivate_control_locked()
             move_min = float(max(0.2, min(move_duration_min_sec, move_duration_max_sec)))
             move_max = float(max(move_min, move_duration_max_sec))
             dwell_min = float(max(0.0, min(dwell_sec_min, dwell_sec_max)))
             dwell_max = float(max(dwell_min, dwell_sec_max))
-            self._idle_scan = IdleScanConfig(
-                enabled=True,
-                speed_percent=int(max(1, min(100, speed_percent))),
-                pan_range_deg=float(np.clip(pan_range_deg, 1.0, 45.0)),
-                tilt_range_deg=float(np.clip(tilt_range_deg, 1.0, 30.0)),
-                move_duration_min_sec=move_min,
-                move_duration_max_sec=move_max,
-                dwell_sec_min=dwell_min,
-                dwell_sec_max=dwell_max,
-                phase="dwell",
-                phase_deadline_monotonic=time.monotonic(),
-                anchor_pan_deg=math.degrees(float(q_current[pan_index])),
-                anchor_tilt_deg=math.degrees(float(q_current[tilt_index])),
+            worker = IdleScanWorker(
+                robot=robot,
+                robot_lock=self._lock,
+                config=IdleScanConfig(
+                    pan_joint=str(pan_joint or DEFAULT_FOLLOW_PAN_JOINT),
+                    tilt_joint=str(tilt_joint or DEFAULT_FOLLOW_TILT_JOINT),
+                    speed_percent=int(max(1, min(100, speed_percent))),
+                    pan_range_deg=float(np.clip(pan_range_deg, 1.0, 45.0)),
+                    tilt_range_deg=float(np.clip(tilt_range_deg, 1.0, 30.0)),
+                    move_duration_min_sec=move_min,
+                    move_duration_max_sec=move_max,
+                    dwell_sec_min=dwell_min,
+                    dwell_sec_max=dwell_max,
+                ),
             )
+            worker.start()
+            self._idle_scan_worker = worker
+            self._last_idle_scan_payload = worker.status_payload()
             self._control_mode = CONTROL_MODE_IDLE_SCAN
             self._control_error = ""
             return self.idle_scan_status()
 
     def idle_scan_stop(self) -> dict[str, Any]:
         with self._lock:
-            if self._control_mode == CONTROL_MODE_IDLE_SCAN or self._idle_scan.enabled:
+            if self._control_mode == CONTROL_MODE_IDLE_SCAN or self._idle_scan_worker is not None:
                 self._control_mode = CONTROL_MODE_NONE
-                self._idle_scan.enabled = False
-                self._idle_scan.phase = "none"
-                self._idle_scan.phase_deadline_monotonic = 0.0
-                self._idle_scan.current_target_pan_deg = None
-                self._idle_scan.current_target_tilt_deg = None
+                if self._idle_scan_worker is not None:
+                    self._last_idle_scan_payload = self._idle_scan_worker.status_payload()
+                    self._last_idle_scan_payload["enabled"] = False
+                    self._last_idle_scan_payload["running"] = False
+                    self._idle_scan_worker.request_stop()
+                    self._idle_scan_worker = None
             return self.idle_scan_status()
 
     def agent_status(self) -> dict[str, Any]:
