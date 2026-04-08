@@ -1,1 +1,0 @@
-{"pid": 6767, "port": "/dev/tty.usbmodem5B141115361", "robot_id": "soarmmoce", "timestamp": 1775641981.804495, "cwd": "/Users/moce", "cmdline": "/Users/moce/Documents/Project/MomoAgent/Software/Master/quick_control_api/main.py --host 0.0.0.0 --port 8010"}
