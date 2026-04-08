@@ -22,21 +22,41 @@ from pathlib import Path
 from typing import Any
 
 
-SDK_SRC = Path(__file__).resolve().parents[3] / "sdk" / "src"
-if SDK_SRC.exists():
-    sdk_src_str = str(SDK_SRC)
-    if sdk_src_str not in sys.path:
-        sys.path.insert(0, sdk_src_str)
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+SDK_SRC = PACKAGE_ROOT.parent
+SDK_ROOT = SDK_SRC.parent
+REPO_ROOT = SDK_ROOT.parent
+LEGACY_SKILL_ROOT = REPO_ROOT / "skills" / "soarmmoce-real-con"
+PACKAGE_RUNTIME_DIR = PACKAGE_ROOT / "runtime"
+LEGACY_RUNTIME_DIR = LEGACY_SKILL_ROOT / "workspace" / "runtime"
+DEFAULT_LIMIT_JSON = (
+    LEGACY_RUNTIME_DIR / "urdf_limit_calibration.json"
+    if LEGACY_RUNTIME_DIR.exists()
+    else PACKAGE_RUNTIME_DIR / "urdf_limit_calibration.json"
+)
+
+sdk_src_str = str(SDK_SRC)
+if sdk_src_str not in sys.path:
+    sys.path.insert(0, sdk_src_str)
 
 from soarmmoce_sdk.cli_common import run_and_print
 
-from soarmmoce_urdf_zero_tuner import (
-    DEFAULT_OFFSETS_DEG,
-    DEFAULT_URDF_PATH,
-    _parse_offsets_json,
-    _patched_joint_origins,
-    _rewrite_mesh_paths,
-)
+try:
+    from soarmmoce_sdk.clabration.urdf_zero_tuner import (
+        DEFAULT_OFFSETS_DEG,
+        DEFAULT_URDF_PATH,
+        _parse_offsets_json,
+        _patched_joint_origins,
+        _rewrite_mesh_paths,
+    )
+except ImportError:
+    from urdf_zero_tuner import (
+        DEFAULT_OFFSETS_DEG,
+        DEFAULT_URDF_PATH,
+        _parse_offsets_json,
+        _patched_joint_origins,
+        _rewrite_mesh_paths,
+    )
 
 
 SDK_TO_URDF_JOINT = {
@@ -46,9 +66,6 @@ SDK_TO_URDF_JOINT = {
     "wrist_flex": "wrist",
     "wrist_roll": "wrist_roll",
 }
-DEFAULT_LIMIT_JSON = (
-    Path(__file__).resolve().parents[1] / "workspace" / "runtime" / "urdf_limit_calibration.json"
-)
 
 
 def _parse_args() -> argparse.Namespace:

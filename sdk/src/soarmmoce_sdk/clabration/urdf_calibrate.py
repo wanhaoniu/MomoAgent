@@ -3,23 +3,23 @@
 
 import json
 import signal
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
+SDK_SRC = Path(__file__).resolve().parents[2]
+sdk_src_str = str(SDK_SRC)
+if sdk_src_str not in sys.path:
+    sys.path.insert(0, sdk_src_str)
+
 try:
     import draccus
+    DRACCUS_AVAILABLE = True
 except ImportError:  # pragma: no cover - lightweight import fallback for tests
-    class _DraccusCompat:
-        @staticmethod
-        def wrap():
-            def _decorator(fn):
-                return fn
-
-            return _decorator
-
-    draccus = _DraccusCompat()
+    draccus = None
+    DRACCUS_AVAILABLE = False
 
 from soarmmoce_sdk.cli_common import run_and_print
 from soarmmoce_sdk import (
@@ -492,9 +492,22 @@ def _calibrate(cfg: CalibrateConfig) -> Dict[str, Any]:
         _disconnect_bus(bus)
 
 
-@draccus.wrap()
-def main(cfg: CalibrateConfig) -> None:
+def _run_main(cfg: CalibrateConfig) -> None:
     run_and_print(lambda: _calibrate(cfg))
+
+
+if DRACCUS_AVAILABLE:
+
+    @draccus.wrap()
+    def main(cfg: CalibrateConfig) -> None:
+        _run_main(cfg)
+
+else:
+
+    def main(cfg: CalibrateConfig | None = None) -> None:
+        if cfg is None:
+            cfg = CalibrateConfig()
+        _run_main(cfg)
 
 
 if __name__ == "__main__":

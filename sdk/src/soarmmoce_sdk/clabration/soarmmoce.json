@@ -2,9 +2,9 @@
   "shoulder_pan": {
     "id": 1,
     "drive_mode": 0,
-    "homing_offset": -1994,
-    "range_min": 1172,
-    "range_max": 3456,
+    "homing_offset": -1336,
+    "range_min": 980,
+    "range_max": 3367,
     "operating_mode": 0
   },
   "shoulder_lift": {
@@ -15,8 +15,8 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 3541,
-    "home_present_wrapped_raw": 3541
+    "home_present_raw": -1906,
+    "home_present_wrapped_raw": 2190
   },
   "elbow_flex": {
     "id": 3,
@@ -26,15 +26,15 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 358,
-    "home_present_wrapped_raw": 358
+    "home_present_raw": -5213,
+    "home_present_wrapped_raw": 2979
   },
   "wrist_flex": {
     "id": 4,
     "drive_mode": 0,
-    "homing_offset": -1489,
-    "range_min": 982,
-    "range_max": 2956,
+    "homing_offset": -1970,
+    "range_min": 1042,
+    "range_max": 3282,
     "operating_mode": 0
   },
   "wrist_roll": {
@@ -45,11 +45,11 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 738,
-    "home_present_wrapped_raw": 738
+    "home_present_raw": -719,
+    "home_present_wrapped_raw": 3377
   },
   "_meta": {
-    "generated_at_unix_s": 1775379026.48611,
+    "generated_at_unix_s": 1775642476.741214,
     "script": "soarmmoce_calibrate.py",
     "bounded_single_turn_joints": [
       "shoulder_pan",
