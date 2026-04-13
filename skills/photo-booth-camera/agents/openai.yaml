@@ -1,4 +1,0 @@
-interface:
-  display_name: "Photo Booth Camera"
-  short_description: "Take a Photo Booth photo and optionally send it to ArtsAPI"
-  default_prompt: "Use $photo-booth-camera to open Photo Booth and take a photo with my iPhone camera. For normal capture requests, prefer the older Terminal child-process backend from $photo-booth-macos-use so the action inherits Terminal accessibility permission and bypasses OpenClaw click restrictions; if that path is not applicable, fall back to the bundled MouseClickHelper-backed click path. If I ask to turn the fresh photo into a poster or animate it, chain the saved local photo into $artsapi-image-video."

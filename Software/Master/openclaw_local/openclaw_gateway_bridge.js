@@ -8,10 +8,10 @@ const path = require("path");
 const readline = require("readline");
 const { execFileSync } = require("child_process");
 
-function resolveAuthProfilesModulePath() {
-  const envPath = String(process.env.OPENCLAW_AUTH_PROFILES_MODULE || "").trim();
-  if (envPath && fs.existsSync(envPath)) {
-    return envPath;
+function resolveOpenClawDistDir() {
+  const envDir = String(process.env.OPENCLAW_DIST_DIR || "").trim();
+  if (envDir && fs.existsSync(envDir) && fs.statSync(envDir).isDirectory()) {
+    return envDir;
   }
 
   const candidateDirs = [];
@@ -30,24 +30,107 @@ function resolveAuthProfilesModulePath() {
   } catch (_err) {}
 
   for (const dir of candidateDirs) {
-    if (!dir || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
-      continue;
+    if (dir && fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+      return dir;
     }
-    const found = fs
-      .readdirSync(dir)
-      .filter((name) => /^auth-profiles-.*\.js$/.test(name))
-      .sort()
-      .at(0);
-    if (found) {
-      return path.join(dir, found);
+  }
+
+  throw new Error("Unable to locate OpenClaw dist directory");
+}
+
+function resolveGatewayModulePaths() {
+  const explicitModule = String(process.env.OPENCLAW_GATEWAY_CALL_MODULE || "").trim();
+  if (explicitModule && fs.existsSync(explicitModule)) {
+    return [explicitModule];
+  }
+
+  const distDir = resolveOpenClawDistDir();
+  const names = fs.readdirSync(distDir).filter((name) => {
+    if (!/\.js$/.test(name)) {
+      return false;
     }
+    if (/^call-status-/.test(name)) {
+      return false;
+    }
+    return /^call-/.test(name) || /^gateway-rpc\.runtime-/.test(name) || /^auth-profiles-/.test(name);
+  });
+
+  // Prefer the re-export file with stable named exports when it exists.
+  names.sort((left, right) => {
+    const score = (name) => {
+      if (/^call-DS_/.test(name)) return 0;
+      if (/^call-/.test(name)) return 1;
+      if (/^gateway-rpc\.runtime-/.test(name)) return 2;
+      if (/^auth-profiles-/.test(name)) return 3;
+      return 4;
+    };
+    return score(left) - score(right) || left.localeCompare(right);
+  });
+
+  return names.map((name) => path.join(distDir, name));
+}
+
+function resolveGatewayCaller() {
+  const candidates = resolveGatewayModulePaths();
+  const seenErrors = [];
+
+  for (const modulePath of candidates) {
+    try {
+      const mod = require(modulePath);
+
+      if (typeof mod.callGateway === "function") {
+        return { callGateway: mod.callGateway, modulePath, exportName: "callGateway" };
+      }
+
+      for (const [exportName, value] of Object.entries(mod)) {
+        if (typeof value === "function" && value.name === "callGateway") {
+          return { callGateway: value, modulePath, exportName };
+        }
+      }
+
+      if (typeof mod.En === "function") {
+        return { callGateway: mod.En, modulePath, exportName: "En" };
+      }
+
+      seenErrors.push(
+        `${path.basename(modulePath)} exports: ${Object.keys(mod).join(",") || "<none>"}`
+      );
+    } catch (error) {
+      seenErrors.push(
+        `${path.basename(modulePath)} load failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  throw new Error(
+    "OpenClaw bridge could not resolve callGateway export"
+      + (seenErrors.length > 0 ? `; candidates=${seenErrors.join(" | ")}` : "")
+  );
+}
+
+function resolveAuthProfilesModulePath() {
+  const envPath = String(process.env.OPENCLAW_AUTH_PROFILES_MODULE || "").trim();
+  if (envPath && fs.existsSync(envPath)) {
+    return envPath;
+  }
+
+  const distDir = resolveOpenClawDistDir();
+  const found = fs
+    .readdirSync(distDir)
+    .filter((name) => /^auth-profiles-.*\.js$/.test(name))
+    .sort()
+    .at(0);
+  if (found) {
+    return path.join(distDir, found);
   }
 
   throw new Error("Unable to locate OpenClaw auth-profiles module");
 }
 
-const openclaw = require(resolveAuthProfilesModulePath());
-const callGateway = openclaw.En;
+const gatewayCaller = resolveGatewayCaller();
+const callGateway = gatewayCaller.callGateway;
 
 if (typeof callGateway !== "function") {
   throw new Error("OpenClaw bridge could not resolve callGateway export");

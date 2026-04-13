@@ -20,7 +20,6 @@ import numpy as np
 from PyQt5.QtCore import QEvent, QSize, QTimer, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QAction,
     QApplication,
     QComboBox,
     QDockWidget,
@@ -28,9 +27,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -41,11 +38,10 @@ from PyQt5.QtWidgets import (
 )
 
 from hmi.camera_window import CameraWindow
-from hmi.pages import JobPage, QuickMovePage, SettingsPage
+from hmi.pages import QuickMovePage, SettingsPage
 from hmi.speech_window import SpeechInputWindow
 from hmi.theme import apply_soft_effects, get_stylesheet
 from hmi.widgets import GlobalStatusBar
-from main import ArmClient, list_positions, list_recordings
 
 try:
     from hmi.vtk_robot_view import VtkRobotView
@@ -66,13 +62,6 @@ except Exception as _e:
     _pb = None
     PYBULLET_AVAILABLE = False
     _PYBULLET_IMPORT_ERROR = _e
-
-try:
-    from video_client_h264 import H264VideoClient as VideoClient
-
-    VIDEO_AVAILABLE = True
-except ImportError:
-    VIDEO_AVAILABLE = False
 
 try:
     from v4l2_camera_reader import V4L2CameraReader
@@ -114,7 +103,6 @@ SIM_RENDER_SUPERSAMPLE = 1.4
 
 SDK_SRC = REPO_ROOT / "sdk" / "src"
 DEFAULT_SDK_REAL_CONFIG_PATH = SDK_SRC / "soarmmoce_sdk" / "resources" / "configs" / "soarm_moce_serial.yaml"
-DEFAULT_SDK_SIM_CONFIG_PATH = SDK_SRC / "soarmmoce_sdk" / "resources" / "configs" / "soarm_moce.yaml"
 if SDK_SRC.exists():
     _sdk_src_str = str(SDK_SRC)
     _normalized_sdk_src = os.path.normpath(_sdk_src_str)
@@ -131,12 +119,14 @@ else:
     SDKRobot = Any
 
 try:
-    from soarmmoce_sdk import Robot as RuntimeRobot
+    from soarmmoce_sdk import resolve_config as resolve_sdk_config
+    from soarmmoce_sdk.runtime_compat import CompatibleRuntimeRobot as RuntimeRobot
 
     SDK_AVAILABLE = True
     _SDK_IMPORT_ERROR = None
 except Exception as _sdk_e:
     RuntimeRobot = None
+    resolve_sdk_config = None
     SDK_AVAILABLE = False
     _SDK_IMPORT_ERROR = _sdk_e
 
@@ -171,23 +161,21 @@ class ArmControlGUI(QMainWindow):
     sdk_command_state_ready = pyqtSignal(object, str)
     sdk_command_failed = pyqtSignal(str, str)
     sdk_sync_state_ready = pyqtSignal(object)
+    sdk_connection_finished = pyqtSignal(bool, str)
 
     PAGE_QUICK_MOVE = 0
-    PAGE_JOB = 1
-    PAGE_SETTINGS = 2
+    PAGE_SETTINGS = 1
     PAGE_HOME = PAGE_QUICK_MOVE
 
     def __init__(self):
         super().__init__()
 
-        self.client: Optional[ArmClient] = None
         self.video_client = None
         self.video_thread: Optional[VideoThread] = None
         self.camera_window: Optional[CameraWindow] = None
         self.speech_window: Optional[SpeechInputWindow] = None
         self.connected = False
         self.connecting = False
-        self.recording = False
 
         self.current_lang = "zh"
         self.current_theme = "light"
@@ -213,6 +201,7 @@ class ArmControlGUI(QMainWindow):
         self.sim_robot = None
         self.sim_joint_names = []
         self.sim_q = np.zeros(0, dtype=float)
+        self._sim_limits = []
         self._sim_joint_offsets = np.zeros(0, dtype=float)
         self._sim_model_limits = []
         self._sim_fk = None
@@ -220,27 +209,12 @@ class ArmControlGUI(QMainWindow):
         self._sim_solve_ik = None
         self._sdk_robot: Optional[SDKRobot] = None
         self._sdk_lock = threading.RLock()
-        self._sdk_transport_override = str(os.getenv("SOARMMOCE_TRANSPORT", "")).strip().lower() or None
         env_sdk_config = str(os.getenv("SOARMMOCE_CONFIG", "")).strip()
         self._sdk_config_path = env_sdk_config or (str(DEFAULT_SDK_REAL_CONFIG_PATH) if DEFAULT_SDK_REAL_CONFIG_PATH.exists() else None)
-        self._sdk_fallback_config_path = (
-            str(DEFAULT_SDK_SIM_CONFIG_PATH)
-            if (not env_sdk_config and DEFAULT_SDK_SIM_CONFIG_PATH.exists())
-            else None
-        )
         self._sdk_runtime_mode = "disconnected"
         self._sdk_runtime_transport = ""
         self._sdk_runtime_config_path = self._sdk_config_path or ""
         self._sdk_last_connect_error = ""
-        self._sdk_mock_shared_state_path = str(
-            Path(
-                os.getenv(
-                    "SOARMMOCE_MOCK_SHARED_STATE_FILE",
-                    "/tmp/soarmmoce_mock_shared_state.json",
-                )
-            ).expanduser()
-        )
-        os.environ["SOARMMOCE_MOCK_SHARED_STATE_FILE"] = self._sdk_mock_shared_state_path
         self._sdk_gui_sync_enabled = str(os.getenv("SOARMMOCE_GUI_SYNC", "1")).strip().lower() not in ("0", "false", "off", "no")
         try:
             self._sdk_gui_sync_interval_sec = max(
@@ -249,20 +223,6 @@ class ArmControlGUI(QMainWindow):
             )
         except Exception:
             self._sdk_gui_sync_interval_sec = 0.04
-        self._sdk_auto_home_on_start = str(os.getenv("SOARMMOCE_AUTO_HOME_ON_START", "1")).strip().lower() not in (
-            "0",
-            "false",
-            "off",
-            "no",
-        )
-        try:
-            self._sdk_auto_home_duration_sec = max(
-                0.2,
-                float(str(os.getenv("SOARMMOCE_AUTO_HOME_DURATION", "1.0")).strip()),
-            )
-        except Exception:
-            self._sdk_auto_home_duration_sec = 1.0
-        self._sdk_auto_home_done = False
         self._sdk_last_gui_sync_ts = 0.0
         self._sdk_last_gui_sync_err_ts = 0.0
         self._sdk_visual_prefer_twin_until_ts = 0.0
@@ -298,17 +258,14 @@ class ArmControlGUI(QMainWindow):
         self.sdk_command_state_ready.connect(self._on_sdk_command_state_ready)
         self.sdk_command_failed.connect(self._on_sdk_command_failed)
         self.sdk_sync_state_ready.connect(self._on_sdk_sync_state_ready)
+        self.sdk_connection_finished.connect(self._on_sdk_connection_finished)
         self._start_sdk_command_worker()
         self._start_sdk_sync_worker()
 
-        self.refresh_positions()
-        self.refresh_recordings()
         self._apply_language()
+        self._sync_motion_defaults_from_settings()
         self._update_connection_widgets()
         self._update_global_status_bar()
-        QTimer.singleShot(0, self._bootstrap_sdk_connection)
-        if self._sdk_auto_home_on_start:
-            QTimer.singleShot(0, self._auto_home_after_startup)
 
     def _build_translations(self):
         return {
@@ -316,9 +273,9 @@ class ArmControlGUI(QMainWindow):
                 "window_title": "SoarmMoce Control",
                 "nav_home": "Home",
                 "nav_quick": "Quick Move",
-                "nav_job": "Job",
                 "nav_settings": "Settings",
                 "btn_back_home": "⌂",
+                "btn_connecting": "连接中...",
                 "btn_camera": "📷 相机",
                 "btn_camera_close": "📷 关闭相机",
                 "btn_speech": "🎤 语音",
@@ -369,23 +326,20 @@ class ArmControlGUI(QMainWindow):
                 "job_recordings": "录制",
                 "job_positions": "点位",
                 "job_logs": "日志",
-                "settings_connection": "连接",
+                "settings_hardware": "硬件",
                 "settings_robot": "Robot Model / URDF",
                 "settings_motion": "Motion",
                 "settings_ui": "UI",
                 "settings_jog_style": "Jog 风格",
                 "settings_jog_minimal": "极简线条（推荐）",
                 "settings_jog_soft": "柔和键帽",
-                "label_server_ip": "服务器 IP:",
                 "label_ctl_port": "控制端口:",
                 "label_camera_source": "相机来源:",
                 "label_cam_port": "摄像头端口:",
                 "label_camera_device": "本地摄像头:",
                 "label_camera_rotation": "画面旋转:",
-                "camera_source_udp": "UDP 视频流",
+                "camera_source_virtual": "虚拟预览",
                 "camera_source_v4l2": "本地 V4L2 相机",
-                "label_leader_port": "主臂串口:",
-                "label_leader_id": "主臂 ID:",
                 "placeholder_pos_name": "位置名称",
                 "placeholder_rec_name": "录制名称",
                 "btn_save_pos": "💾 保存当前位置",
@@ -424,9 +378,8 @@ class ArmControlGUI(QMainWindow):
                 "msg_confirm_delete_pos": "确定要删除位置 '{name}' 吗?",
                 "msg_confirm_delete_rec": "确定要删除录制 '{name}' 吗?",
                 "msg_confirm_home": "确定要回 Home 位吗?",
-                "msg_confirm_exit_home": "要在退出前回 Home 位吗?",
-                "msg_test_conn_placeholder": "连接测试入口预留（可扩展为 ping/握手）",
-                "log_connecting": "正在连接 {ip}:{port}...",
+                "msg_confirm_exit_disconnect": "当前已连接，确定直接断开并退出吗?",
+                "log_connecting": "正在建立串口连接...",
                 "log_connect_success": "连接成功!",
                 "log_connect_failed": "连接失败: {error}",
                 "log_disconnecting": "正在断开...",
@@ -451,9 +404,9 @@ class ArmControlGUI(QMainWindow):
                 "window_title": "SoarmMoce Control",
                 "nav_home": "Home",
                 "nav_quick": "Quick Move",
-                "nav_job": "Job",
                 "nav_settings": "Settings",
                 "btn_back_home": "⌂",
+                "btn_connecting": "Connecting...",
                 "btn_camera": "📷 Camera",
                 "btn_camera_close": "📷 Close Camera",
                 "btn_speech": "🎤 Voice",
@@ -504,23 +457,20 @@ class ArmControlGUI(QMainWindow):
                 "job_recordings": "Recordings",
                 "job_positions": "Positions",
                 "job_logs": "Logs",
-                "settings_connection": "Connection",
+                "settings_hardware": "Hardware",
                 "settings_robot": "Robot Model / URDF",
                 "settings_motion": "Motion",
                 "settings_ui": "UI",
                 "settings_jog_style": "Jog Style",
                 "settings_jog_minimal": "Minimal Line (Recommended)",
                 "settings_jog_soft": "Soft Keycap",
-                "label_server_ip": "Server IP:",
                 "label_ctl_port": "Control Port:",
                 "label_camera_source": "Camera Source:",
                 "label_cam_port": "Camera Port:",
                 "label_camera_device": "Local Camera:",
                 "label_camera_rotation": "Camera Rotation:",
-                "camera_source_udp": "UDP Stream",
+                "camera_source_virtual": "Virtual Preview",
                 "camera_source_v4l2": "Local V4L2 Camera",
-                "label_leader_port": "Leader Serial:",
-                "label_leader_id": "Leader ID:",
                 "placeholder_pos_name": "Position name",
                 "placeholder_rec_name": "Recording name",
                 "btn_save_pos": "💾 Save Current Pose",
@@ -559,9 +509,8 @@ class ArmControlGUI(QMainWindow):
                 "msg_confirm_delete_pos": "Delete position '{name}'?",
                 "msg_confirm_delete_rec": "Delete recording '{name}'?",
                 "msg_confirm_home": "Return to home position?",
-                "msg_confirm_exit_home": "Return to home before exit?",
-                "msg_test_conn_placeholder": "Connection test placeholder (ping/handshake can be added)",
-                "log_connecting": "Connecting to {ip}:{port}...",
+                "msg_confirm_exit_disconnect": "Robot is connected. Disconnect and exit now?",
+                "log_connecting": "Opening serial runtime...",
                 "log_connect_success": "Connected!",
                 "log_connect_failed": "Connect failed: {error}",
                 "log_disconnecting": "Disconnecting...",
@@ -618,11 +567,9 @@ class ArmControlGUI(QMainWindow):
         root.addWidget(self.stack, stretch=1)
 
         self.quick_page = QuickMovePage()
-        self.job_page = JobPage()
         self.settings_page = SettingsPage()
 
         self.stack.addWidget(self.quick_page)
-        self.stack.addWidget(self.job_page)
         self.stack.addWidget(self.settings_page)
 
         self.global_status = GlobalStatusBar()
@@ -661,24 +608,23 @@ class ArmControlGUI(QMainWindow):
         self.back_home_btn = QPushButton(self._tr("btn_back_home"))
         self.back_home_btn.setObjectName("primaryBtn")
         self.back_home_btn.setFixedWidth(44)
+        self.back_home_btn.setCheckable(True)
         self.back_home_btn.clicked.connect(lambda: self._set_page(self.PAGE_QUICK_MOVE))
         layout.addWidget(self.back_home_btn)
-
-        # Keep top bar minimal: quick shortcut + Job + Settings.
-        self.nav_buttons = []
-        self.top_job_btn = QPushButton(self._tr("nav_job"))
-        self.top_job_btn.setObjectName("primaryBtn")
-        self.top_job_btn.setFixedWidth(44)
-        self.top_job_btn.clicked.connect(lambda: self._set_page(self.PAGE_JOB))
-        layout.addWidget(self.top_job_btn)
 
         self.top_settings_btn = QPushButton(self._tr("nav_settings"))
         self.top_settings_btn.setObjectName("primaryBtn")
         self.top_settings_btn.setFixedWidth(44)
+        self.top_settings_btn.setCheckable(True)
         self.top_settings_btn.clicked.connect(lambda: self._set_page(self.PAGE_SETTINGS))
         layout.addWidget(self.top_settings_btn)
+        self.nav_buttons = [self.back_home_btn, self.top_settings_btn]
 
         layout.addStretch()
+
+        self.connect_toggle_btn = QPushButton(self._tr("btn_connect"))
+        self.connect_toggle_btn.setObjectName("primaryBtn")
+        layout.addWidget(self.connect_toggle_btn)
 
         self.camera_btn = QPushButton(self._tr("btn_camera"))
         self.camera_btn.setObjectName("primaryBtn")
@@ -746,8 +692,8 @@ class ArmControlGUI(QMainWindow):
 
     def _apply_header_icons(self):
         self._back_home_has_icon = self._set_button_icon(self.back_home_btn, "home", size=18)
-        self._top_job_has_icon = self._set_button_icon(self.top_job_btn, "job", size=18)
         self._top_settings_has_icon = self._set_button_icon(self.top_settings_btn, "settings", size=18)
+        self.connect_toggle_btn.setIcon(QIcon())
         self.camera_btn.setIcon(QIcon())
         self.speech_btn.setIcon(QIcon())
         self.log_btn.setIcon(QIcon())
@@ -778,12 +724,31 @@ class ArmControlGUI(QMainWindow):
 
     def _plain_header_text(self, key: str) -> str:
         text = self._tr(key)
-        text = text.replace("📷 ", "").replace("🎤 ", "").replace("🧾 ", "").replace("⌂", "").strip()
+        text = (
+            text.replace("📷 ", "")
+            .replace("🎤 ", "")
+            .replace("🧾 ", "")
+            .replace("🔗 ", "")
+            .replace("❌ ", "")
+            .replace("⌂", "")
+            .strip()
+        )
         return text if text else self._tr(key)
 
     def _set_camera_btn_text(self, opened: bool):
         key = "btn_camera_close" if opened else "btn_camera"
         self.camera_btn.setText(self._plain_header_text(key))
+
+    def _set_connect_btn_text(self):
+        if self.connecting:
+            key = "btn_connecting"
+        elif self.connected or self._sdk_runtime_mode == "simulation":
+            key = "btn_disconnect"
+        else:
+            key = "btn_connect"
+        self.connect_toggle_btn.setText(self._plain_header_text(key))
+        self.connect_toggle_btn.setToolTip(self._tr(key))
+        self.connect_toggle_btn.setEnabled(not self.connecting)
 
     def _set_speech_btn_text(self, opened: bool):
         key = "btn_speech_close" if opened else "btn_speech"
@@ -800,24 +765,16 @@ class ArmControlGUI(QMainWindow):
         self.quick_page.speed_changed.connect(self.on_speed_changed)
         self.quick_page.home_clicked.connect(self._on_quick_zero)
 
-        self.job_page.save_pos_btn.clicked.connect(self.on_save_pos)
-        self.job_page.goto_btn.clicked.connect(self.on_goto_pos)
-        self.job_page.del_pos_btn.clicked.connect(self.on_del_pos)
-        self.job_page.refresh_pos_btn.clicked.connect(self.refresh_positions)
-        self.job_page.pos_list.itemDoubleClicked.connect(self.on_goto_pos)
-
-        self.job_page.record_btn.clicked.connect(self.on_toggle_record)
-        self.job_page.play_btn.clicked.connect(self.on_play_rec)
-        self.job_page.del_rec_btn.clicked.connect(self.on_del_rec)
-        self.job_page.rec_list.itemDoubleClicked.connect(self.on_play_rec)
-
-        self.settings_page.connect_btn.clicked.connect(self.on_connect)
-        self.settings_page.disconnect_btn.clicked.connect(self.on_disconnect)
-        self.settings_page.test_conn_btn.clicked.connect(self.on_test_connection)
+        self.connect_toggle_btn.clicked.connect(self.on_toggle_connection)
         self.settings_page.default_speed_spin.valueChanged.connect(self.on_speed_changed)
+        self.settings_page.default_step_dist_spin.valueChanged.connect(self.on_default_step_distance_changed)
+        self.settings_page.default_step_angle_spin.valueChanged.connect(self.on_default_step_angle_changed)
         self.settings_page.ui_lang_combo.currentIndexChanged.connect(self.on_settings_language_changed)
         self.settings_page.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
         self.settings_page.jog_style_combo.currentIndexChanged.connect(self.on_jog_style_changed)
+        self.settings_page.camera_source_combo.currentIndexChanged.connect(self.on_camera_source_changed)
+        self.settings_page.camera_rotation_combo.currentIndexChanged.connect(self.on_camera_source_changed)
+        self.settings_page.camera_device_input.editingFinished.connect(self.on_camera_source_changed)
         self.settings_page.apply_view_btn.clicked.connect(self._apply_vtk_visual_settings)
         self.settings_page.aa_mode_combo.currentIndexChanged.connect(self._apply_vtk_visual_settings)
         self.settings_page.material_preset_combo.currentIndexChanged.connect(self._apply_vtk_visual_settings)
@@ -888,6 +845,21 @@ class ArmControlGUI(QMainWindow):
         if hasattr(self.quick_page, "set_jog_visual_style"):
             self.quick_page.set_jog_visual_style(style if style else "line")
 
+    def on_default_step_distance_changed(self, value: float):
+        self.quick_page.step_dist_spin.blockSignals(True)
+        self.quick_page.step_dist_spin.setValue(float(value))
+        self.quick_page.step_dist_spin.blockSignals(False)
+
+    def on_default_step_angle_changed(self, value: float):
+        self.quick_page.step_angle_spin.blockSignals(True)
+        self.quick_page.step_angle_spin.setValue(float(value))
+        self.quick_page.step_angle_spin.blockSignals(False)
+
+    def _sync_motion_defaults_from_settings(self):
+        self.on_speed_changed(int(self.settings_page.default_speed_spin.value()))
+        self.on_default_step_distance_changed(float(self.settings_page.default_step_dist_spin.value()))
+        self.on_default_step_angle_changed(float(self.settings_page.default_step_angle_spin.value()))
+
     def _apply_language(self):
         self.setWindowTitle(self._tr("window_title"))
 
@@ -896,23 +868,18 @@ class ArmControlGUI(QMainWindow):
         else:
             self.back_home_btn.setText(self._tr("nav_quick"))
         self.back_home_btn.setToolTip(self._tr("nav_quick"))
-        if getattr(self, "_top_job_has_icon", False):
-            self.top_job_btn.setText("")
-        else:
-            self.top_job_btn.setText(self._tr("nav_job"))
-        self.top_job_btn.setToolTip(self._tr("nav_job"))
         if getattr(self, "_top_settings_has_icon", False):
             self.top_settings_btn.setText("")
         else:
             self.top_settings_btn.setText(self._tr("nav_settings"))
         self.top_settings_btn.setToolTip(self._tr("nav_settings"))
+        self._set_connect_btn_text()
         self._set_camera_btn_text(self._is_camera_window_visible())
         self._set_speech_btn_text(self._is_speech_window_visible())
         self.log_btn.setText(self._plain_header_text("btn_log"))
         self.lang_label.setText(self._tr("lang_label"))
 
         self.quick_page.set_texts(self._tr)
-        self.job_page.set_texts(self._tr, self.recording)
         self.settings_page.set_texts(self._tr)
 
         self.mode_text = self._tr("mode_manual")
@@ -926,8 +893,6 @@ class ArmControlGUI(QMainWindow):
         self._sync_language_combos()
         self._update_global_status_bar()
         self.statusBar().showMessage(self._status_message_for_runtime())
-
-        self.refresh_recordings()
 
     def _sync_language_combos(self):
         lang_idx = 0 if self.current_lang == "zh" else 1
@@ -1100,6 +1065,16 @@ class ArmControlGUI(QMainWindow):
             else:
                 q_target = np.asarray(q_target, dtype=float).copy()
             if idx >= q_target.shape[0]:
+                if idx == len(self.quick_page.joint_rows) - 1 and bool(getattr(state_before.gripper_state, "available", False)):
+                    current_ratio = getattr(state_before.gripper_state, "open_ratio", None)
+                    if current_ratio is None:
+                        current_ratio = 0.5
+                    ratio_step = 0.05 if float(delta) >= 0.0 else -0.05
+                    robot.set_gripper(
+                        open_ratio=float(np.clip(float(current_ratio) + ratio_step, 0.0, 1.0)),
+                        wait=False,
+                    )
+                    return robot.get_state()
                 raise ValueError(f"Joint index {idx} out of range")
             lo, hi = robot.robot_model.joint_limits[idx]
             q_target[idx] = float(np.clip(q_target[idx] + delta, float(lo), float(hi)))
@@ -1107,70 +1082,47 @@ class ArmControlGUI(QMainWindow):
             return robot.get_state()
 
     def _execute_sdk_cartesian_jog(self, command: Dict[str, Any]) -> object:
-        key_norm = str(command["key"])
-        trans_map = {
-            "+X": np.array([1.0, 0.0, 0.0], dtype=float),
-            "-X": np.array([-1.0, 0.0, 0.0], dtype=float),
-            "+Y": np.array([0.0, 1.0, 0.0], dtype=float),
-            "-Y": np.array([0.0, -1.0, 0.0], dtype=float),
-            "+Z": np.array([0.0, 0.0, 1.0], dtype=float),
-            "-Z": np.array([0.0, 0.0, -1.0], dtype=float),
+        key_norm = str(command["key"]).strip().upper()
+        step_mm = float(command.get("step_mm", 1.0))
+        step_rad = float(command.get("step_rad", math.radians(1.0)))
+        duration = float(command.get("duration", 0.2))
+        frame = "tool" if bool(command.get("use_tool", False)) else "base"
+        delta_kwargs = {
+            "dx": 0.0,
+            "dy": 0.0,
+            "dz": 0.0,
+            "drx": 0.0,
+            "dry": 0.0,
+            "drz": 0.0,
         }
-        rot_map = {
-            "+RX": np.array([1.0, 0.0, 0.0], dtype=float),
-            "-RX": np.array([-1.0, 0.0, 0.0], dtype=float),
-            "+RY": np.array([0.0, 1.0, 0.0], dtype=float),
-            "-RY": np.array([0.0, -1.0, 0.0], dtype=float),
-            "+RZ": np.array([0.0, 0.0, 1.0], dtype=float),
-            "-RZ": np.array([0.0, 0.0, -1.0], dtype=float),
+        key_map = {
+            "+X": ("dx", 1.0, step_mm / 1000.0),
+            "-X": ("dx", -1.0, step_mm / 1000.0),
+            "+Y": ("dy", 1.0, step_mm / 1000.0),
+            "-Y": ("dy", -1.0, step_mm / 1000.0),
+            "+Z": ("dz", 1.0, step_mm / 1000.0),
+            "-Z": ("dz", -1.0, step_mm / 1000.0),
+            "+RX": ("drx", 1.0, step_rad),
+            "-RX": ("drx", -1.0, step_rad),
+            "+RY": ("dry", 1.0, step_rad),
+            "-RY": ("dry", -1.0, step_rad),
+            "+RZ": ("drz", 1.0, step_rad),
+            "-RZ": ("drz", -1.0, step_rad),
         }
-        if key_norm not in trans_map and key_norm not in rot_map:
-            raise ValueError(f"Unsupported jog key: {key_norm}")
+        if key_norm not in key_map:
+            raise RuntimeError(f"Unsupported Cartesian jog key: {key_norm}")
 
-        step_mm = float(command["step_mm"])
-        step_rad = float(command["step_rad"])
-        duration = float(command["duration"])
-        use_tool = bool(command.get("use_tool", False))
-
-        delta_pos_local = np.zeros(3, dtype=float)
-        delta_rot_local = np.zeros(3, dtype=float)
-        if key_norm in trans_map:
-            delta_pos_local = trans_map[key_norm] * (step_mm / 1000.0)
-        else:
-            delta_rot_local = rot_map[key_norm] * step_rad
+        field_name, sign, magnitude = key_map[key_norm]
+        delta_kwargs[field_name] = float(sign) * float(magnitude)
 
         with self._sdk_lock:
             robot = self._sdk_get_robot()
-            state_before = robot.get_state()
-            pose_now = self._extract_tcp_pose_from_sdk_state(state_before, prefer_twin=False)
-            if pose_now is None:
-                xyz_now = np.asarray(state_before.tcp_pose.xyz, dtype=float)
-                rpy_now = np.asarray(state_before.tcp_pose.rpy, dtype=float)
-            else:
-                xyz_now = np.asarray(pose_now[0], dtype=float)
-                rpy_now = np.asarray(pose_now[1], dtype=float)
-            R_now = self._rpy_to_rotmat(rpy_now)
-            if use_tool:
-                target_xyz = np.asarray(xyz_now, dtype=float) + (R_now @ delta_pos_local)
-                R_target = R_now @ self._rotvec_to_rotmat(delta_rot_local)
-            else:
-                target_xyz = np.asarray(xyz_now, dtype=float) + delta_pos_local
-                R_target = self._rotvec_to_rotmat(delta_rot_local) @ R_now
-            if key_norm in trans_map:
-                robot.move_pose(
-                    xyz=target_xyz,
-                    rpy=None,
-                    duration=duration,
-                    wait=False,
-                )
-            else:
-                target_rpy = self._rotmat_to_rpy(R_target)
-                robot.move_pose(
-                    xyz=target_xyz,
-                    rpy=target_rpy,
-                    duration=duration,
-                    wait=False,
-                )
+            robot.move_delta(
+                frame=frame,
+                duration=duration,
+                wait=False,
+                **delta_kwargs,
+            )
             return robot.get_state()
 
     def _execute_sdk_home(self, command: Dict[str, Any]) -> object:
@@ -1226,10 +1178,12 @@ class ArmControlGUI(QMainWindow):
             # Let the local preview animation finish; otherwise periodic state sync
             # snaps the 3D view back toward the lagging actual joints mid-motion.
             self._sdk_last_gui_sync_ts = time.time()
+            self._update_connection_widgets()
             self._update_quick_pose_from_sim()
             return
         self._sync_sim_from_sdk_state(state)
         self._sdk_last_gui_sync_ts = time.time()
+        self._update_connection_widgets()
         self._update_quick_pose_from_sim()
 
     def _on_quick_joint_step(self, idx: int, direction: float):
@@ -1286,53 +1240,6 @@ class ArmControlGUI(QMainWindow):
             self._jog_hold_timer.stop()
             return
         self._apply_quick_cartesian_jog(self._jog_hold_key)
-
-    @staticmethod
-    def _rpy_to_rotmat(rpy: np.ndarray) -> np.ndarray:
-        roll, pitch, yaw = [float(x) for x in np.asarray(rpy, dtype=float).reshape(3)]
-        cr, sr = math.cos(roll), math.sin(roll)
-        cp, sp = math.cos(pitch), math.sin(pitch)
-        cy, sy = math.cos(yaw), math.sin(yaw)
-        rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]], dtype=float)
-        ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]], dtype=float)
-        rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=float)
-        return rz @ ry @ rx
-
-    @staticmethod
-    def _rotvec_to_rotmat(rotvec: np.ndarray) -> np.ndarray:
-        rv = np.asarray(rotvec, dtype=float).reshape(3)
-        angle = float(np.linalg.norm(rv))
-        if angle < 1e-12:
-            return np.eye(3, dtype=float)
-        axis = rv / angle
-        x, y, z = float(axis[0]), float(axis[1]), float(axis[2])
-        c = math.cos(angle)
-        s = math.sin(angle)
-        v = 1.0 - c
-        return np.array(
-            [
-                [x * x * v + c, x * y * v - z * s, x * z * v + y * s],
-                [y * x * v + z * s, y * y * v + c, y * z * v - x * s],
-                [z * x * v - y * s, z * y * v + x * s, z * z * v + c],
-            ],
-            dtype=float,
-        )
-
-    @staticmethod
-    def _rotmat_to_rpy(rotmat: np.ndarray) -> np.ndarray:
-        R = np.asarray(rotmat, dtype=float).reshape(3, 3)
-        sy = -float(R[2, 0])
-        sy = float(np.clip(sy, -1.0, 1.0))
-        cy = float(max(0.0, 1.0 - sy * sy) ** 0.5)
-        if cy < 1e-9:
-            yaw = math.atan2(-float(R[0, 1]), float(R[1, 1]))
-            pitch = math.asin(sy)
-            roll = 0.0
-        else:
-            yaw = math.atan2(float(R[1, 0]), float(R[0, 0]))
-            pitch = math.asin(sy)
-            roll = math.atan2(float(R[2, 1]), float(R[2, 2]))
-        return np.array([roll, pitch, yaw], dtype=float)
 
     @staticmethod
     def _normalize_jog_key(key: str) -> str:
@@ -1549,12 +1456,6 @@ class ArmControlGUI(QMainWindow):
             }
         )
 
-    def _auto_home_after_startup(self):
-        if self._sdk_auto_home_done:
-            return
-        self._sdk_auto_home_done = True
-        self._enqueue_sdk_home(duration=self._sdk_auto_home_duration_sec, source="startup")
-
     def _on_quick_origin(self):
         self._enqueue_sdk_home(source="origin")
 
@@ -1608,10 +1509,42 @@ class ArmControlGUI(QMainWindow):
         preset = self.settings_page.camera_preset_combo.currentData() or "iso"
         self.sim_vtk_view.set_camera_preset(str(preset))
 
+    def _resolved_sdk_config(self):
+        if not SDK_AVAILABLE or resolve_sdk_config is None:
+            return None
+        cfg_path = self._sdk_runtime_config_path or self._sdk_config_path
+        try:
+            return resolve_sdk_config(cfg_path or None)
+        except Exception:
+            return None
+
+    def _resolved_serial_port_text(self) -> str:
+        cfg = self._resolved_sdk_config()
+        if cfg is None:
+            return "--"
+        port = str(getattr(cfg, "port", "") or "").strip()
+        return port or "--"
+
+    def _runtime_summary_text(self) -> str:
+        status = self._status_message_for_runtime()
+        if (not self.connecting) and (not self.connected) and self._sdk_last_connect_error:
+            return f"{status} | {self._sdk_last_connect_error}"
+        return status
+
+    def _refresh_settings_runtime_summary(self):
+        self.settings_page.set_runtime_summary(
+            status_text=self._runtime_summary_text(),
+            config_path=self._sdk_runtime_config_path or self._sdk_config_path or "",
+            serial_port=self._resolved_serial_port_text(),
+        )
+
     def _update_connection_widgets(self):
-        self.settings_page.set_connected(self.connected)
-        self.job_page.set_connected(self.connected)
-        self.quick_page.set_motion_enabled(self.connected or self._sim_ready)
+        runtime_connected = bool(self.connected or self._sdk_runtime_mode == "simulation")
+        self.settings_page.set_connected(runtime_connected)
+        self.quick_page.set_motion_enabled(runtime_connected)
+        self.quick_page.set_cartesian_enabled(runtime_connected)
+        self._set_connect_btn_text()
+        self._refresh_settings_runtime_summary()
 
     def _state_connection_text(self) -> str:
         if self.connecting:
@@ -1620,8 +1553,6 @@ class ArmControlGUI(QMainWindow):
             return self._tr("state_connected")
         if self._sdk_runtime_mode == "simulation":
             return self._tr("state_simulation")
-        if self._sdk_runtime_mode == "connected":
-            return self._tr("state_connected")
         return self._tr("state_disconnected")
 
     def _state_robot_text(self) -> str:
@@ -1655,23 +1586,17 @@ class ArmControlGUI(QMainWindow):
     def _status_message_for_runtime(self) -> str:
         if self.connecting:
             return self._tr("status_connecting")
-        if self.connected or self._sdk_runtime_mode == "connected":
+        if self.connected:
             return self._tr("status_connected")
         if self._sdk_runtime_mode == "simulation":
             return self._tr("status_simulation")
         return self._tr("status_ready")
 
     def _bootstrap_sdk_connection(self):
-        if not SDK_AVAILABLE:
-            return
-
-        def _task():
-            try:
-                self._sdk_get_robot()
-            except Exception as exc:
-                self.log_signal.emit(f"[SDK] initial connect failed: {exc}", "warning")
-
-        threading.Thread(target=_task, name="soarmmoce-sdk-bootstrap", daemon=True).start()
+        # Keep the hook for future lightweight preflight work, but do not
+        # auto-connect the real arm on GUI startup. Hardware connection is now
+        # lazy: it happens on the first explicit control action or manual connect.
+        return
 
     # ==================== Camera window ====================
 
@@ -1711,22 +1636,17 @@ class ArmControlGUI(QMainWindow):
         return frame
 
     def _display_camera_frame(self, frame: np.ndarray, fps: float, latency: float):
-        display_frame = frame.copy()
-        if self.recording:
-            cv2.circle(display_frame, (display_frame.shape[1] - 30, 30), 15, (0, 0, 255), -1)
-            cv2.putText(display_frame, "REC", (display_frame.shape[1] - 70, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-
         self.last_frame = frame.copy()
         self.last_frame_fps = float(fps)
         self.last_frame_latency = float(latency)
 
         if self._is_camera_window_visible():
             self.camera_window.set_frame(
-                display_frame,
+                frame,
                 f"FPS: {int(max(0.0, fps))}",
                 self._tr("latency_value", value=float(latency)),
                 f"RTT: {self.last_rtt_text}",
-                self.recording,
+                False,
             )
 
     def _on_virtual_cam_tick(self):
@@ -1760,6 +1680,8 @@ class ArmControlGUI(QMainWindow):
         return self.camera_window
 
     def _on_camera_window_closed(self):
+        if self._camera_source_mode() == "v4l2":
+            self._stop_camera_stream()
         self._set_camera_btn_text(False)
 
     def _is_camera_window_visible(self) -> bool:
@@ -1777,6 +1699,10 @@ class ArmControlGUI(QMainWindow):
         cam.activateWindow()
         self._set_camera_btn_text(True)
 
+        if self._camera_source_mode() == "v4l2":
+            self._start_camera_stream()
+            return
+
         if self._using_virtual_vtk_camera():
             frame = self._fetch_virtual_vtk_frame()
             if frame is not None:
@@ -1790,6 +1716,10 @@ class ArmControlGUI(QMainWindow):
                 fps=float(self.last_frame_fps),
                 latency=float(self.last_frame_latency),
             )
+            return
+
+        pixmap = self._build_placeholder_pixmap(cam.camera_label)
+        cam.set_placeholder(pixmap, self._tr("camera_disconnected"))
 
     # ==================== Speech window ====================
 
@@ -1903,6 +1833,9 @@ class ArmControlGUI(QMainWindow):
         return None
 
     def _sdk_transport_name(self, robot: SDKRobot) -> str:
+        transport_name = getattr(robot, "transport_name", None)
+        if isinstance(transport_name, str) and transport_name.strip():
+            return transport_name
         transport = getattr(robot, "_transport", None)
         if transport is None:
             return "uninitialized"
@@ -1932,48 +1865,27 @@ class ArmControlGUI(QMainWindow):
         elif mode_norm == "disconnected":
             self._sdk_runtime_transport = ""
 
-    def _sdk_build_robot(self, config_path: Optional[str], transport_override: Optional[str] = None) -> SDKRobot:
-        robot = RuntimeRobot.from_config(config_path) if config_path else RuntimeRobot()
-        if transport_override in ("mock", "tcp", "serial"):
-            robot.config.setdefault("transport", {})["type"] = str(transport_override)
-        return robot
+    def _sdk_build_robot(self, config_path: Optional[str]) -> SDKRobot:
+        return RuntimeRobot.from_config(config_path) if config_path else RuntimeRobot()
 
-    def _sdk_should_fallback_to_sim(self) -> bool:
-        if self._sdk_transport_override is not None:
-            return False
-        if not self._sdk_fallback_config_path:
-            return False
-        cfg = str(self._sdk_config_path or "").strip()
-        fallback = str(self._sdk_fallback_config_path or "").strip()
-        if not cfg or not fallback:
-            return False
-        return os.path.normpath(cfg) != os.path.normpath(fallback)
-
-    def _sdk_connect_with_fallback(self) -> SDKRobot:
+    def _sdk_connect_robot(self) -> SDKRobot:
         primary_cfg = self._sdk_config_path
-        try:
-            robot = self._sdk_build_robot(primary_cfg, self._sdk_transport_override)
-            robot.connect()
-            transport_name = self._sdk_transport_name(robot).lower()
-            mode = "simulation" if "mock" in transport_name else "connected"
-            self._sdk_set_runtime_state(mode, robot=robot, config_path=primary_cfg)
-            self._sdk_robot = robot
-            return robot
-        except Exception as exc:
-            self._sdk_set_runtime_state("disconnected", config_path=primary_cfg, error_text=str(exc))
-            if not self._sdk_should_fallback_to_sim():
+        with self._sdk_lock:
+            try:
+                robot = self._sdk_build_robot(primary_cfg)
+                try:
+                    robot.connect(passive=True)
+                except TypeError:
+                    robot.connect()
+                transport_name = self._sdk_transport_name(robot).lower()
+                mode = "simulation" if "mock" in transport_name else "connected"
+                self._sdk_set_runtime_state(mode, robot=robot, config_path=primary_cfg)
+                self._sdk_robot = robot
+                return robot
+            except Exception as exc:
+                self._sdk_set_runtime_state("disconnected", config_path=primary_cfg, error_text=str(exc))
                 self._sdk_robot = None
                 raise
-            fallback_cfg = self._sdk_fallback_config_path
-            self.log_signal.emit(
-                f"[SDK] real robot connect failed, fallback to simulation: {exc}",
-                "warning",
-            )
-            robot = self._sdk_build_robot(fallback_cfg, "mock")
-            robot.connect()
-            self._sdk_set_runtime_state("simulation", robot=robot, config_path=fallback_cfg)
-            self._sdk_robot = robot
-            return robot
 
     def _sdk_get_robot(self) -> SDKRobot:
         if not SDK_AVAILABLE:
@@ -1982,18 +1894,23 @@ class ArmControlGUI(QMainWindow):
             raise RuntimeError("soarmmoce_sdk runtime class is unavailable")
 
         with self._sdk_lock:
+            if not self.connected and self._sdk_runtime_mode != "simulation":
+                raise RuntimeError("Real arm is not connected. Click Connect first.")
             if self._sdk_robot is None:
-                return self._sdk_connect_with_fallback()
+                raise RuntimeError("Real arm session is not initialized. Click Connect first.")
 
             if not self._sdk_robot.connected:
-                if self._sdk_runtime_mode == "simulation":
-                    self._sdk_robot = None
-                    return self._sdk_connect_with_fallback()
                 try:
                     self._sdk_robot.connect()
-                except Exception:
+                except Exception as exc:
+                    self._sdk_set_runtime_state(
+                        "disconnected",
+                        config_path=self._sdk_runtime_config_path,
+                        error_text=str(exc),
+                    )
                     self._sdk_robot = None
-                    return self._sdk_connect_with_fallback()
+                    self.connected = False
+                    raise RuntimeError(f"Real arm session was lost: {exc}. Click Connect again.") from exc
                 transport_name = self._sdk_transport_name(self._sdk_robot).lower()
                 mode = "simulation" if "mock" in transport_name else "connected"
                 self._sdk_set_runtime_state(mode, robot=self._sdk_robot, config_path=self._sdk_runtime_config_path)
@@ -2235,9 +2152,7 @@ class ArmControlGUI(QMainWindow):
         self._apply_sim_joint_q(q_src, update_plot=True)
 
     def _sync_gui_from_sdk(self, force: bool = False) -> bool:
-        if not self._sim_ready or not self._sdk_gui_sync_enabled:
-            return False
-        if self.connected and self.client:
+        if self.connecting or (not self._sim_ready) or (not self._sdk_gui_sync_enabled):
             return False
 
         now = time.time()
@@ -2266,7 +2181,7 @@ class ArmControlGUI(QMainWindow):
     def _sdk_sync_loop(self):
         idle_sleep = 0.05
         while self._sdk_sync_running:
-            if (not self._sdk_gui_sync_enabled) or (not self._sim_ready) or (self.connected and self.client) or self._sim_motion_active:
+            if self.connecting or (not self._sdk_gui_sync_enabled) or (not self._sim_ready) or self._sim_motion_active:
                 time.sleep(idle_sleep)
                 continue
             if not self._sdk_lock.acquire(blocking=False):
@@ -2353,54 +2268,44 @@ class ArmControlGUI(QMainWindow):
 
         try:
             robot = self._sdk_get_robot()
-            state_before = robot.get_state()
-            q_solution = robot.move_tcp(
-                x=float(x),
-                y=float(y),
-                z=float(z),
-                rpy=None,
-                frame=frame,
-                duration=float(duration),
-                wait=bool(wait),
-                timeout=timeout,
-            )
-            state_after = robot.get_state()
-            self._sync_sim_from_sdk_state(state_after)
+            if frame == "tool":
+                robot.move_delta(
+                    dx=float(x),
+                    dy=float(y),
+                    dz=float(z),
+                    frame="tool",
+                    duration=float(duration),
+                    wait=bool(wait),
+                    timeout=timeout,
+                )
+            else:
+                robot.move_pose(
+                    xyz=[float(x), float(y), float(z)],
+                    rpy=None,
+                    duration=float(duration),
+                    wait=bool(wait),
+                    timeout=timeout,
+                )
+            state = robot.get_state()
+            self._sync_sim_from_sdk_state(state)
         except Exception as exc:
             result = self._sdk_error_result(exc)
             return False, result
 
-        if frame == "tool":
-            base_xyz = np.asarray(state_before.tcp_pose.xyz, dtype=float)
-            base_rpy = np.asarray(state_before.tcp_pose.rpy, dtype=float)
-            target_xyz = base_xyz + (self._rpy_to_rotmat(base_rpy) @ np.asarray([x, y, z], dtype=float))
-        else:
-            target_xyz = np.asarray([x, y, z], dtype=float)
-
-        xyz_after = np.asarray(state_after.tcp_pose.xyz, dtype=float)
-        rpy_after = np.asarray(state_after.tcp_pose.rpy, dtype=float)
-        err = float(np.linalg.norm(xyz_after - target_xyz))
-        tol_m = 0.10
-        within_tol = bool(err <= tol_m)
         backend = f"sdk-{self._sdk_transport_name(robot)}"
         result = {
-            "ok": within_tol,
-            "message": "moved" if within_tol else "move completed with large error",
+            "ok": True,
+            "message": "cartesian move completed",
             "backend": backend,
             "frame": frame,
+            "requested_xyz_m": [float(x), float(y), float(z)],
+            "actual_xyz_m": [float(v) for v in np.asarray(state.tcp_pose.xyz, dtype=float).reshape(3).tolist()],
+            "actual_rpy_rad": [float(v) for v in np.asarray(state.tcp_pose.rpy, dtype=float).reshape(3).tolist()],
             "duration": float(duration),
             "wait": bool(wait),
             "timeout": timeout,
-            "tolerance_m": tol_m,
-            "within_tolerance": within_tol,
-            "target_xyz_m": [float(v) for v in target_xyz.tolist()],
-            "actual_xyz_m": [float(v) for v in xyz_after.tolist()],
-            "actual_rpy_rad": [float(v) for v in rpy_after.tolist()],
-            "position_error_m": err,
-            "joint_values_rad": [float(v) for v in np.asarray(state_after.joint_state.q, dtype=float).tolist()],
-            "joint_solution_rad": [float(v) for v in np.asarray(q_solution, dtype=float).tolist()],
         }
-        return bool(result["ok"]), result
+        return True, result
 
     def _tool_get_robot_state_main_thread(self) -> Tuple[bool, Dict[str, object]]:
         try:
@@ -2746,94 +2651,28 @@ class ArmControlGUI(QMainWindow):
             return False, {"ok": False, "error": "run_skill requires non-empty name"}
 
         if raw_name in ("dance_short", "dance", "wave"):
-            try:
-                robot = self._sdk_get_robot()
-                state0 = robot.get_state()
-                self._sync_sim_from_sdk_state(state0)
-            except Exception as exc:
-                result = self._sdk_error_result(exc)
-                return False, result
-
-            xyz0 = np.asarray(state0.tcp_pose.xyz, dtype=float)
-            amp_xy = max(0.01, min(0.10, self._tool_to_float(params.get("amplitude_xy", 0.04), 0.04)))
-            amp_z = max(0.00, min(0.10, self._tool_to_float(params.get("amplitude_z", 0.02), 0.02)))
-            duration = max(0.2, min(3.0, self._tool_to_float(params.get("duration", 0.6), 0.6)))
-            waypoints = [
-                (xyz0[0] + amp_xy, xyz0[1], xyz0[2]),
-                (xyz0[0], xyz0[1] + amp_xy, xyz0[2] + amp_z),
-                (xyz0[0] - amp_xy, xyz0[1], xyz0[2]),
-                (xyz0[0], xyz0[1] - amp_xy, xyz0[2] + amp_z),
-                (xyz0[0], xyz0[1], xyz0[2]),
-            ]
-
-            step_results = []
-            all_ok = True
-            for i, wp in enumerate(waypoints):
-                ok_i, res_i = self._tool_move_robot_arm_main_thread(
-                    {"x": float(wp[0]), "y": float(wp[1]), "z": float(wp[2]), "frame": "base", "duration": duration, "wait": True}
-                )
-                all_ok = all_ok and bool(ok_i)
-                step_results.append({"step": i + 1, "ok": bool(ok_i), "result": res_i})
             return (
-                all_ok,
+                False,
                 {
-                    "ok": all_ok,
-                    "skill": "dance_short",
-                    "message": "dance skill completed",
-                    "steps": step_results,
-                    "backend": f"sdk-{self._sdk_transport_name(robot)}",
+                    "ok": False,
+                    "skill": raw_name,
+                    "error": (
+                        "This skill depends on Cartesian motion, which is not available in the current SDK build. "
+                        "Use rotate_joint / set_gripper, or add an IK-backed Cartesian layer first."
+                    ),
                 },
             )
 
         if raw_name in ("grasp_apple", "grasp_apple_mock", "pick_apple"):
-            target_x = self._tool_to_float(params.get("x", 0.30), 0.30)
-            target_y = self._tool_to_float(params.get("y", 0.00), 0.00)
-            target_z = self._tool_to_float(params.get("z", 0.08), 0.08)
-            approach_z = target_z + max(0.05, self._tool_to_float(params.get("approach_offset_z", 0.08), 0.08))
-            pre_grasp_z = target_z + max(0.01, self._tool_to_float(params.get("pre_grasp_offset_z", 0.02), 0.02))
-            motion_dur = max(0.2, min(3.0, self._tool_to_float(params.get("duration", 0.8), 0.8)))
-            scan_first = bool(params.get("scan_first", True))
-            open_ratio = max(0.0, min(1.0, self._tool_to_float(params.get("open_ratio_before", 1.0), 1.0)))
-            close_ratio = max(0.0, min(1.0, self._tool_to_float(params.get("close_ratio", 0.0), 0.0)))
-
-            phases = []
-            if scan_first:
-                ok_scan, r_scan = self._tool_scan_for_object_main_thread(
-                    {
-                        "object_name": str(params.get("object_name", "red apple") or "red apple"),
-                        "sweep_range_deg": self._tool_to_float(params.get("scan_range_deg", 120.0), 120.0),
-                        "step_deg": self._tool_to_float(params.get("scan_step_deg", 15.0), 15.0),
-                        "source": "eye_in_hand",
-                        "return_to_start": False,
-                    }
-                )
-                phases.append({"phase": "scan", "ok": bool(ok_scan), "result": r_scan})
-            ok0, r0 = self._tool_set_gripper_tool_main_thread({"open_ratio": open_ratio, "wait": True})
-            phases.append({"phase": "open_gripper", "ok": bool(ok0), "result": r0})
-            ok1, r1 = self._tool_move_robot_arm_main_thread(
-                {"x": target_x, "y": target_y, "z": approach_z, "frame": "base", "duration": motion_dur, "wait": True}
-            )
-            phases.append({"phase": "approach", "ok": bool(ok1), "result": r1})
-            ok2, r2 = self._tool_move_robot_arm_main_thread(
-                {"x": target_x, "y": target_y, "z": pre_grasp_z, "frame": "base", "duration": motion_dur, "wait": True}
-            )
-            phases.append({"phase": "descend", "ok": bool(ok2), "result": r2})
-            okg, rg = self._tool_set_gripper_tool_main_thread({"open_ratio": close_ratio, "wait": True})
-            phases.append({"phase": "close_gripper", "ok": bool(okg), "result": rg})
-            ok3, r3 = self._tool_move_robot_arm_main_thread(
-                {"x": target_x, "y": target_y, "z": approach_z, "frame": "base", "duration": motion_dur, "wait": True}
-            )
-            phases.append({"phase": "lift", "ok": bool(ok3), "result": r3})
-            overall = bool(ok0 and ok1 and ok2 and okg and ok3)
             return (
-                overall,
+                False,
                 {
-                    "ok": overall,
-                    "skill": "grasp_apple_mock",
-                    "message": "grasp apple mock completed",
-                    "target_xyz_m": [float(target_x), float(target_y), float(target_z)],
-                    "backend": "sdk",
-                    "phases": phases,
+                    "ok": False,
+                    "skill": raw_name,
+                    "error": (
+                        "This skill depends on Cartesian motion, which is not available in the current SDK build. "
+                        "Keep using joint-level tools for now, or add an IK-backed Cartesian layer first."
+                    ),
                 },
             )
 
@@ -2888,57 +2727,50 @@ class ArmControlGUI(QMainWindow):
             f'<span style="color: {time_color}">[{timestamp}]</span> '
             f'<span style="color: {color}">{message}</span>'
         )
-        self.job_page.log_text.append(line)
         self.log_dock_view.append(line)
-        self.job_page.log_text.verticalScrollBar().setValue(self.job_page.log_text.verticalScrollBar().maximum())
         self.log_dock_view.verticalScrollBar().setValue(self.log_dock_view.verticalScrollBar().maximum())
 
     # ==================== Connection ====================
 
-    def on_test_connection(self):
-        QMessageBox.information(self, self._tr("msg_tip"), self._tr("msg_test_conn_placeholder"))
+    def on_toggle_connection(self):
+        if self.connecting:
+            return
+        if self.connected or self._sdk_runtime_mode == "simulation" or self._sdk_robot is not None:
+            self.on_disconnect()
+            return
+        self.on_connect()
 
     def on_connect(self):
         if self.connected or self.connecting:
             return
 
-        ip = self.settings_page.ip_input.text().strip()
-        port = self.settings_page.port_input.value()
-        cam_port = self.settings_page.cam_port_input.value()
-        leader_port = self.settings_page.leader_port_input.text().strip()
-        leader_id = self.settings_page.leader_id_combo.currentText()
-
         self.connecting = True
+        self._sdk_last_connect_error = ""
         self._update_connection_widgets()
         self._update_global_status_bar()
         self.statusBar().showMessage(self._tr("status_connecting"))
-        self.log(self._tr("log_connecting", ip=ip, port=port))
+        self.log(self._tr("log_connecting"))
 
         def connect_task():
             try:
-                self.client = ArmClient(
-                    name="gui_arm",
-                    server_ip=ip,
-                    ctl_port=port,
-                    leader_port=leader_port,
-                    leader_id=leader_id,
-                )
-                self.client.start()
-
-                if not self._using_virtual_vtk_camera():
-                    self._start_camera_stream(ip=ip, cam_port=cam_port)
-
-                self.connected = True
-                self.connecting = False
-                self.log(self._tr("log_connect_success"), "success")
-                QTimer.singleShot(0, self._on_connected)
+                self._sdk_connect_robot()
+                self.sdk_connection_finished.emit(True, "")
             except Exception as exc:
-                self.connected = False
-                self.connecting = False
-                self.log(self._tr("log_connect_failed", error=exc), "error")
-                QTimer.singleShot(0, self._on_connect_failed)
+                self._sdk_disconnect_robot()
+                self.sdk_connection_finished.emit(False, str(exc))
 
         threading.Thread(target=connect_task, daemon=True).start()
+
+    def _on_sdk_connection_finished(self, success: bool, message: str):
+        self.connecting = False
+        self.connected = bool(success and self._sdk_runtime_mode == "connected")
+        self._sdk_last_gui_sync_ts = 0.0
+        if success:
+            self.log(self._tr("log_connect_success"), "success")
+            self._on_connected()
+            return
+        self.log(self._tr("log_connect_failed", error=message or "unknown error"), "error")
+        self._on_connect_failed()
 
     def _on_connected(self):
         self._update_connection_widgets()
@@ -2958,22 +2790,10 @@ class ArmControlGUI(QMainWindow):
         self._clear_pending_sdk_commands()
         self.log(self._tr("log_disconnecting"))
 
-        self._stop_camera_stream()
-
-        if self.client:
-            try:
-                self.client.stop()
-            except Exception:
-                pass
-            self.client = None
-
         self._sdk_disconnect_robot()
 
         self.connected = False
         self.connecting = False
-        self.last_frame = None
-        self.last_frame_fps = 0.0
-        self.last_frame_latency = 0.0
         self.last_rtt_text = "--"
 
         if self.camera_window is not None:
@@ -2985,7 +2805,7 @@ class ArmControlGUI(QMainWindow):
                 else:
                     pixmap = self._build_placeholder_pixmap(self.camera_window.camera_label)
                     self.camera_window.set_placeholder(pixmap, self._tr("camera_disconnected"))
-            else:
+            elif self._camera_source_mode() == "virtual":
                 pixmap = self._build_placeholder_pixmap(self.camera_window.camera_label)
                 self.camera_window.set_placeholder(pixmap, self._tr("camera_disconnected"))
 
@@ -3006,9 +2826,9 @@ class ArmControlGUI(QMainWindow):
 
     def _camera_source_mode(self) -> str:
         if not hasattr(self.settings_page, "camera_source_combo"):
-            return "udp"
-        value = str(self.settings_page.camera_source_combo.currentData() or "udp").strip().lower()
-        return value if value in ("udp", "v4l2") else "udp"
+            return "virtual"
+        value = str(self.settings_page.camera_source_combo.currentData() or "virtual").strip().lower()
+        return value if value in ("virtual", "v4l2") else "virtual"
 
     def _camera_rotation_deg(self) -> int:
         if not hasattr(self.settings_page, "camera_rotation_combo"):
@@ -3023,7 +2843,29 @@ class ArmControlGUI(QMainWindow):
             return ""
         return str(self.settings_page.camera_device_input.text() or "").strip()
 
-    def _create_camera_client(self, ip: str, cam_port: int):
+    def on_camera_source_changed(self):
+        if not self._is_camera_window_visible():
+            return
+        if self._camera_source_mode() == "v4l2":
+            self._start_camera_stream()
+            return
+        self._stop_camera_stream()
+        if self._using_virtual_vtk_camera():
+            frame = self._fetch_virtual_vtk_frame()
+            if frame is not None:
+                self._display_camera_frame(frame, fps=30.0, latency=0.0)
+                return
+        if self.last_frame is not None:
+            self._display_camera_frame(
+                self.last_frame,
+                fps=float(self.last_frame_fps),
+                latency=float(self.last_frame_latency),
+            )
+            return
+        pixmap = self._build_placeholder_pixmap(self.camera_window.camera_label)
+        self.camera_window.set_placeholder(pixmap, self._tr("camera_disconnected"))
+
+    def _create_camera_client(self):
         mode = self._camera_source_mode()
         if mode == "v4l2":
             if not V4L2_CAMERA_AVAILABLE or V4L2CameraReader is None:
@@ -3039,15 +2881,14 @@ class ArmControlGUI(QMainWindow):
                 height=720,
                 fps=30,
             )
+        raise RuntimeError("Virtual preview does not need a physical camera client")
 
-        if not VIDEO_AVAILABLE:
-            raise RuntimeError("UDP camera client is unavailable: failed to import video_client_h264")
-        return VideoClient(server_ip=ip, video_port=cam_port)
-
-    def _start_camera_stream(self, ip: str, cam_port: int):
+    def _start_camera_stream(self):
+        if self._camera_source_mode() != "v4l2":
+            return
         self._stop_camera_stream()
         try:
-            self.video_client = self._create_camera_client(ip=ip, cam_port=cam_port)
+            self.video_client = self._create_camera_client()
             self.video_client.start()
             self.video_thread = VideoThread(self.video_client)
             self.video_thread.frame_ready.connect(self.update_camera)
@@ -3069,152 +2910,12 @@ class ArmControlGUI(QMainWindow):
                 pass
             self.video_client = None
 
-    # ==================== Position management ====================
-
-    def refresh_positions(self):
-        self.job_page.pos_list.clear()
-        for name in sorted(list_positions()):
-            if not name.startswith("_"):
-                self.job_page.pos_list.addItem(name)
-
-    def on_save_pos(self):
-        name = self.job_page.pos_name_input.text().strip()
-        if not name:
-            QMessageBox.warning(self, self._tr("msg_tip"), self._tr("msg_input_pos_name"))
-            return
-        if self.client:
-            self.client.savepos(name)
-            self.log(self._tr("log_pos_saved", name=name), "success")
-            self.job_page.pos_name_input.clear()
-            self.refresh_positions()
-
-    def on_goto_pos(self):
-        item = self.job_page.pos_list.currentItem()
-        if not item:
-            return
-        name = item.text()
-        duration, ok = QInputDialog.getDouble(
-            self,
-            self._tr("msg_jump_title"),
-            self._tr("msg_jump_prompt", name=name),
-            2.0,
-            0.5,
-            10.0,
-            1,
-        )
-        if ok and self.client:
-            self.log(self._tr("log_goto_start", name=name))
-
-            def goto_task():
-                success = self.client.goto(name, duration)
-                if success:
-                    self.log(self._tr("log_goto_done", name=name), "success")
-                else:
-                    self.log(self._tr("log_goto_failed"), "error")
-
-            threading.Thread(target=goto_task, daemon=True).start()
-
-    def on_del_pos(self):
-        item = self.job_page.pos_list.currentItem()
-        if not item:
-            return
-        name = item.text()
-        reply = QMessageBox.question(
-            self,
-            self._tr("msg_confirm"),
-            self._tr("msg_confirm_delete_pos", name=name),
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply == QMessageBox.Yes and self.client:
-            self.client.delpos(name)
-            self.log(self._tr("log_pos_deleted", name=name), "warning")
-            self.refresh_positions()
-
-    # ==================== Recording management ====================
-
-    def refresh_recordings(self):
-        self.job_page.rec_list.clear()
-        recordings = list_recordings()
-        for name, info in sorted(recordings.items()):
-            item = QListWidgetItem(
-                self._tr("rec_item_fmt", name=name, frames=info["frames"], duration=info["duration"])
-            )
-            item.setData(Qt.UserRole, name)
-            self.job_page.rec_list.addItem(item)
-
-    def on_toggle_record(self):
-        if not self.recording:
-            name = self.job_page.rec_name_input.text().strip()
-            if not name:
-                QMessageBox.warning(self, self._tr("msg_tip"), self._tr("msg_input_rec_name"))
-                return
-            if self.client:
-                self.client.start_record(name)
-                self.recording = True
-                self.job_page.record_btn.setText(self._tr("btn_record_stop"))
-                self.job_page.rec_name_input.setEnabled(False)
-                self.log(self._tr("log_record_start", name=name), "success")
-        else:
-            if self.client:
-                self.client.stop_record()
-                self.recording = False
-                self.job_page.record_btn.setText(self._tr("btn_record_start"))
-                self.job_page.rec_name_input.setEnabled(True)
-                self.job_page.rec_name_input.clear()
-                self.log(self._tr("log_record_saved"), "success")
-                self.refresh_recordings()
-
-    def on_play_rec(self):
-        item = self.job_page.rec_list.currentItem()
-        if not item:
-            return
-        name = item.data(Qt.UserRole)
-        times = self.job_page.play_times_spin.value()
-        if self.client:
-            self.log(self._tr("log_play_start", name=name, times=times))
-
-            def play_task():
-                success = self.client.play(name, times)
-                if success:
-                    self.log(self._tr("log_play_done"), "success")
-                else:
-                    self.log(self._tr("log_play_failed"), "error")
-
-            threading.Thread(target=play_task, daemon=True).start()
-
-    def on_del_rec(self):
-        item = self.job_page.rec_list.currentItem()
-        if not item:
-            return
-        name = item.data(Qt.UserRole)
-        reply = QMessageBox.question(
-            self,
-            self._tr("msg_confirm"),
-            self._tr("msg_confirm_delete_rec", name=name),
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply == QMessageBox.Yes and self.client:
-            self.client.delete_recording(name)
-            self.log(self._tr("log_record_deleted", name=name), "warning")
-            self.refresh_recordings()
-
     # ==================== Status update ====================
 
     def _set_quick_pose_labels(self, xyz: np.ndarray, rpy: np.ndarray):
         vals = [float(xyz[0]), float(xyz[1]), float(xyz[2]), float(rpy[0]), float(rpy[1]), float(rpy[2])]
         for key, value in zip(("X", "Y", "Z", "Rx", "Ry", "Rz"), vals):
             self.quick_page.pose_labels[key].setText(f"{value:.3f}")
-
-    def _update_quick_pose_from_client(self):
-        if not self.connected or not self.client:
-            return
-        acc = self.client.get_accumulators()
-        for i, key in enumerate(("X", "Y", "Z", "Rx", "Ry", "Rz")):
-            if i < len(acc):
-                value = list(acc.values())[i]
-            else:
-                value = 0.0
-            self.quick_page.pose_labels[key].setText(f"{value:.2f}")
 
     def _detect_pybullet_ee_link(self, client_id: int, robot_id: int):
         if not PYBULLET_AVAILABLE:
@@ -3295,18 +2996,13 @@ class ArmControlGUI(QMainWindow):
         self._set_quick_pose_labels(xyz, rpy)
 
     def update_status(self):
-        if not self.connected or not self.client:
-            self.last_rtt_text = "--"
-            if self._sim_ready:
-                self._update_quick_pose_from_sim()
-        else:
-            buf = list(self.client.rtt_ms_buf)
-            if buf:
-                self.last_rtt_text = f"{min(buf):.1f}/{sum(buf)/len(buf):.1f}/{max(buf):.1f} ms"
-            else:
-                self.last_rtt_text = "--"
-            self._update_quick_pose_from_client()
+        self.last_rtt_text = "--"
+        if self._sim_ready:
+            self._update_quick_pose_from_sim()
 
+        # The real-arm session is now explicitly controlled by Connect/Disconnect.
+        # Refresh enable/disable state from the latest session state on every tick.
+        self._update_connection_widgets()
         self._update_global_status_bar()
 
     # ==================== Simulation / 3D ====================
@@ -3860,17 +3556,12 @@ class ArmControlGUI(QMainWindow):
             reply = QMessageBox.question(
                 self,
                 self._tr("msg_confirm"),
-                self._tr("msg_confirm_exit_home"),
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                self._tr("msg_confirm_exit_disconnect"),
+                QMessageBox.Yes | QMessageBox.Cancel,
             )
             if reply == QMessageBox.Cancel:
                 event.ignore()
                 return
-            if reply == QMessageBox.Yes and self.client:
-                try:
-                    self.client.return_to_zero(3.0)
-                except Exception:
-                    pass
             self.on_disconnect()
 
         if self.camera_window is not None:

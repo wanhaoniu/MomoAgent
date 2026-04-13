@@ -17,7 +17,7 @@ OPENAI_TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "move_robot_arm",
-            "description": "Move robot TCP in Cartesian space in meters.",
+            "description": "Move robot TCP in Cartesian space in meters. Requires a Cartesian motion backend.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -150,13 +150,13 @@ OPENAI_TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "run_skill",
-            "description": "Run a higher-level robot behavior skill by name.",
+            "description": "Run a higher-level robot behavior skill by name. Skills that depend on Cartesian motion may be unavailable.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Skill name, e.g. dance_short or grasp_apple_mock",
+                        "description": "Skill name. Joint-level skills are preferred; Cartesian-motion skills may be unavailable.",
                     },
                     "params": {
                         "type": "object",

@@ -12,11 +12,24 @@ class FrameVisualizer:
 
     def draw(self, frame: np.ndarray, result: dict[str, object]) -> np.ndarray:
         frame_height, frame_width = frame.shape[:2]
-        center_x = frame_width // 2
-        center_y = frame_height // 2
+        target_center = result.get("target_center")
+        if isinstance(target_center, dict):
+            center_x = int(round(float(target_center.get("x", frame_width / 2.0))))
+            center_y = int(round(float(target_center.get("y", frame_height / 2.0))))
+            target_x_norm = float(target_center.get("x_norm", 0.5))
+            target_y_norm = float(target_center.get("y_norm", 0.5))
+        else:
+            center_x = frame_width // 2
+            center_y = frame_height // 2
+            target_x_norm = 0.5
+            target_y_norm = 0.5
+
+        center_x = max(0, min(max(frame_width - 1, 0), center_x))
+        center_y = max(0, min(max(frame_height - 1, 0), center_y))
 
         cv2.line(frame, (center_x - 25, center_y), (center_x + 25, center_y), (255, 255, 0), 1)
         cv2.line(frame, (center_x, center_y - 25), (center_x, center_y + 25), (255, 255, 0), 1)
+        cv2.circle(frame, (center_x, center_y), 4, (255, 255, 0), -1)
 
         target_face = result.get("target_face")
         if isinstance(target_face, dict):
@@ -56,6 +69,7 @@ class FrameVisualizer:
             f"status: {status}",
             f"hint: {', '.join(combined_hint)}",
             f"fps: {fps:.2f}",
+            f"target: ({target_x_norm:.2f}, {target_y_norm:.2f})",
         ]
         for index, line in enumerate(lines):
             cv2.putText(

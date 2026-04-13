@@ -1,67 +1,15 @@
 from __future__ import annotations
 
-import argparse
-from typing import Any, Dict
-
-from ..cli_common import print_error, print_success
-from ..real_arm import MULTI_TURN_JOINTS, SoArmMoceController, ValidationError
+from ..cli_common import run_and_print
+from ..real_arm import ValidationError
 
 
-def move_joint_to_calibrated_home(*, joint: str, duration: float, timeout: float | None, trace: bool) -> Dict[str, Any]:
-    arm = SoArmMoceController()
-
-    if joint not in MULTI_TURN_JOINTS:
-        raise ValidationError(
-            f"{joint} is not a multi-turn joint. This test script is only for {', '.join(MULTI_TURN_JOINTS)}."
-        )
-
-    before_state = arm.get_state()
-    current_joint_deg = float(before_state["joint_state"][joint])
-
-    result = arm.move_joint(
-        joint=joint,
-        target_deg=0.0,
-        duration=float(duration),
-        wait=True,
-        timeout=timeout,
-        trace=trace,
-    )
-
-    after_state = result["state"]
-    final_snapshot = arm._snapshot_multi_turn_state()
-    final_continuous_raw = float(final_snapshot.get(joint, {}).get("continuous_raw", 0.0))
-
-    return {
-        "action": "move_joint_to_calibrated_home",
-        "joint": joint,
-        "target_joint_deg": 0.0,
-        "before_joint_deg": current_joint_deg,
-        "final_joint_deg": float(after_state["joint_state"][joint]),
-        "final_continuous_raw": int(round(final_continuous_raw)),
-        "trace": result.get("trace") if trace else None,
-    }
+def _run_removed_command() -> dict[str, object]:
+    raise ValidationError("Calibrated-home flow has been removed. Use 'home', which now returns to the startup pose.")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Move one multi-turn joint to the home recorded in calibration JSON")
-    parser.add_argument("--joint", required=True, choices=list(MULTI_TURN_JOINTS))
-    parser.add_argument("--duration", type=float, default=1.5)
-    parser.add_argument("--timeout", type=float, default=None)
-    parser.add_argument("--trace", action="store_true")
-    args = parser.parse_args()
-
-    try:
-        print_success(
-            move_joint_to_calibrated_home(
-                joint=str(args.joint),
-                duration=float(args.duration),
-                timeout=None if args.timeout is None else float(args.timeout),
-                trace=bool(args.trace),
-            )
-        )
-    except Exception as exc:
-        print_error(exc)
+    run_and_print(_run_removed_command)
 
 
-if __name__ == "__main__":
-    main()
+__all__ = ["main"]

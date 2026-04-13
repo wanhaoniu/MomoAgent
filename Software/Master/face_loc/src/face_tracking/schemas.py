@@ -5,6 +5,8 @@ from typing import Any
 
 import numpy as np
 
+from face_tracking.target_center import resolve_target_center
+
 
 @dataclass(slots=True)
 class FramePacket:
@@ -81,15 +83,19 @@ class SmoothedState:
     area_ratio: float
 
 
-def compute_offset_payload(center: tuple[float, float], frame_size: tuple[int, int]) -> dict[str, float]:
+def compute_offset_payload(
+    center: tuple[float, float],
+    frame_size: tuple[int, int],
+    *,
+    target_center: tuple[float, float] | None = None,
+) -> dict[str, float]:
     frame_width, frame_height = frame_size
     half_width = max(frame_width / 2.0, 1.0)
     half_height = max(frame_height / 2.0, 1.0)
-    frame_center_x = half_width
-    frame_center_y = half_height
+    target_center_x, target_center_y = target_center if target_center is not None else resolve_target_center(frame_size)
 
-    dx = float(center[0] - frame_center_x)
-    dy = float(center[1] - frame_center_y)
+    dx = float(center[0] - target_center_x)
+    dy = float(center[1] - target_center_y)
     return {
         "dx": round(dx, 3),
         "dy": round(dy, 3),
