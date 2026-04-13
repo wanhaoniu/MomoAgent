@@ -16,7 +16,7 @@ sdk/dist/
 faster_whisper_local/
 cosyvoice_local/
 .venv/
-.vscode/
+.vscode/``
 *.jpg
 autograsp/
 __MACOSX/
@@ -24,3 +24,5 @@ __MACOSX/
 *.png
 *.py.patch
 *.env
+.lock
+sdk/src/soarmmoce_sdk/runtime/
