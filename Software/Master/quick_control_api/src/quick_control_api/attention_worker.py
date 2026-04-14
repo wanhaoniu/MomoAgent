@@ -17,6 +17,7 @@ from .face_follow_worker import (
     DEFAULT_MIN_TILT_STEP_DEG,
     DEFAULT_MOVE_DURATION_S,
     DEFAULT_PAN_BREAKAWAY_STEP_DEG,
+    DEFAULT_PAN_BREAKAWAY_STEP_POS_DEG,
     DEFAULT_PAN_BREAKAWAY_STEP_NEG_DEG,
     DEFAULT_PAN_DEAD_ZONE_NORM,
     DEFAULT_PAN_GAIN_DEG_PER_NORM,
@@ -89,7 +90,7 @@ class AttentionConfig:
     stiction_eps_deg: float = DEFAULT_STICTION_EPS_DEG
     stiction_frames: int = DEFAULT_STICTION_FRAMES
     pan_breakaway_step: float = DEFAULT_PAN_BREAKAWAY_STEP_DEG
-    pan_breakaway_step_pos: float | None = None
+    pan_breakaway_step_pos: float | None = DEFAULT_PAN_BREAKAWAY_STEP_POS_DEG
     pan_breakaway_step_neg: float = DEFAULT_PAN_BREAKAWAY_STEP_NEG_DEG
     pan_negative_scale: float = DEFAULT_PAN_NEGATIVE_SCALE
     tilt_breakaway_step: float = DEFAULT_TILT_BREAKAWAY_STEP_DEG

@@ -33,35 +33,36 @@ except Exception:  # noqa: BLE001
         return (0.50, 0.42)
 
 
-DEFAULT_LATEST_URL = "http://127.0.0.1:8000/latest"
-DEFAULT_TARGET_KIND = "face"
-DEFAULT_PAN_JOINT = "shoulder_pan"
-DEFAULT_TILT_JOINT = "elbow_flex"
-DEFAULT_PAN_SIGN = -1.0
-DEFAULT_TILT_SIGN = 1.0
-DEFAULT_PAN_GAIN_DEG_PER_NORM = 5.6
-DEFAULT_TILT_GAIN_DEG_PER_NORM = 7.0
-DEFAULT_PAN_DEAD_ZONE_NORM = 0.035
-DEFAULT_TILT_DEAD_ZONE_NORM = 0.035
-DEFAULT_PAN_RESUME_ZONE_NORM = 0.06
-DEFAULT_TILT_RESUME_ZONE_NORM = 0.06
-DEFAULT_MIN_PAN_STEP_DEG = 0.6
-DEFAULT_MIN_TILT_STEP_DEG = 1.0
-DEFAULT_PAN_MIN_STEP_ZONE_NORM = 0.09
-DEFAULT_TILT_MIN_STEP_ZONE_NORM = 0.10
-DEFAULT_MAX_PAN_STEP_DEG = 1.4
-DEFAULT_MAX_TILT_STEP_DEG = 1.6
-DEFAULT_MOVE_DURATION_S = 0.20
-DEFAULT_POLL_INTERVAL_S = 0.08
-DEFAULT_HTTP_TIMEOUT_S = 1.0
-DEFAULT_COMMAND_MODE = "stream"
-DEFAULT_LIMIT_MARGIN_RAW = 60
-DEFAULT_STICTION_EPS_DEG = 0.15
-DEFAULT_STICTION_FRAMES = 3
-DEFAULT_PAN_BREAKAWAY_STEP_DEG = 1.8
-DEFAULT_PAN_BREAKAWAY_STEP_NEG_DEG = 3.2
-DEFAULT_PAN_NEGATIVE_SCALE = 1.45
-DEFAULT_TILT_BREAKAWAY_STEP_DEG = 1.8
+DEFAULT_LATEST_URL = "http://127.0.0.1:8000/latest"  # 默认读取最新跟踪结果的接口地址
+DEFAULT_TARGET_KIND = "face"  # 默认跟踪目标类型
+DEFAULT_PAN_JOINT = "shoulder_pan"  # 默认水平转动使用的关节
+DEFAULT_TILT_JOINT = "elbow_flex"  # 默认俯仰转动使用的关节
+DEFAULT_PAN_SIGN = 1.0  # 水平轴方向修正，正值表示保持原方向
+DEFAULT_TILT_SIGN = -1.0  # 俯仰轴方向修正，负值表示控制方向取反
+DEFAULT_PAN_GAIN_DEG_PER_NORM = 5.6  # 水平轴增益，归一化偏差 1.0 对应 5.6 度步进
+DEFAULT_TILT_GAIN_DEG_PER_NORM = 7.0  # 俯仰轴增益，归一化偏差 1.0 对应 7.0 度步进
+DEFAULT_PAN_DEAD_ZONE_NORM = 0.035  # 水平轴死区，偏差落在此范围内不动作
+DEFAULT_TILT_DEAD_ZONE_NORM = 0.035  # 俯仰轴死区，偏差落在此范围内不动作
+DEFAULT_PAN_RESUME_ZONE_NORM = 0.06  # 水平轴恢复区，重新开始跟随所需的最小偏差
+DEFAULT_TILT_RESUME_ZONE_NORM = 0.06  # 俯仰轴恢复区，重新开始跟随所需的最小偏差
+DEFAULT_MIN_PAN_STEP_DEG = 0.55  # 水平轴最小步进角，避免小偏差时完全不动
+DEFAULT_MIN_TILT_STEP_DEG = 1.0  # 俯仰轴最小步进角，避免小偏差时完全不动
+DEFAULT_PAN_MIN_STEP_ZONE_NORM = 0.06  # 水平轴启用最小步进补偿的偏差阈值
+DEFAULT_TILT_MIN_STEP_ZONE_NORM = 0.10  # 俯仰轴启用最小步进补偿的偏差阈值
+DEFAULT_MAX_PAN_STEP_DEG = 4.0  # 水平轴单次命令允许的最大步进角
+DEFAULT_MAX_TILT_STEP_DEG = 3.0  # 俯仰轴单次命令允许的最大步进角
+DEFAULT_MOVE_DURATION_S = 0.20  # 单次 move_joints 目标动作时长
+DEFAULT_POLL_INTERVAL_S = 0.08  # 轮询视觉结果并下发控制的周期
+DEFAULT_HTTP_TIMEOUT_S = 1.0  # 请求跟踪结果接口的超时时间
+DEFAULT_COMMAND_MODE = "stream"  # 默认流式下发，不等待上一条动作完全结束
+DEFAULT_LIMIT_MARGIN_RAW = 60  # 单圈关节接近限位时预警使用的原始值安全边距
+DEFAULT_STICTION_EPS_DEG = 0.25  # 判断关节是否真正动起来的最小角度变化阈值
+DEFAULT_STICTION_FRAMES = 2  # 连续多少帧未动时判定为卡滞并触发补偿
+DEFAULT_PAN_BREAKAWAY_STEP_DEG = 1.6  # 水平轴默认破静摩擦补偿步进角
+DEFAULT_PAN_BREAKAWAY_STEP_POS_DEG = 1.4  # 水平轴正方向破静摩擦补偿步进角
+DEFAULT_PAN_BREAKAWAY_STEP_NEG_DEG = 2.8  # 水平轴负方向破静摩擦补偿步进角
+DEFAULT_PAN_NEGATIVE_SCALE = 1.8  # 水平轴负方向步进额外放大系数
+DEFAULT_TILT_BREAKAWAY_STEP_DEG = 1.8  # 俯仰轴破静摩擦补偿步进角
 
 
 @dataclass
@@ -101,7 +102,7 @@ class FaceFollowConfig:
     stiction_eps_deg: float = DEFAULT_STICTION_EPS_DEG
     stiction_frames: int = DEFAULT_STICTION_FRAMES
     pan_breakaway_step: float = DEFAULT_PAN_BREAKAWAY_STEP_DEG
-    pan_breakaway_step_pos: float | None = None
+    pan_breakaway_step_pos: float | None = DEFAULT_PAN_BREAKAWAY_STEP_POS_DEG
     pan_breakaway_step_neg: float = DEFAULT_PAN_BREAKAWAY_STEP_NEG_DEG
     pan_negative_scale: float = DEFAULT_PAN_NEGATIVE_SCALE
     tilt_breakaway_step: float = DEFAULT_TILT_BREAKAWAY_STEP_DEG
@@ -200,12 +201,15 @@ def _compute_joint_step(
     max_step_deg: float,
     sign: float,
 ) -> float:
+    """根据归一化偏差计算单轴本次应发送的关节步进角。"""
     offset_value = float(normalized_offset)
     offset_abs = abs(offset_value)
     offset_sign = _sign(offset_value)
     dead_zone = abs(float(dead_zone_norm))
     resume_zone = max(dead_zone, abs(float(resume_zone_norm)))
 
+    # 已经处于跟随状态时，使用 dead zone / resume zone 做一个简单的滞回，
+    # 避免目标在中心附近来回抖动时频繁启停或来回反向修正。
     if axis_state.active:
         if offset_abs <= dead_zone:
             axis_state.active = False
@@ -216,16 +220,23 @@ def _compute_joint_step(
             axis_state.offset_sign = 0
             return 0.0
     elif offset_abs < resume_zone:
+        # 尚未进入跟随状态时，需要偏差大于恢复区才重新开始动作。
         return 0.0
 
     axis_state.active = True
     axis_state.offset_sign = offset_sign
 
+    # 先按“偏差 * 增益 * 方向修正”得到原始步进角。
     raw_step_deg = offset_value * float(gain_deg_per_norm) * float(sign)
     min_step_abs = abs(float(min_step_deg))
     min_step_zone = max(dead_zone, abs(float(min_step_zone_norm)))
+
+    # 如果偏差已经足够明显，但算出来的步进又太小，就抬到最小步进，
+    # 避免电机因为静摩擦、间隙或负载而看起来“想动但没动”。
     if 0.0 < abs(raw_step_deg) < min_step_abs and offset_abs >= min_step_zone:
         raw_step_deg = min_step_abs if raw_step_deg > 0.0 else -min_step_abs
+
+    # 最终再限制单次命令的最大幅度，避免修正过猛。
     return _clamp(raw_step_deg, -abs(float(max_step_deg)), abs(float(max_step_deg)))
 
 
@@ -424,6 +435,7 @@ class FaceFollowWorker:
             self._status.update(updates)
 
     def _run(self) -> None:
+        """后台跟随主循环：拉取检测结果，计算步进，并持续下发关节目标。"""
         pan_axis_state = AxisFollowState()
         tilt_axis_state = AxisFollowState()
         last_frame_id = -1
@@ -442,6 +454,7 @@ class FaceFollowWorker:
 
         while not self._stop_event.is_set():
             try:
+                # 从视觉服务拉取最新一帧的跟踪结果。
                 result = _fetch_latest(
                     str(self._config.latest_url),
                     float(self._config.http_timeout),
@@ -460,6 +473,7 @@ class FaceFollowWorker:
 
             frame_id = int(result.get("frame_id", 0) or 0)
             if frame_id <= 0 or frame_id == last_frame_id:
+                # 无效帧或重复帧直接跳过，避免重复消费同一帧结果。
                 self._sleep()
                 continue
             last_frame_id = frame_id
@@ -514,6 +528,7 @@ class FaceFollowWorker:
                 self._sleep()
                 continue
 
+            # 根据图像中的归一化偏差，分别计算水平和俯仰两个轴本次应走的步进角。
             pan_step_deg = _compute_joint_step(
                 axis_state=pan_axis_state,
                 normalized_offset=ndx,
@@ -572,6 +587,7 @@ class FaceFollowWorker:
             )
 
             if not joint_targets:
+                # 没有需要动作的关节时，说明目标已经落在死区内，保持当前位置即可。
                 self._update_status(
                     mode="tracking",
                     last_hold_reason="inside dead zone",
@@ -588,11 +604,13 @@ class FaceFollowWorker:
                 with self._robot_lock:
                     if self._stop_event.is_set():
                         break
+                    # 先读取当前关节状态，再把增量步进转换成绝对目标角。
                     current_state = self._robot.get_state()
                     pan_joint_name = str(self._config.pan_joint)
                     tilt_joint_name = str(self._config.tilt_joint)
 
                     if pan_joint_name in joint_targets:
+                        # 如果连续几帧都没有明显位移，就逐步放大步进，帮助克服静摩擦。
                         pan_step_deg, _ = _apply_stiction_breakaway(
                             pan_axis_state,
                             current_joint_deg=float(current_state["joint_state"][pan_joint_name]),
@@ -651,6 +669,7 @@ class FaceFollowWorker:
                         self._sleep()
                         continue
 
+                    # 在单圈关节逼近限位时发出预警，便于排查为什么持续朝某一侧顶。
                     limit_warning = None
                     for joint_name, delta_deg in joint_targets.items():
                         limit_warning = _single_turn_limit_warning(
@@ -663,6 +682,7 @@ class FaceFollowWorker:
                         if limit_warning is not None:
                             break
 
+                    # move_joints 接收的是绝对角度目标，因此这里要把当前角度和步进相加。
                     absolute_targets = {
                         joint_name: float(current_state["joint_state"][joint_name]) + float(delta_deg)
                         for joint_name, delta_deg in joint_targets.items()
