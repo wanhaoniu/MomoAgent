@@ -281,13 +281,28 @@ class OpenClawClient:
         self._config = config
         self._bridge = OpenClawGatewayBridgeClient(config)
         persisted = None if config.force_new_session else self._load_persisted_state()
-        self._session_id = str(config.session_id or "").strip() or str(
+        configured_session_id = str(config.session_id or "").strip()
+        persisted_bridge_session_key = str((persisted or {}).get("bridge_session_key", "")).strip()
+        self._session_id = configured_session_id or str(
             (persisted or {}).get("session_id", "")
         ).strip()
-        self._bridge_session_key = str((persisted or {}).get("bridge_session_key", "")).strip()
-        if not self._bridge_session_key:
-            session_key_suffix = self._session_id or uuid.uuid4().hex[:8]
-            self._bridge_session_key = f"agent:{self._config.agent_id}:{session_key_suffix}"
+        self._bridge_session_key = self._default_bridge_session_key()
+        migrated_to_main_session = (
+            not self._config.force_new_session
+            and bool(persisted_bridge_session_key)
+            and persisted_bridge_session_key != self._bridge_session_key
+        )
+        if migrated_to_main_session and not configured_session_id:
+            self._session_id = ""
+        if migrated_to_main_session and not self._config.force_new_session:
+            self._persist_state()
+
+    def _default_bridge_session_key(self) -> str:
+        normalized_agent_id = str(self._config.agent_id or "main").strip() or "main"
+        if not self._config.force_new_session:
+            return f"agent:{normalized_agent_id}:main"
+        session_key_suffix = self._session_id or uuid.uuid4().hex[:8]
+        return f"agent:{normalized_agent_id}:{session_key_suffix}"
 
     def close(self) -> None:
         self._bridge.close()
@@ -338,12 +353,22 @@ class OpenClawClient:
 
     def reset_session(self) -> None:
         self._session_id = ""
-        self._bridge_session_key = f"agent:{self._config.agent_id}:{uuid.uuid4().hex[:8]}"
+        self._bridge_session_key = self._default_bridge_session_key()
         try:
             if SESSION_STATE_PATH.exists():
                 SESSION_STATE_PATH.unlink()
         except Exception:
             pass
+
+    def update_session_state(self, *, session_id: str = "", bridge_session_key: str = "") -> None:
+        next_session_id = str(session_id or "").strip()
+        next_bridge_session_key = str(bridge_session_key or "").strip()
+        if next_bridge_session_key:
+            self._bridge_session_key = next_bridge_session_key
+        if next_session_id:
+            self._session_id = next_session_id
+        if not self._config.force_new_session:
+            self._persist_state()
 
     def _build_subprocess_env(self) -> Dict[str, str]:
         env = os.environ.copy()

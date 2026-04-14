@@ -824,6 +824,51 @@ class QuickControlService:
     def agent_warmup(self, *, prompt: str = "请只回复“就绪”。") -> dict[str, Any]:
         return self._agent.warmup(prompt=prompt)
 
+    def agent_build_stream_turn_spec(self, *, kind: str, prompt: str) -> dict[str, Any]:
+        return self._agent.build_stream_turn_spec(kind=kind, prompt=prompt)
+
+    def agent_complete_stream_turn(
+        self,
+        *,
+        kind: str,
+        prompt: str,
+        reply: str,
+        session_id: str,
+        bridge_session_key: str,
+        openclaw_elapsed_sec: float,
+        bridge_timing: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        return self._agent.complete_stream_turn(
+            kind=kind,
+            prompt=prompt,
+            reply=reply,
+            session_id=session_id,
+            bridge_session_key=bridge_session_key,
+            openclaw_elapsed_sec=openclaw_elapsed_sec,
+            bridge_timing=bridge_timing,
+        )
+
+    def agent_fail_stream_turn(
+        self,
+        *,
+        kind: str,
+        prompt: str,
+        error: str,
+        session_id: str = "",
+        bridge_session_key: str = "",
+        openclaw_elapsed_sec: float = 0.0,
+        bridge_timing: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        return self._agent.fail_stream_turn(
+            kind=kind,
+            prompt=prompt,
+            error=error,
+            session_id=session_id,
+            bridge_session_key=bridge_session_key,
+            openclaw_elapsed_sec=openclaw_elapsed_sec,
+            bridge_timing=bridge_timing,
+        )
+
     def agent_reset_session(self) -> dict[str, Any]:
         return self._agent.reset_session()
 

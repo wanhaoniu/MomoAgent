@@ -529,6 +529,20 @@
           stopScheduledAudio();
           return;
         }
+        if (event.type === "agent_accepted") {
+          appendLog(event);
+          return;
+        }
+        if (event.type === "agent_delta") {
+          if (!compactModeInput.checked) {
+            appendLog(event);
+          }
+          const reply = event.data?.reply || event.data?.delta || "";
+          if (reply) {
+            replyBox.textContent = reply;
+          }
+          return;
+        }
         if (event.type === "agent_reply") {
           appendLog(event);
           const reply = event.data?.reply || "";
