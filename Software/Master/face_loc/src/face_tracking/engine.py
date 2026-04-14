@@ -173,9 +173,10 @@ class TrackingEngine:
                 )
 
             self.result_store.publish(result)
+            display_frame = packet.frame.copy()
             if self.visualizer:
-                annotated = self.visualizer.draw(packet.frame.copy(), result)
-                self._publish_display_frame(packet.frame_id, annotated)
+                display_frame = self.visualizer.draw(display_frame, result)
+            self._publish_display_frame(packet.frame_id, display_frame)
 
     def _process_packet(self, packet: FramePacket) -> dict[str, Any]:
         frame_height, frame_width = packet.frame.shape[:2]

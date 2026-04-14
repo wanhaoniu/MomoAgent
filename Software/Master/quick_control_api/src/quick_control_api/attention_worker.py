@@ -59,6 +59,11 @@ from .idle_scan_worker import (
     clamp_targets_deg,
 )
 
+
+def _normalize_optional_joint_name(joint_name: str | None) -> str | None:
+    normalized = str(joint_name or "").strip()
+    return normalized or None
+
 DEFAULT_LOST_TARGET_HOLD_SEC = 1.0
 
 
@@ -249,17 +254,25 @@ class AttentionWorker:
                 joint_state = current_state["joint_state"]
                 current_pan_deg = float(joint_state[str(self._config.idle_scan.pan_joint)])
                 current_tilt_deg = float(joint_state[str(self._config.idle_scan.tilt_joint)])
+                current_reframe_deg = None
+                reframe_joint_name = _normalize_optional_joint_name(
+                    self._config.idle_scan.reframe_joint
+                )
+                if reframe_joint_name is not None:
+                    current_reframe_deg = float(joint_state[reframe_joint_name])
                 self._idle_scan.ensure_started(
                     current_pan_deg=current_pan_deg,
                     current_tilt_deg=current_tilt_deg,
+                    current_reframe_deg=current_reframe_deg,
                     now_monotonic=now,
                 )
                 command = self._idle_scan.tick(
                     current_pan_deg=current_pan_deg,
                     current_tilt_deg=current_tilt_deg,
+                    current_reframe_deg=current_reframe_deg,
                     now_monotonic=now,
                 )
-                if command is not None:
+                if command is not None and dict(command.get("targets_deg") or {}):
                     targets_deg = clamp_targets_deg(
                         self._robot,
                         dict(command["targets_deg"]),
