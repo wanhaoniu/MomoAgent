@@ -120,6 +120,10 @@ python main.py
 - `GET /frame.jpg`
 - `WS /ws/stream`
 
+预览接口详细说明见：
+
+- [`FRAME_PREVIEW_API.md`](./FRAME_PREVIEW_API.md)
+
 示例：
 
 ```bash

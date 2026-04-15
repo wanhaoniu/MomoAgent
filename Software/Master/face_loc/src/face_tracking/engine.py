@@ -65,6 +65,8 @@ class TrackingEngine:
         self._frame_counter = 0
         self._fps = RollingFps(window_size=config.runtime.fps_window_size)
         self._started_at: float | None = None
+        self._latest_raw_frame: np.ndarray | None = None
+        self._latest_raw_frame_id = 0
         self._latest_display_frame: np.ndarray | None = None
         self._latest_display_frame_id = 0
 
@@ -173,10 +175,15 @@ class TrackingEngine:
                 )
 
             self.result_store.publish(result)
-            display_frame = packet.frame.copy()
+            raw_frame = packet.frame.copy()
+            display_frame = raw_frame.copy()
             if self.visualizer:
                 display_frame = self.visualizer.draw(display_frame, result)
-            self._publish_display_frame(packet.frame_id, display_frame)
+            self._publish_preview_frames(
+                packet.frame_id,
+                raw_frame=raw_frame,
+                display_frame=display_frame,
+            )
 
     def _process_packet(self, packet: FramePacket) -> dict[str, Any]:
         frame_height, frame_width = packet.frame.shape[:2]
@@ -309,10 +316,22 @@ class TrackingEngine:
             "detector": self.detector.describe(),
         }
 
-    def _publish_display_frame(self, frame_id: int, frame: np.ndarray) -> None:
+    def _publish_preview_frames(
+        self,
+        frame_id: int,
+        *,
+        raw_frame: np.ndarray,
+        display_frame: np.ndarray,
+    ) -> None:
         with self._display_lock:
-            self._latest_display_frame = frame
+            self._latest_raw_frame = raw_frame
+            self._latest_raw_frame_id = frame_id
+            self._latest_display_frame = display_frame
             self._latest_display_frame_id = frame_id
+
+    def get_latest_raw_frame(self) -> tuple[np.ndarray | None, int]:
+        with self._display_lock:
+            return self._latest_raw_frame, self._latest_raw_frame_id
 
     def get_latest_display_frame(self) -> tuple[np.ndarray | None, int]:
         with self._display_lock:

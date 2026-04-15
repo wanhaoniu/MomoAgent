@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MomoAgent MVP</string>
+    <string name="status_disconnected">未连接</string>
+    <string name="config_title">连接配置</string>
+    <string name="host_hint">控制器 IP 或域名，例如 192.168.1.20</string>
+    <string name="agent_port_hint">Agent 端口</string>
+    <string name="preview_port_hint">预览端口</string>
+    <string name="connect">连接</string>
+    <string name="disconnect">断开</string>
+    <string name="with_tts">使用后端流式 TTS</string>
+    <string name="preview_title">摄像头预览</string>
+    <string name="preview_waiting">预览未启动</string>
+    <string name="chat_title">对话</string>
+    <string name="conversation_placeholder">连接后可以输入文本，或点“语音输入”开始说话。</string>
+    <string name="message_hint">输入消息，或使用语音输入</string>
+    <string name="send">发送</string>
+    <string name="speak">语音输入</string>
+    <string name="speech_prompt">请开始说话</string>
+</resources>

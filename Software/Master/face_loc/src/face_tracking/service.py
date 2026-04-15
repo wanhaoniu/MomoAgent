@@ -41,6 +41,12 @@ class SkillService:
             return None, frame_id
         return frame.copy(), frame_id
 
+    def latest_raw_frame(self) -> tuple[Any | None, int]:
+        frame, frame_id = self.engine.get_latest_raw_frame()
+        if frame is None:
+            return None, frame_id
+        return frame.copy(), frame_id
+
     def run_visualizer_loop(self, poll_interval_sec: float = 0.01) -> None:
         self.engine.run_visualizer_loop(poll_interval_sec=poll_interval_sec)
 
@@ -81,8 +87,10 @@ def create_app(service: SkillService, manage_lifecycle: bool = True) -> FastAPI:
     async def frame_jpg(
         max_width: int = 640,
         quality: int = 72,
+        overlay: bool = False,
     ) -> Response:
-        frame, frame_id = await asyncio.to_thread(service.latest_display_frame)
+        frame_loader = service.latest_display_frame if overlay else service.latest_raw_frame
+        frame, frame_id = await asyncio.to_thread(frame_loader)
         if frame is None:
             return Response(
                 content=b"No frame available yet",
@@ -118,6 +126,7 @@ def create_app(service: SkillService, manage_lifecycle: bool = True) -> FastAPI:
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                 "X-Frame-Id": str(int(frame_id)),
+                "X-Frame-Overlay": "1" if overlay else "0",
             },
         )
 
