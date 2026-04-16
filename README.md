@@ -104,17 +104,18 @@ Expected contents:
 ### 6.2 Install Dependencies
 From repo root:
 ```bash
-python3 -m venv .venv
+bash scripts/bootstrap.sh
+
+# Add the Qt GUI / 3D / speech stack when needed
+bash scripts/bootstrap.sh --advanced
+
 source .venv/bin/activate
-pip install -U pip
-pip install -e ./sdk
-
-# Master/Slave runtime
-pip install draccus opencv-python PyQt5 lerobot
-
-# Optional (simulation / 3D view)
-pip install pybullet vtk
 ```
+
+Notes:
+- `bash scripts/bootstrap.sh` automatically creates a repo-local `.venv`
+- The base install covers robot control, `quick_control_api`, and the camera / `face_loc` headless flow
+- `--advanced` adds the Qt GUI stack
 
 ### 6.3 Start Leader-Follower Control (Real Hardware)
 1. Start slave server on the follower-side device:
@@ -137,8 +138,10 @@ Notes:
 
 ### 6.4 Start GUI (Optional)
 ```bash
-cd Software/Master
-python3 gui.py
+bash scripts/bootstrap.sh --advanced
+source .venv/bin/activate
+
+python Software/Master/main.py
 ```
 Then configure IP/ports in the Settings page and click **Connect**.
 If you run into issues, feel free to open an issue.

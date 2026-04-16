@@ -123,3 +123,10 @@ class HaiGuiTangStartRequest(BaseModel):
 
 class HaiGuiTangActionRequest(BaseModel):
     action: Literal["nod", "shake", "center", "reanchor"]
+
+
+class HaiGuiTangSceneStateRequest(BaseModel):
+    clip: Literal["intro", "default", "nod", "shake", "outro"] = "default"
+    subtitle_text: str = Field("", max_length=500)
+    video_url: str = Field("", max_length=2000)
+    loop_playback: bool | None = None

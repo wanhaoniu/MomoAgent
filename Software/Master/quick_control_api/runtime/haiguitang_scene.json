@@ -3,10 +3,14 @@
   "title": "海龟汤",
   "subtitle": "片头结束后进入互动模式",
   "intro_video_url": "",
+  "default_video_url": "",
+  "nod_video_url": "",
+  "shake_video_url": "",
+  "outro_video_url": "",
   "intro_video_auto_play": true,
   "intro_video_skipable": true,
   "intro_video_timeout_sec": 8.0,
-  "default_status_text": "进入互动区后，可以先用点头和摇头调试动作效果。",
+  "default_status_text": "片头结束后会进入全屏角色表情，等待 agent 通过 POST 切换表情，也可以手动点头和摇头调试动作。",
   "placeholder_title": "片头占位",
-  "placeholder_body": "当前还没有正式视频素材，后续把 mp4 放到固定路径或改配置 URL 就能替换。"
+  "placeholder_body": "当前还没有找到 begin.mp4 或 default.mp4，后续把视频放到 runtime/media 里就会自动识别。"
 }

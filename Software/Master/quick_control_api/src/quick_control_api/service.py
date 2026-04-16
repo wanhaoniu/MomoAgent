@@ -4,6 +4,7 @@ import math
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -90,6 +91,13 @@ class QuickControlService:
         self._last_follow_payload: dict[str, Any] = build_default_attention_payload()
         self._last_idle_scan_payload: dict[str, Any] = build_default_idle_scan_payload()
         self._last_haiguitang_payload: dict[str, Any] = build_default_haiguitang_payload()
+        self._haiguitang_scene_version = 0
+        self._haiguitang_scene_state: dict[str, Any] = self._build_haiguitang_scene_state_payload_locked(
+            clip="default",
+            subtitle_text="",
+            video_url="",
+            loop_playback=None,
+        )
 
     def close(self) -> None:
         self.disconnect()
@@ -935,6 +943,75 @@ class QuickControlService:
 
     def haiguitang_scene_config(self) -> dict[str, Any]:
         return load_haiguitang_scene_config()
+
+    def _build_haiguitang_scene_state_payload_locked(
+        self,
+        *,
+        clip: str,
+        subtitle_text: str,
+        video_url: str,
+        loop_playback: bool | None,
+    ) -> dict[str, Any]:
+        config = load_haiguitang_scene_config()
+        normalized_clip = str(clip or "default").strip().lower()
+        if normalized_clip not in {"intro", "default", "nod", "shake", "outro"}:
+            normalized_clip = "default"
+
+        resolved_video_url = str(video_url or "").strip()
+        if not resolved_video_url:
+            clip_key = f"{normalized_clip}_video_url"
+            resolved_video_url = str(config.get(clip_key, "") or "").strip()
+            if not resolved_video_url and normalized_clip == "intro":
+                resolved_video_url = str(config.get("intro_video_url", "") or "").strip()
+            if not resolved_video_url and normalized_clip != "default":
+                resolved_video_url = str(config.get("default_video_url", "") or "").strip()
+
+        should_loop = (
+            bool(loop_playback)
+            if loop_playback is not None
+            else normalized_clip == "default"
+        )
+        return {
+            "version": int(self._haiguitang_scene_version),
+            "clip": normalized_clip,
+            "subtitle_text": str(subtitle_text or "").strip(),
+            "video_url": resolved_video_url,
+            "loop_playback": bool(should_loop),
+            "default_video_url": str(config.get("default_video_url", "") or "").strip(),
+            "updated_at": time.time(),
+        }
+
+    def haiguitang_scene_state(self) -> dict[str, Any]:
+        with self._lock:
+            clip = str(self._haiguitang_scene_state.get("clip", "default") or "default").strip().lower()
+            subtitle_text = str(self._haiguitang_scene_state.get("subtitle_text", "") or "").strip()
+            video_url = str(self._haiguitang_scene_state.get("video_url", "") or "").strip()
+            loop_playback = self._haiguitang_scene_state.get("loop_playback")
+            self._haiguitang_scene_state = self._build_haiguitang_scene_state_payload_locked(
+                clip=clip,
+                subtitle_text=subtitle_text,
+                video_url=video_url,
+                loop_playback=bool(loop_playback) if loop_playback is not None else None,
+            )
+            return dict(self._haiguitang_scene_state)
+
+    def haiguitang_scene_present(
+        self,
+        *,
+        clip: str,
+        subtitle_text: str,
+        video_url: str,
+        loop_playback: bool | None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._haiguitang_scene_version += 1
+            self._haiguitang_scene_state = self._build_haiguitang_scene_state_payload_locked(
+                clip=clip,
+                subtitle_text=subtitle_text,
+                video_url=video_url,
+                loop_playback=loop_playback,
+            )
+            return dict(self._haiguitang_scene_state)
 
     def agent_status(self) -> dict[str, Any]:
         return self._agent.status_payload()

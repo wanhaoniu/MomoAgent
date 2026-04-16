@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from .errors import QuickControlError
-from .scene_config import haiguitang_intro_video_file
+from .scene_config import haiguitang_intro_video_file, haiguitang_media_file
 from .schemas import (
     AgentAskRequest,
     AgentWarmupRequest,
@@ -19,6 +20,7 @@ from .schemas import (
     ConnectRequest,
     FollowStartRequest,
     HaiGuiTangActionRequest,
+    HaiGuiTangSceneStateRequest,
     HaiGuiTangStartRequest,
     HomeRequest,
     IdleScanStartRequest,
@@ -27,6 +29,7 @@ from .schemas import (
 from .service import QuickControlService
 
 AGENT_STREAM_TEST_PAGE = Path(__file__).resolve().parents[2] / "agent_stream_test.html"
+WEB_ROOT = Path(__file__).resolve().parents[5] / "Software" / "Web"
 
 
 class OpenClawChatStreamBridge:
@@ -322,6 +325,8 @@ def _ok(data: dict[str, Any]) -> dict[str, Any]:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="MomoAgent Quick Control API", version="0.1.0", lifespan=lifespan)
+    if WEB_ROOT.is_dir():
+        app.mount("/web", StaticFiles(directory=str(WEB_ROOT), html=True), name="web")
 
     @app.exception_handler(QuickControlError)
     async def quick_control_error_handler(_request: Request, exc: QuickControlError):
@@ -355,6 +360,10 @@ def create_app() -> FastAPI:
     @app.get("/agent-test")
     async def agent_test_page() -> FileResponse:
         return FileResponse(AGENT_STREAM_TEST_PAGE)
+
+    @app.get("/haiguitang")
+    async def haiguitang_web_page() -> RedirectResponse:
+        return RedirectResponse(url="/web/", status_code=307)
 
     @app.get("/api/v1/session/status")
     async def session_status(request: Request) -> dict[str, Any]:
@@ -505,20 +514,56 @@ def create_app() -> FastAPI:
         service: QuickControlService = request.app.state.quick_control_service
         return _ok(service.haiguitang_scene_config())
 
+    @app.get("/api/v1/scenes/haiguitang/state")
+    async def haiguitang_scene_state(request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(service.haiguitang_scene_state())
+
+    @app.post("/api/v1/scenes/haiguitang/state")
+    async def haiguitang_scene_present(
+        payload: HaiGuiTangSceneStateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(
+            service.haiguitang_scene_present(
+                clip=payload.clip,
+                subtitle_text=payload.subtitle_text,
+                video_url=payload.video_url,
+                loop_playback=payload.loop_playback,
+            )
+        )
+
     @app.get("/api/v1/scenes/haiguitang/intro-video")
     async def haiguitang_intro_video(request: Request) -> FileResponse:
         del request
         intro_video_file = haiguitang_intro_video_file()
-        if not intro_video_file.is_file():
+        if intro_video_file is None or not intro_video_file.is_file():
             raise QuickControlError(
                 "HAIGUITANG_INTRO_VIDEO_NOT_FOUND",
-                f"HaiGuiTang intro video not found: {intro_video_file}",
+                "HaiGuiTang intro video not found in runtime/media",
                 404,
             )
         return FileResponse(
             path=intro_video_file,
             media_type="video/mp4",
             filename=intro_video_file.name,
+        )
+
+    @app.get("/api/v1/scenes/haiguitang/media/{media_name}")
+    async def haiguitang_media(request: Request, media_name: str) -> FileResponse:
+        del request
+        media_file = haiguitang_media_file(media_name)
+        if media_file is None or not media_file.is_file():
+            raise QuickControlError(
+                "HAIGUITANG_MEDIA_NOT_FOUND",
+                f"HaiGuiTang media not found: {media_name}",
+                404,
+            )
+        return FileResponse(
+            path=media_file,
+            media_type="video/mp4",
+            filename=media_file.name,
         )
 
     @app.post("/api/v1/haiguitang/start")

@@ -110,17 +110,18 @@
 ### 6.2 安装依赖
 在仓库根目录执行：
 ```bash
-python3 -m venv .venv
+bash scripts/bootstrap.sh
+
+# 如需 Qt GUI / 3D 视图 / 语音窗口，再补进阶版
+bash scripts/bootstrap.sh --advanced
+
 source .venv/bin/activate
-pip install -U pip
-pip install -e ./sdk
-
-# 主从控制运行依赖
-pip install draccus opencv-python PyQt5 lerobot
-
-# 可选（仿真 / 3D 视图）
-pip install pybullet vtk
 ```
+
+说明：
+- `bash scripts/bootstrap.sh` 会自动在仓库根目录创建 `.venv`
+- 基础版覆盖：机械臂控制、`quick_control_api`、摄像头 / `face_loc` 的 headless 链路
+- 进阶版 `--advanced` 会额外安装 Qt GUI 相关依赖
 
 ### 6.3 启动主从遥操作（实机）
 1. 在从臂侧设备启动服务端：
@@ -143,8 +144,10 @@ python3 main.py --ip <从臂IP> --port 6666 --leader-port /dev/ttyACM0 --leader-
 
 ### 6.4 启动图形界面（可选）
 ```bash
-cd Software/Master
-python3 gui.py
+bash scripts/bootstrap.sh --advanced
+source .venv/bin/activate
+
+python Software/Master/main.py
 ```
 在 Settings 页面填写 IP/端口后点击 **Connect**。
 如有问题欢迎提交 issue。

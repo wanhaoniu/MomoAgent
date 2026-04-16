@@ -13,8 +13,16 @@ DEFAULT_HAIGUITANG_SCENE_CONFIG_PATH = (
 DEFAULT_HAIGUITANG_MEDIA_DIR = (
     REPO_ROOT / "Software" / "Master" / "quick_control_api" / "runtime" / "media"
 )
-DEFAULT_HAIGUITANG_INTRO_VIDEO_FILE = DEFAULT_HAIGUITANG_MEDIA_DIR / "haiguitang_intro.mp4"
 DEFAULT_HAIGUITANG_INTRO_VIDEO_ROUTE = "/api/v1/scenes/haiguitang/intro-video"
+DEFAULT_HAIGUITANG_MEDIA_ROUTE_TEMPLATE = "/api/v1/scenes/haiguitang/media/{media_name}"
+
+HAIGUITANG_MEDIA_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "intro": ("begin.mp4", "haiguitang_intro.mp4", "intro.mp4"),
+    "default": ("default.mp4", "idle.mp4", "loop.mp4", "begin.mp4"),
+    "nod": ("nod.mp4",),
+    "shake": ("shake.mp4",),
+    "outro": ("end.mp4", "outro.mp4"),
+}
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -45,18 +53,39 @@ class HaiGuiTangSceneConfig:
     title: str = "海龟汤"
     subtitle: str = "片头结束后进入互动模式"
     intro_video_url: str = ""
+    default_video_url: str = ""
+    nod_video_url: str = ""
+    shake_video_url: str = ""
+    outro_video_url: str = ""
     intro_video_auto_play: bool = True
     intro_video_skipable: bool = True
     intro_video_timeout_sec: float = 8.0
-    default_status_text: str = "进入互动区后，可以先用点头和摇头调试动作效果。"
+    default_status_text: str = "片头结束后可以直接点“对话”开始和 agent 玩海龟汤，也可以手动点头和摇头调试动作。"
     placeholder_title: str = "片头占位"
-    placeholder_body: str = "当前还没有正式视频素材，后续把 mp4 放到固定路径或改配置 URL 就能替换。"
-    media_file_path: str = str(DEFAULT_HAIGUITANG_INTRO_VIDEO_FILE)
+    placeholder_body: str = "当前还没有找到 begin.mp4 片头素材，后续把视频放到 runtime/media 里就会自动识别。"
+    media_file_path: str = str(DEFAULT_HAIGUITANG_MEDIA_DIR / "begin.mp4")
     media_route_path: str = DEFAULT_HAIGUITANG_INTRO_VIDEO_ROUTE
+    media_directory_path: str = str(DEFAULT_HAIGUITANG_MEDIA_DIR)
 
 
-def haiguitang_intro_video_file() -> Path:
-    return DEFAULT_HAIGUITANG_INTRO_VIDEO_FILE
+def haiguitang_media_route(media_name: str) -> str:
+    normalized = str(media_name or "").strip().lower()
+    if normalized not in HAIGUITANG_MEDIA_CANDIDATES:
+        raise ValueError(f"Unsupported HaiGuiTang media name: {media_name}")
+    return DEFAULT_HAIGUITANG_MEDIA_ROUTE_TEMPLATE.format(media_name=normalized)
+
+
+def haiguitang_media_file(media_name: str) -> Path | None:
+    normalized = str(media_name or "").strip().lower()
+    for candidate in HAIGUITANG_MEDIA_CANDIDATES.get(normalized, ()):
+        path = DEFAULT_HAIGUITANG_MEDIA_DIR / candidate
+        if path.is_file():
+            return path
+    return None
+
+
+def haiguitang_intro_video_file() -> Path | None:
+    return haiguitang_media_file("intro")
 
 
 def _load_file_overrides(path: Path) -> dict[str, Any]:
@@ -104,9 +133,45 @@ def load_haiguitang_scene_config() -> dict[str, Any]:
         )
         or ""
     ).strip()
+    default_video_url = str(
+        os.getenv(
+            "QUICK_CONTROL_HAIGUITANG_DEFAULT_VIDEO_URL",
+            config.default_video_url,
+        )
+        or ""
+    ).strip()
+    nod_video_url = str(
+        os.getenv(
+            "QUICK_CONTROL_HAIGUITANG_NOD_VIDEO_URL",
+            config.nod_video_url,
+        )
+        or ""
+    ).strip()
+    shake_video_url = str(
+        os.getenv(
+            "QUICK_CONTROL_HAIGUITANG_SHAKE_VIDEO_URL",
+            config.shake_video_url,
+        )
+        or ""
+    ).strip()
+    outro_video_url = str(
+        os.getenv(
+            "QUICK_CONTROL_HAIGUITANG_OUTRO_VIDEO_URL",
+            config.outro_video_url,
+        )
+        or ""
+    ).strip()
 
-    if not intro_video_url and haiguitang_intro_video_file().is_file():
-        intro_video_url = DEFAULT_HAIGUITANG_INTRO_VIDEO_ROUTE
+    if not intro_video_url and haiguitang_media_file("intro") is not None:
+        intro_video_url = haiguitang_media_route("intro")
+    if not default_video_url and haiguitang_media_file("default") is not None:
+        default_video_url = haiguitang_media_route("default")
+    if not nod_video_url and haiguitang_media_file("nod") is not None:
+        nod_video_url = haiguitang_media_route("nod")
+    if not shake_video_url and haiguitang_media_file("shake") is not None:
+        shake_video_url = haiguitang_media_route("shake")
+    if not outro_video_url and haiguitang_media_file("outro") is not None:
+        outro_video_url = haiguitang_media_route("outro")
 
     config = HaiGuiTangSceneConfig(
         **{
@@ -120,6 +185,10 @@ def load_haiguitang_scene_config() -> dict[str, Any]:
             ).strip()
             or config.subtitle,
             "intro_video_url": intro_video_url,
+            "default_video_url": default_video_url,
+            "nod_video_url": nod_video_url,
+            "shake_video_url": shake_video_url,
+            "outro_video_url": outro_video_url,
             "intro_video_auto_play": _read_bool(
                 "QUICK_CONTROL_HAIGUITANG_INTRO_VIDEO_AUTO_PLAY",
                 config.intro_video_auto_play,
@@ -158,8 +227,9 @@ def load_haiguitang_scene_config() -> dict[str, Any]:
                 or ""
             ).strip()
             or config.placeholder_body,
-            "media_file_path": str(haiguitang_intro_video_file()),
+            "media_file_path": str(DEFAULT_HAIGUITANG_MEDIA_DIR / "begin.mp4"),
             "media_route_path": DEFAULT_HAIGUITANG_INTRO_VIDEO_ROUTE,
+            "media_directory_path": str(DEFAULT_HAIGUITANG_MEDIA_DIR),
         }
     )
     return asdict(config)
@@ -167,7 +237,10 @@ def load_haiguitang_scene_config() -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_HAIGUITANG_INTRO_VIDEO_ROUTE",
+    "DEFAULT_HAIGUITANG_MEDIA_ROUTE_TEMPLATE",
     "HaiGuiTangSceneConfig",
+    "haiguitang_media_file",
+    "haiguitang_media_route",
     "haiguitang_intro_video_file",
     "load_haiguitang_scene_config",
 ]

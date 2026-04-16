@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>海龟汤 | MomoAgent Scene</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <div class="backdrop-halo halo-left"></div>
+    <div class="backdrop-halo halo-right"></div>
+    <div class="film-grain"></div>
+
+    <header class="hud">
+      <div class="brand-block">
+        <p class="eyebrow">MomoAgent Scene Mode</p>
+        <h1>海龟汤</h1>
+        <p class="tagline">先看片头，再进入角色表情。剩下的，交给 agent 和机械臂来演。</p>
+      </div>
+
+      <div class="hud-actions">
+        <button id="fullscreenButton" class="ghost-button" type="button">沉浸模式</button>
+        <button id="consoleToggleButton" class="solid-button" type="button">控制台</button>
+      </div>
+    </header>
+
+    <main class="stage">
+      <video
+        id="sceneVideo"
+        class="scene-video"
+        autoplay
+        muted
+        playsinline
+        preload="auto"
+      ></video>
+
+      <div id="sceneFallback" class="scene-fallback">
+        <div class="fallback-card">
+          <p class="fallback-kicker">Case File</p>
+          <h2 id="fallbackTitle">等待片头</h2>
+          <p id="fallbackBody">
+            页面会优先播放 begin.mp4，然后进入默认角色视频。你也可以让 agent 用 POST 接口切换表情。
+          </p>
+        </div>
+      </div>
+
+      <div class="vignette"></div>
+
+      <div class="scene-pill status-pill">
+        <span class="pill-label">状态</span>
+        <span id="sceneStatus">正在准备场景...</span>
+      </div>
+
+      <div class="scene-pill clip-pill">
+        <span class="pill-label">片段</span>
+        <span id="clipBadge">default</span>
+      </div>
+
+      <div class="scene-pill sync-pill" id="syncBadge">同步中</div>
+
+      <div class="subtitle-wrap">
+        <div id="subtitleText" class="subtitle-box"></div>
+      </div>
+    </main>
+
+    <aside id="consolePanel" class="console-panel">
+      <div class="console-card">
+        <div class="console-header">
+          <div>
+            <p class="console-label">Scene Console</p>
+            <h2>海龟汤控制台</h2>
+          </div>
+          <button id="consoleCloseButton" class="icon-button" type="button" aria-label="关闭控制台">×</button>
+        </div>
+
+        <section class="panel-section">
+          <div class="section-title-row">
+            <h3>接口</h3>
+            <button id="reloadButton" class="text-button" type="button">重新同步</button>
+          </div>
+          <label class="field-label" for="apiBaseInput">API Base</label>
+          <div class="inline-field">
+            <input id="apiBaseInput" type="text" spellcheck="false" placeholder="http://127.0.0.1:8010/" />
+            <button id="saveApiButton" class="solid-button compact" type="button">保存</button>
+          </div>
+          <p class="helper-text" id="apiHintText">
+            推荐直接从 quick_control_api 打开这个页面，这样网页和接口天然同域。
+          </p>
+        </section>
+
+        <section class="panel-section">
+          <h3>场景切换</h3>
+          <div class="action-grid">
+            <button class="scene-action" data-clip="intro" data-loop="false" type="button">片头</button>
+            <button class="scene-action" data-clip="default" data-loop="true" type="button">默认</button>
+            <button class="scene-action" data-clip="nod" data-loop="false" type="button">点头表情</button>
+            <button class="scene-action" data-clip="shake" data-loop="false" type="button">摇头表情</button>
+            <button class="scene-action" data-clip="outro" data-loop="false" type="button">结束片段</button>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <h3>悬浮字幕</h3>
+          <label class="field-label" for="subtitleInput">字幕文本</label>
+          <textarea id="subtitleInput" rows="3" placeholder="例如：让我再想想，这一刀还不能给你答案。"></textarea>
+          <div class="action-row">
+            <button id="sendSubtitleButton" class="solid-button" type="button">发送字幕</button>
+            <button id="clearSubtitleButton" class="ghost-button" type="button">清空字幕</button>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <h3>机械臂调试</h3>
+          <div class="action-row">
+            <button id="hardwareNodButton" class="solid-button" type="button">机械臂点头</button>
+            <button id="hardwareShakeButton" class="ghost-button" type="button">机械臂摇头</button>
+          </div>
+          <p class="helper-text">
+            这两个按钮会先检查机械臂 session 是否已连接，必要时自动调用 `session/connect`，再触发动作接口和表情切换。
+          </p>
+        </section>
+
+        <section class="panel-section">
+          <h3>素材约定</h3>
+          <ul class="note-list">
+            <li>`begin.mp4`：开场片头</li>
+            <li>`default.mp4`：默认角色循环</li>
+            <li>`nod.mp4`：点头反馈</li>
+            <li>`shake.mp4`：摇头反馈</li>
+            <li>`end.mp4`：结束片段</li>
+          </ul>
+          <p class="helper-text">
+            素材目录：<code>Software/Master/quick_control_api/runtime/media</code>
+          </p>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title-row">
+            <h3>运行日志</h3>
+            <button id="clearLogButton" class="text-button" type="button">清空</button>
+          </div>
+          <pre id="logOutput" class="log-output">Ready.</pre>
+        </section>
+      </div>
+    </aside>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
