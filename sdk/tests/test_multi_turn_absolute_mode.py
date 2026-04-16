@@ -24,6 +24,7 @@ from soarmmoce_sdk import (
     SoArmMoceController,
 )
 from soarmmoce_sdk.real_arm import HardwareError, POSITION_MODE_VALUE, SINGLE_TURN_RAW_MAX, SINGLE_TURN_RAW_MIN
+from soarmmoce_sdk.real_arm import DEFAULT_CALIB_DIR
 
 try:
     from soarmmoce_calibrate import _build_multi_turn_calibration_entry, _command_goal_from_reference, _read_joint_snapshot
@@ -91,7 +92,7 @@ except ImportError:
         return entry, payload
 
 
-CALIB_DIR = REPO_ROOT / "skills" / "soarmmoce-real-con" / "calibration"
+CALIB_DIR = DEFAULT_CALIB_DIR
 
 
 def _make_controller() -> SoArmMoceController:
@@ -147,6 +148,23 @@ class _FakeWriteBus:
 
     def sync_write(self, data_name: str, values) -> None:
         raise AssertionError(f"sync_write should not be used in this test: {data_name} {values}")
+
+
+class _FakeRegisterBus(_FakeWriteBus):
+    def __init__(self, registers: dict[tuple[str, str], int] | None = None) -> None:
+        super().__init__()
+        self.registers = {(str(register), str(joint)): int(value) for (register, joint), value in (registers or {}).items()}
+
+    def read(self, data_name: str, joint: str, normalize: bool = False):
+        assert normalize is False
+        key = (str(data_name), str(joint))
+        if key not in self.registers:
+            raise AssertionError(f"Unexpected read: {data_name} {joint}")
+        return self.registers[key]
+
+    def write(self, data_name: str, joint: str, value: int, normalize: bool = False) -> None:
+        super().write(data_name, joint, value, normalize)
+        self.registers[(str(data_name), str(joint))] = int(value)
 
 
 class _FakeMotionBus:
@@ -328,6 +346,37 @@ class MultiTurnAbsoluteModeTests(unittest.TestCase):
             self.assertEqual(writes[("Max_Position_Limit", joint_name)], MULTI_TURN_DISABLED_LIMIT_RAW)
             self.assertEqual(writes[("Phase", joint_name)], MULTI_TURN_PHASE_VALUE)
 
+    def test_position_mode_register_writes_skip_unchanged_values(self) -> None:
+        controller = _make_controller()
+        registers: dict[tuple[str, str], int] = {}
+        for joint_name, spec in controller._joint_specs.items():
+            calibration_entry = controller._calibration_payload.get(joint_name, {})
+            for register_name, register_value in spec.policy.register_writes(calibration_entry):
+                registers[(register_name, joint_name)] = int(register_value)
+        bus = _FakeRegisterBus(registers)
+
+        controller._apply_position_mode_registers(bus)
+
+        self.assertEqual(bus.writes, [])
+
+    def test_position_mode_register_writes_only_changed_values(self) -> None:
+        controller = _make_controller()
+        registers: dict[tuple[str, str], int] = {}
+        for joint_name, spec in controller._joint_specs.items():
+            calibration_entry = controller._calibration_payload.get(joint_name, {})
+            for register_name, register_value in spec.policy.register_writes(calibration_entry):
+                registers[(register_name, joint_name)] = int(register_value)
+        registers[("Homing_Offset", "shoulder_pan")] += 1
+        bus = _FakeRegisterBus(registers)
+
+        controller._apply_position_mode_registers(bus)
+
+        shoulder_pan_entry = controller._calibration_payload["shoulder_pan"]
+        self.assertEqual(
+            bus.writes,
+            [("Homing_Offset", "shoulder_pan", int(shoulder_pan_entry["homing_offset"]), False)],
+        )
+
     def test_build_raw_hold_command_returns_current_raw_register_values(self) -> None:
         controller = _make_controller()
         bus = _FakePrimeBus(
@@ -352,6 +401,33 @@ class MultiTurnAbsoluteModeTests(unittest.TestCase):
                 "wrist_roll": 789,
             },
         )
+
+    def test_apply_hold_state_writes_only_changed_goal_positions(self) -> None:
+        controller = _make_controller()
+        bus = _FakeRegisterBus(
+            {
+                ("Goal_Position", "shoulder_pan"): 123,
+                ("Goal_Position", "shoulder_lift"): 4372,
+                ("Goal_Position", "elbow_flex"): -2408,
+                ("Goal_Position", "wrist_flex"): 456,
+                ("Goal_Position", "wrist_roll"): 700,
+            }
+        )
+
+        controller.apply_hold_state(
+            {
+                "joint_goal_raw": {
+                    "shoulder_pan": 123,
+                    "shoulder_lift": 4372,
+                    "elbow_flex": -2408,
+                    "wrist_flex": 456,
+                    "wrist_roll": 789,
+                }
+            },
+            bus=bus,
+        )
+
+        self.assertEqual(bus.writes, [("Goal_Position", "wrist_roll", 789, False)])
 
     def test_write_raw_goal_positions_uses_non_normalized_register_writes(self) -> None:
         controller = _make_controller()
@@ -455,6 +531,7 @@ class MultiTurnAbsoluteModeTests(unittest.TestCase):
 
         goal_writes = [entry for entry in bus.writes if entry[0] == "Goal_Position" and entry[1] == "shoulder_pan"]
         self.assertEqual(len(goal_writes), 1)
+        self.assertEqual({entry[1] for entry in bus.writes if entry[0] == "Goal_Position"}, {"shoulder_pan"})
 
     def test_capture_hold_state_includes_gripper_when_integrated(self) -> None:
         controller = _make_controller()

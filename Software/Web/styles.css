@@ -199,6 +199,17 @@ button {
   transform: translateY(-1px);
 }
 
+.solid-button:disabled,
+.ghost-button:disabled,
+.scene-action:disabled,
+.icon-button:disabled,
+.text-button:disabled {
+  opacity: 0.58;
+  cursor: wait;
+  transform: none;
+  box-shadow: none;
+}
+
 .ghost-button,
 .scene-action {
   color: var(--text-main);

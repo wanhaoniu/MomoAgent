@@ -25,6 +25,14 @@ python /Users/moce/Documents/Project/MomoAgent/Software/Master/quick_control_api
 - `GET /api/v1/idle-scan/status`
 - `POST /api/v1/idle-scan/start`
 - `POST /api/v1/idle-scan/stop`
+- `GET /api/v1/haiguitang/status`
+- `GET /api/v1/scenes/haiguitang/config`
+- `GET /api/v1/scenes/haiguitang/state`
+- `POST /api/v1/scenes/haiguitang/state`
+- `POST /api/v1/haiguitang/start`
+- `POST /api/v1/haiguitang/act`
+- `POST /api/v1/haiguitang/stop`
+- `POST /api/v1/haiguitang/agent/turn`
 - `GET /api/v1/agent/status`
 - `GET /api/v1/agent/last-turn`
 - `POST /api/v1/agent/warmup`
@@ -45,3 +53,4 @@ python /Users/moce/Documents/Project/MomoAgent/Software/Master/quick_control_api
 - `WS /api/v1/ws/agent-stream` is the recommended frontend entrypoint for text plus optional backend-bridged streaming TTS.
 - OpenClaw warm session state is persisted locally so repeated turns do not pay the full cold-start cost every time.
 - If your OpenClaw skill still controls hardware by grabbing the SDK directly, it may conflict with an already-connected robot session. The long-term fix is to make skill-side robot actions call this API instead of opening a second hardware session.
+- `POST /api/v1/haiguitang/agent/turn` is the dedicated HaiGuiTang scene orchestration API. It forwards the turn to OpenClaw, converts the reply into subtitle/video/action directives, updates the full-screen scene, and triggers robot nod/shake when needed.

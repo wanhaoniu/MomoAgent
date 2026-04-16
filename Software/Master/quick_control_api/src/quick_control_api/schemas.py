@@ -130,3 +130,7 @@ class HaiGuiTangSceneStateRequest(BaseModel):
     subtitle_text: str = Field("", max_length=500)
     video_url: str = Field("", max_length=2000)
     loop_playback: bool | None = None
+
+
+class HaiGuiTangAgentTurnRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=8000)
