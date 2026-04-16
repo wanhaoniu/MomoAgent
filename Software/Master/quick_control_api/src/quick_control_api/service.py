@@ -37,6 +37,7 @@ CONTROL_MODE_NONE = "none"
 CONTROL_MODE_FOLLOW = "follow"
 CONTROL_MODE_ATTENTION = "attention"
 CONTROL_MODE_IDLE_SCAN = "idle_scan"
+CONTROL_MODE_HAIGUITANG = "haiguitang"
 
 from soarmmoce_sdk.runtime_compat import CompatibleRuntimeRobot as RuntimeRobot
 
@@ -49,7 +50,13 @@ from .face_follow_worker import (
     FaceFollowConfig,
     FaceFollowWorker,
 )
+from .haiguitang_worker import (
+    HaiGuiTangConfig,
+    HaiGuiTangWorker,
+    build_default_haiguitang_payload,
+)
 from .idle_scan_worker import IdleScanConfig, IdleScanWorker, build_default_idle_scan_payload
+from .scene_config import load_haiguitang_scene_config
 
 
 @dataclass
@@ -79,8 +86,10 @@ class QuickControlService:
         self._control_error = ""
         self._follow_worker: FaceFollowWorker | AttentionWorker | None = None
         self._idle_scan_worker: IdleScanWorker | None = None
+        self._haiguitang_worker: HaiGuiTangWorker | None = None
         self._last_follow_payload: dict[str, Any] = build_default_attention_payload()
         self._last_idle_scan_payload: dict[str, Any] = build_default_idle_scan_payload()
+        self._last_haiguitang_payload: dict[str, Any] = build_default_haiguitang_payload()
 
     def close(self) -> None:
         self.disconnect()
@@ -269,6 +278,23 @@ class QuickControlService:
             return payload
         return dict(self._last_idle_scan_payload)
 
+    def _haiguitang_payload_locked(self) -> dict[str, Any]:
+        worker = self._haiguitang_worker
+        if worker is not None:
+            payload = worker.status_payload()
+            self._last_haiguitang_payload = dict(payload)
+            return payload
+        return dict(self._last_haiguitang_payload)
+
+    def _haiguitang_config_from_last_payload_locked(self) -> HaiGuiTangConfig:
+        config_payload = self._last_haiguitang_payload.get("config")
+        if isinstance(config_payload, dict):
+            try:
+                return HaiGuiTangConfig(**config_payload)
+            except TypeError:
+                pass
+        return HaiGuiTangConfig()
+
     def _deactivate_control_locked(self) -> None:
         self._control_mode = CONTROL_MODE_NONE
         if self._follow_worker is not None:
@@ -283,6 +309,12 @@ class QuickControlService:
             self._last_idle_scan_payload["running"] = False
             self._idle_scan_worker.request_stop()
             self._idle_scan_worker = None
+        if self._haiguitang_worker is not None:
+            self._last_haiguitang_payload = self._haiguitang_worker.status_payload()
+            self._last_haiguitang_payload["enabled"] = False
+            self._last_haiguitang_payload["running"] = False
+            self._haiguitang_worker.request_stop()
+            self._haiguitang_worker = None
         self._control_error = ""
 
     def _stop_for_manual_motion_locked(self) -> None:
@@ -294,6 +326,7 @@ class QuickControlService:
             state = self._read_robot_state_locked()
             follow_payload = self._follow_payload_locked()
             idle_scan_payload = self._idle_scan_payload_locked()
+            haiguitang_payload = self._haiguitang_payload_locked()
             connected = state is not None and self._mode in ("connected", "simulation")
             status_light = "normal" if connected else "warning"
             state_text = "Normal" if connected else "Warning"
@@ -349,6 +382,8 @@ class QuickControlService:
                 control_error = str(follow_payload.get("last_error", "") or "").strip()
             elif self._control_mode == CONTROL_MODE_IDLE_SCAN:
                 control_error = str(idle_scan_payload.get("last_error", "") or "").strip()
+            elif self._control_mode == CONTROL_MODE_HAIGUITANG:
+                control_error = str(haiguitang_payload.get("last_error", "") or "").strip()
 
             return {
                 "session": self._session_payload(),
@@ -367,6 +402,7 @@ class QuickControlService:
                 },
                 "follow": follow_payload,
                 "idle_scan": idle_scan_payload,
+                "haiguitang": haiguitang_payload,
                 "joint_state": {
                     "names": names,
                     "values_rad": values_rad,
@@ -811,6 +847,94 @@ class QuickControlService:
                     self._idle_scan_worker.request_stop()
                     self._idle_scan_worker = None
             return self.idle_scan_status()
+
+    def haiguitang_status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "control_mode": str(self._control_mode),
+                "haiguitang": self._haiguitang_payload_locked(),
+            }
+
+    def haiguitang_start(
+        self,
+        *,
+        pan_joint: str,
+        tilt_joint: str,
+        speed_percent: int,
+        nod_amplitude_deg: float,
+        nod_cycles: int,
+        shake_amplitude_deg: float,
+        shake_cycles: int,
+        beat_duration_sec: float,
+        beat_pause_sec: float,
+        return_duration_sec: float,
+        settle_pause_sec: float,
+        auto_center_after_action: bool,
+        capture_anchor_on_start: bool,
+    ) -> dict[str, Any]:
+        with self._lock:
+            robot = self._require_robot()
+            self._deactivate_control_locked()
+            worker = HaiGuiTangWorker(
+                robot=robot,
+                robot_lock=self._lock,
+                config=HaiGuiTangConfig(
+                    pan_joint=str(pan_joint or DEFAULT_FOLLOW_PAN_JOINT),
+                    tilt_joint=str(tilt_joint or DEFAULT_FOLLOW_TILT_JOINT),
+                    speed_percent=int(max(1, min(100, speed_percent))),
+                    nod_amplitude_deg=float(np.clip(nod_amplitude_deg, 0.5, 25.0)),
+                    nod_cycles=int(max(1, min(6, nod_cycles))),
+                    shake_amplitude_deg=float(np.clip(shake_amplitude_deg, 0.5, 30.0)),
+                    shake_cycles=int(max(1, min(6, shake_cycles))),
+                    beat_duration_sec=float(np.clip(beat_duration_sec, 0.05, 3.0)),
+                    beat_pause_sec=float(np.clip(beat_pause_sec, 0.0, 2.0)),
+                    return_duration_sec=float(np.clip(return_duration_sec, 0.05, 3.0)),
+                    settle_pause_sec=float(np.clip(settle_pause_sec, 0.0, 2.0)),
+                    auto_center_after_action=bool(auto_center_after_action),
+                    capture_anchor_on_start=bool(capture_anchor_on_start),
+                ),
+            )
+            worker.start()
+            self._haiguitang_worker = worker
+            self._last_haiguitang_payload = worker.status_payload()
+            self._control_mode = CONTROL_MODE_HAIGUITANG
+            self._control_error = ""
+            return self.haiguitang_status()
+
+    def haiguitang_act(self, *, action: str) -> dict[str, Any]:
+        with self._lock:
+            self._require_robot()
+            if self._control_mode != CONTROL_MODE_HAIGUITANG or self._haiguitang_worker is None:
+                self._deactivate_control_locked()
+                worker = HaiGuiTangWorker(
+                    robot=self._require_robot(),
+                    robot_lock=self._lock,
+                    config=self._haiguitang_config_from_last_payload_locked(),
+                )
+                worker.start()
+                self._haiguitang_worker = worker
+                self._control_mode = CONTROL_MODE_HAIGUITANG
+            self._last_haiguitang_payload = self._haiguitang_worker.enqueue_action(action)
+            self._control_error = ""
+            return self.haiguitang_status()
+
+    def haiguitang_stop(self) -> dict[str, Any]:
+        with self._lock:
+            if self._control_mode == CONTROL_MODE_HAIGUITANG or self._haiguitang_worker is not None:
+                self._control_mode = CONTROL_MODE_NONE
+                if self._haiguitang_worker is not None:
+                    self._last_haiguitang_payload = self._haiguitang_worker.status_payload()
+                    self._last_haiguitang_payload["enabled"] = False
+                    self._last_haiguitang_payload["running"] = False
+                    self._haiguitang_worker.request_stop()
+                    self._haiguitang_worker = None
+                robot = self._robot
+                if robot is not None and getattr(robot, "connected", False):
+                    robot.stop()
+            return self.haiguitang_status()
+
+    def haiguitang_scene_config(self) -> dict[str, Any]:
+        return load_haiguitang_scene_config()
 
     def agent_status(self) -> dict[str, Any]:
         return self._agent.status_payload()

@@ -5,10 +5,12 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.view.View
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -20,8 +22,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -33,7 +37,7 @@ class MainActivity : AppCompatActivity(), AgentWebSocketClient.Listener {
     private val httpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(4, TimeUnit.SECONDS)
-            .readTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
             .build()
     }
     private val audioPlayer = StreamingPcmPlayer()
@@ -43,6 +47,12 @@ class MainActivity : AppCompatActivity(), AgentWebSocketClient.Listener {
     private var previewJob: Job? = null
     private var currentAssistantIndex: Int? = null
     private var isRunningTurn = false
+
+    private var haiguitangModeVisible = false
+    private var haiguitangIntroTimeoutJob: Job? = null
+    private var haiguitangSceneConfig = HaiGuiTangSceneConfig()
+    private var shouldResumePreviewAfterHaiGuiTang = false
+    private var haiguitangControlPrimed = false
 
     private val speechPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -76,6 +86,18 @@ class MainActivity : AppCompatActivity(), AgentWebSocketClient.Listener {
         updateStatus("未连接")
         updatePreviewStatus("预览未启动")
         setConnected(false)
+        initializeHaiGuiTangUi()
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (haiguitangModeVisible) {
+                    closeHaiGuiTangMode()
+                    return
+                }
+                isEnabled = false
+                onBackPressedDispatcher.onBackPressed()
+            }
+        })
 
         binding.connectButton.setOnClickListener {
             connect()
@@ -89,10 +111,41 @@ class MainActivity : AppCompatActivity(), AgentWebSocketClient.Listener {
         binding.speakButton.setOnClickListener {
             beginSpeechInput()
         }
+        binding.haiguitangEntryButton.setOnClickListener {
+            openHaiGuiTangMode()
+        }
+        binding.haiguitangCloseButton.setOnClickListener {
+            closeHaiGuiTangMode()
+        }
+        binding.haiguitangSkipButton.setOnClickListener {
+            showHaiGuiTangInteractive()
+        }
+        binding.haiguitangEnterButton.setOnClickListener {
+            showHaiGuiTangInteractive()
+        }
+        binding.haiguitangReplayIntroButton.setOnClickListener {
+            replayHaiGuiTangIntro()
+        }
+        binding.haiguitangNodButton.setOnClickListener {
+            triggerHaiGuiTangAction(
+                action = "nod",
+                inFlightText = "Momo 点头中...",
+                doneText = "Momo 刚刚点了点头。",
+            )
+        }
+        binding.haiguitangShakeButton.setOnClickListener {
+            triggerHaiGuiTangAction(
+                action = "shake",
+                inFlightText = "Momo 摇头中...",
+                doneText = "Momo 刚刚摇了摇头。",
+            )
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        cancelHaiGuiTangIntroTimeout()
+        stopHaiGuiTangVideo()
         disconnect()
         audioPlayer.close()
         httpClient.dispatcher.executorService.shutdown()
@@ -140,7 +193,9 @@ class MainActivity : AppCompatActivity(), AgentWebSocketClient.Listener {
             url = buildWsUrl(host, binding.agentPortInput.text?.toString().orEmpty()),
             listener = this,
         ).also { it.connect() }
-        startPreviewLoop(host, binding.previewPortInput.text?.toString().orEmpty())
+        if (!haiguitangModeVisible) {
+            startPreviewLoop(host, binding.previewPortInput.text?.toString().orEmpty())
+        }
         binding.connectButton.isEnabled = false
         binding.disconnectButton.isEnabled = true
         updateStatus("正在连接 $host")
@@ -153,10 +208,14 @@ class MainActivity : AppCompatActivity(), AgentWebSocketClient.Listener {
         audioPlayer.reset()
         isRunningTurn = false
         currentAssistantIndex = null
+        haiguitangControlPrimed = false
         setConnected(false)
         binding.previewImage.setImageDrawable(null)
         updateStatus("已断开")
         updatePreviewStatus("预览未启动")
+        if (haiguitangModeVisible) {
+            updateHaiGuiTangStatus("连接已断开，可继续查看占位画面。")
+        }
     }
 
     private fun disconnectSocketOnly() {
@@ -263,6 +322,356 @@ class MainActivity : AppCompatActivity(), AgentWebSocketClient.Listener {
         }
     }
 
+    private fun initializeHaiGuiTangUi() {
+        binding.haiguitangOverlay.visibility = View.GONE
+        binding.haiguitangIntroContainer.visibility = View.VISIBLE
+        binding.haiguitangInteractiveContainer.visibility = View.GONE
+        binding.haiguitangVideoView.visibility = View.GONE
+        binding.haiguitangPlaceholderContainer.visibility = View.VISIBLE
+        binding.haiguitangTitleText.text = getString(R.string.haiguitang_title)
+        binding.haiguitangSubtitleText.text = getString(R.string.haiguitang_subtitle_default)
+        binding.haiguitangStatusText.text = getString(R.string.haiguitang_status_default)
+        binding.haiguitangVideoStatusText.text = getString(R.string.haiguitang_video_waiting)
+    }
+
+    private fun openHaiGuiTangMode() {
+        if (haiguitangModeVisible) {
+            return
+        }
+
+        saveSettings()
+        haiguitangModeVisible = true
+        haiguitangControlPrimed = false
+        shouldResumePreviewAfterHaiGuiTang = previewJob?.isActive == true
+        previewJob?.cancel()
+        previewJob = null
+        audioPlayer.reset()
+
+        binding.haiguitangOverlay.visibility = View.VISIBLE
+        binding.haiguitangOverlay.bringToFront()
+        binding.haiguitangTitleText.text = getString(R.string.haiguitang_title)
+        binding.haiguitangSubtitleText.text = getString(R.string.haiguitang_subtitle_default)
+        binding.haiguitangExpressionPlaceholderText.text =
+            getString(R.string.haiguitang_expression_placeholder)
+
+        showHaiGuiTangPlaceholder(
+            title = getString(R.string.haiguitang_placeholder_title),
+            body = getString(R.string.haiguitang_status_loading),
+            status = getString(R.string.haiguitang_video_waiting),
+        )
+        updateHaiGuiTangStatus(getString(R.string.haiguitang_status_loading))
+
+        lifecycleScope.launch {
+            val host = normalizedHost(binding.hostInput.text?.toString().orEmpty())
+            val agentPort = binding.agentPortInput.text?.toString().orEmpty()
+            val configResult = if (host.isBlank()) {
+                ApiCallResult(
+                    ok = false,
+                    body = null,
+                    message = "还没有填写控制器地址，当前先显示占位场景。",
+                )
+            } else {
+                executeJsonRequest(
+                    Request.Builder()
+                        .url(buildHaiGuiTangSceneConfigUrl(host, agentPort))
+                        .header("Cache-Control", "no-cache")
+                        .build(),
+                )
+            }
+            if (!haiguitangModeVisible) {
+                return@launch
+            }
+            haiguitangSceneConfig = if (configResult.ok) {
+                HaiGuiTangSceneConfig.fromApiEnvelope(configResult.body)
+            } else {
+                HaiGuiTangSceneConfig()
+            }
+            applyHaiGuiTangSceneConfig(configResult)
+        }
+    }
+
+    private fun closeHaiGuiTangMode() {
+        if (!haiguitangModeVisible) {
+            return
+        }
+
+        haiguitangModeVisible = false
+        cancelHaiGuiTangIntroTimeout()
+        stopHaiGuiTangVideo()
+        binding.haiguitangOverlay.visibility = View.GONE
+
+        val shouldStopControl = haiguitangControlPrimed
+        haiguitangControlPrimed = false
+        if (shouldStopControl) {
+            lifecycleScope.launch {
+                stopHaiGuiTangControlQuietly()
+            }
+        }
+
+        if (shouldResumePreviewAfterHaiGuiTang) {
+            val host = normalizedHost(binding.hostInput.text?.toString().orEmpty())
+            if (host.isNotBlank()) {
+                startPreviewLoop(host, binding.previewPortInput.text?.toString().orEmpty())
+            }
+        }
+    }
+
+    private fun applyHaiGuiTangSceneConfig(configResult: ApiCallResult) {
+        val config = haiguitangSceneConfig
+        binding.haiguitangTitleText.text = config.title
+        binding.haiguitangSubtitleText.text = config.subtitle
+        binding.haiguitangStatusText.text = config.defaultStatusText
+        binding.haiguitangSkipButton.visibility =
+            if (config.introVideoSkipable) View.VISIBLE else View.GONE
+
+        val placeholderBody = buildHaiGuiTangPlaceholderBody(
+            config = config,
+            extraMessage = configResult.message.takeIf { it.isNotBlank() },
+        )
+        val introVideoUrl = config.resolvedIntroVideoUrl(
+            buildApiBaseUrl(
+                normalizedHost(binding.hostInput.text?.toString().orEmpty()),
+                binding.agentPortInput.text?.toString().orEmpty(),
+            ),
+        )
+
+        if (introVideoUrl.isBlank()) {
+            showHaiGuiTangPlaceholder(
+                title = config.placeholderTitle,
+                body = placeholderBody,
+                status = "当前没有配置片头视频，已显示占位画面。",
+            )
+            return
+        }
+
+        playHaiGuiTangIntro(introVideoUrl, placeholderBody)
+    }
+
+    private fun buildHaiGuiTangPlaceholderBody(
+        config: HaiGuiTangSceneConfig,
+        extraMessage: String? = null,
+    ): String {
+        val sections = mutableListOf<String>()
+        extraMessage?.trim()?.takeIf { it.isNotBlank() }?.let { sections += it }
+        config.placeholderBody.trim().takeIf { it.isNotBlank() }?.let { sections += it }
+        if (config.mediaFilePath.isNotBlank()) {
+            sections += "后续把视频放到:\n${config.mediaFilePath}"
+        }
+        return sections.joinToString(separator = "\n\n")
+    }
+
+    private fun showHaiGuiTangPlaceholder(
+        title: String,
+        body: String,
+        status: String,
+    ) {
+        cancelHaiGuiTangIntroTimeout()
+        stopHaiGuiTangVideo()
+        binding.haiguitangIntroContainer.visibility = View.VISIBLE
+        binding.haiguitangInteractiveContainer.visibility = View.GONE
+        binding.haiguitangVideoView.visibility = View.GONE
+        binding.haiguitangPlaceholderContainer.visibility = View.VISIBLE
+        binding.haiguitangPlaceholderTitleText.text = title
+        binding.haiguitangPlaceholderBodyText.text = body
+        binding.haiguitangVideoStatusText.text = status
+        binding.haiguitangEnterButton.visibility = View.VISIBLE
+    }
+
+    private fun playHaiGuiTangIntro(
+        introVideoUrl: String,
+        placeholderBody: String,
+    ) {
+        cancelHaiGuiTangIntroTimeout()
+        stopHaiGuiTangVideo()
+        binding.haiguitangIntroContainer.visibility = View.VISIBLE
+        binding.haiguitangInteractiveContainer.visibility = View.GONE
+        binding.haiguitangVideoView.visibility = View.VISIBLE
+        binding.haiguitangPlaceholderContainer.visibility = View.GONE
+        binding.haiguitangVideoStatusText.text = "片头加载中..."
+
+        binding.haiguitangVideoView.setOnPreparedListener {
+            binding.haiguitangVideoStatusText.text = "片头播放中..."
+            if (haiguitangSceneConfig.introVideoAutoPlay) {
+                binding.haiguitangVideoView.start()
+            }
+        }
+        binding.haiguitangVideoView.setOnCompletionListener {
+            binding.haiguitangVideoStatusText.text = "片头播放结束，正在进入互动区。"
+            showHaiGuiTangInteractive()
+        }
+        binding.haiguitangVideoView.setOnErrorListener { _, _, _ ->
+            showHaiGuiTangPlaceholder(
+                title = haiguitangSceneConfig.placeholderTitle,
+                body = placeholderBody,
+                status = "片头加载失败，已切换到占位画面。",
+            )
+            true
+        }
+        startHaiGuiTangIntroTimeout(haiguitangSceneConfig.introVideoTimeoutSec)
+        binding.haiguitangVideoView.setVideoURI(Uri.parse(introVideoUrl))
+    }
+
+    private fun replayHaiGuiTangIntro() {
+        if (!haiguitangModeVisible) {
+            return
+        }
+        val introVideoUrl = haiguitangSceneConfig.resolvedIntroVideoUrl(
+            buildApiBaseUrl(
+                normalizedHost(binding.hostInput.text?.toString().orEmpty()),
+                binding.agentPortInput.text?.toString().orEmpty(),
+            ),
+        )
+        val placeholderBody = buildHaiGuiTangPlaceholderBody(config = haiguitangSceneConfig)
+        if (introVideoUrl.isBlank()) {
+            showHaiGuiTangPlaceholder(
+                title = haiguitangSceneConfig.placeholderTitle,
+                body = placeholderBody,
+                status = "当前没有片头视频，显示占位画面。",
+            )
+            return
+        }
+        playHaiGuiTangIntro(introVideoUrl, placeholderBody)
+    }
+
+    private fun showHaiGuiTangInteractive() {
+        if (!haiguitangModeVisible) {
+            return
+        }
+        cancelHaiGuiTangIntroTimeout()
+        stopHaiGuiTangVideo()
+        binding.haiguitangIntroContainer.visibility = View.GONE
+        binding.haiguitangInteractiveContainer.visibility = View.VISIBLE
+        binding.haiguitangStatusText.text = haiguitangSceneConfig.defaultStatusText
+        setHaiGuiTangActionButtonsEnabled(true)
+    }
+
+    private fun triggerHaiGuiTangAction(
+        action: String,
+        inFlightText: String,
+        doneText: String,
+    ) {
+        val host = normalizedHost(binding.hostInput.text?.toString().orEmpty())
+        if (host.isBlank()) {
+            updateHaiGuiTangStatus("请先填写控制器地址，当前只能查看占位页面。")
+            showToast("请先填写控制器 IP 或域名")
+            return
+        }
+
+        val agentPort = binding.agentPortInput.text?.toString().orEmpty()
+        setHaiGuiTangActionButtonsEnabled(false)
+        updateHaiGuiTangStatus(inFlightText)
+        lifecycleScope.launch {
+            val ready = ensureHaiGuiTangControlStarted(host, agentPort)
+            if (!ready) {
+                setHaiGuiTangActionButtonsEnabled(true)
+                return@launch
+            }
+            val result = executeJsonRequest(
+                request = Request.Builder()
+                    .url(buildHaiGuiTangActionUrl(host, agentPort))
+                    .post(
+                        JSONObject()
+                            .put("action", action)
+                            .toString()
+                            .toRequestBody("application/json; charset=utf-8".toMediaType()),
+                    )
+                    .build(),
+            )
+            if (result.ok) {
+                updateHaiGuiTangStatus(doneText)
+            } else {
+                updateHaiGuiTangStatus("动作触发失败: ${result.message}")
+                showToast(result.message)
+                haiguitangControlPrimed = false
+            }
+            setHaiGuiTangActionButtonsEnabled(true)
+        }
+    }
+
+    private suspend fun ensureHaiGuiTangControlStarted(host: String, rawPort: String): Boolean {
+        if (haiguitangControlPrimed) {
+            return true
+        }
+        val result = executeJsonRequest(
+            request = Request.Builder()
+                .url(buildHaiGuiTangStartUrl(host, rawPort))
+                .post(
+                    JSONObject()
+                        .put("pan_joint", "shoulder_pan")
+                        .put("tilt_joint", "elbow_flex")
+                        .put("speed_percent", 30)
+                        .put("nod_amplitude_deg", 7.0)
+                        .put("nod_cycles", 2)
+                        .put("shake_amplitude_deg", 10.0)
+                        .put("shake_cycles", 2)
+                        .put("beat_duration_sec", 0.26)
+                        .put("beat_pause_sec", 0.08)
+                        .put("return_duration_sec", 0.24)
+                        .put("settle_pause_sec", 0.10)
+                        .put("auto_center_after_action", true)
+                        .put("capture_anchor_on_start", true)
+                        .toString()
+                        .toRequestBody("application/json; charset=utf-8".toMediaType()),
+                )
+                .build(),
+        )
+        if (!result.ok) {
+            updateHaiGuiTangStatus("动作服务未就绪: ${result.message}")
+            showToast(result.message)
+            haiguitangControlPrimed = false
+            return false
+        }
+        haiguitangControlPrimed = true
+        return true
+    }
+
+    private suspend fun stopHaiGuiTangControlQuietly() {
+        val host = normalizedHost(binding.hostInput.text?.toString().orEmpty())
+        if (host.isBlank()) {
+            return
+        }
+        executeJsonRequest(
+            request = Request.Builder()
+                .url(buildHaiGuiTangStopUrl(host, binding.agentPortInput.text?.toString().orEmpty()))
+                .post("{}".toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build(),
+        )
+    }
+
+    private fun setHaiGuiTangActionButtonsEnabled(enabled: Boolean) {
+        binding.haiguitangNodButton.isEnabled = enabled
+        binding.haiguitangShakeButton.isEnabled = enabled
+    }
+
+    private fun updateHaiGuiTangStatus(message: String) {
+        binding.haiguitangStatusText.text = message
+    }
+
+    private fun startHaiGuiTangIntroTimeout(timeoutSec: Double) {
+        cancelHaiGuiTangIntroTimeout()
+        if (timeoutSec <= 0.0) {
+            return
+        }
+        haiguitangIntroTimeoutJob = lifecycleScope.launch {
+            delay((timeoutSec * 1000.0).toLong())
+            if (haiguitangModeVisible && binding.haiguitangInteractiveContainer.visibility != View.VISIBLE) {
+                showHaiGuiTangInteractive()
+            }
+        }
+    }
+
+    private fun cancelHaiGuiTangIntroTimeout() {
+        haiguitangIntroTimeoutJob?.cancel()
+        haiguitangIntroTimeoutJob = null
+    }
+
+    private fun stopHaiGuiTangVideo() {
+        try {
+            binding.haiguitangVideoView.stopPlayback()
+        } catch (_: Exception) {
+        }
+    }
+
     private fun startPreviewLoop(host: String, rawPort: String) {
         previewJob?.cancel()
         val previewUrl = buildPreviewUrl(host, rawPort)
@@ -301,6 +710,40 @@ class MainActivity : AppCompatActivity(), AgentWebSocketClient.Listener {
                     }
                 }
                 delay(350)
+            }
+        }
+    }
+
+    private suspend fun executeJsonRequest(request: Request): ApiCallResult {
+        return withContext(Dispatchers.IO) {
+            try {
+                httpClient.newCall(request).execute().use { response ->
+                    val bodyText = response.body?.string().orEmpty()
+                    val bodyJson = try {
+                        if (bodyText.isBlank()) null else JSONObject(bodyText)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    val ok = response.isSuccessful && bodyJson?.optBoolean("ok") == true
+                    val message = when {
+                        ok -> ""
+                        bodyJson != null -> {
+                            bodyJson.optJSONObject("error")?.optString("message")
+                                ?.takeIf { it.isNotBlank() }
+                                ?: bodyJson.optString("message").takeIf { it.isNotBlank() }
+                                ?: "HTTP ${response.code}"
+                        }
+                        bodyText.isNotBlank() -> bodyText
+                        else -> "HTTP ${response.code}"
+                    }
+                    ApiCallResult(ok = ok, body = bodyJson, message = message)
+                }
+            } catch (exc: Exception) {
+                ApiCallResult(
+                    ok = false,
+                    body = null,
+                    message = exc.message ?: "网络请求失败",
+                )
             }
         }
     }
@@ -390,8 +833,35 @@ class MainActivity : AppCompatActivity(), AgentWebSocketClient.Listener {
         return "http://$host:$port/frame.jpg?max_width=960&quality=70"
     }
 
+    private fun buildApiBaseUrl(host: String, rawPort: String): String {
+        val port = rawPort.trim().ifBlank { "8010" }
+        return "http://$host:$port/"
+    }
+
+    private fun buildHaiGuiTangSceneConfigUrl(host: String, rawPort: String): String {
+        return buildApiBaseUrl(host, rawPort) + "api/v1/scenes/haiguitang/config"
+    }
+
+    private fun buildHaiGuiTangStartUrl(host: String, rawPort: String): String {
+        return buildApiBaseUrl(host, rawPort) + "api/v1/haiguitang/start"
+    }
+
+    private fun buildHaiGuiTangActionUrl(host: String, rawPort: String): String {
+        return buildApiBaseUrl(host, rawPort) + "api/v1/haiguitang/act"
+    }
+
+    private fun buildHaiGuiTangStopUrl(host: String, rawPort: String): String {
+        return buildApiBaseUrl(host, rawPort) + "api/v1/haiguitang/stop"
+    }
+
     private data class ConversationEntry(
         val role: String,
         val text: String,
+    )
+
+    private data class ApiCallResult(
+        val ok: Boolean,
+        val body: JSONObject?,
+        val message: String,
     )
 }

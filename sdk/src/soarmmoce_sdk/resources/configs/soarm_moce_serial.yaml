@@ -1,6 +1,6 @@
 transport:
   type: serial
-  port: /dev/tty.usbmodem5B140311971
+  port: /dev/tty.usbmodem5B140336591
   timeout: 2.0
   robot_id: soarmmoce
   calibration_path: ""

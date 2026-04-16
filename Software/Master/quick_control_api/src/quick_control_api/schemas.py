@@ -61,27 +61,27 @@ class FollowStartRequest(BaseModel):
     tilt_joint: str = "elbow_flex"
     pan_sign: float = Field(1.0, ge=-1.0, le=1.0)
     tilt_sign: float = Field(-1.0, ge=-1.0, le=1.0)
-    pan_gain: float = Field(5.6, ge=0.0, le=30.0)
-    tilt_gain: float = Field(7.0, ge=0.0, le=30.0)
-    pan_dead_zone: float = Field(0.035, ge=0.0, le=0.5)
-    tilt_dead_zone: float = Field(0.035, ge=0.0, le=0.5)
-    pan_resume_zone: float = Field(0.06, ge=0.0, le=0.5)
-    tilt_resume_zone: float = Field(0.06, ge=0.0, le=0.5)
-    min_pan_step: float = Field(0.55, ge=0.0, le=20.0)
-    min_tilt_step: float = Field(1.0, ge=0.0, le=20.0)
-    pan_min_step_zone: float = Field(0.06, ge=0.0, le=1.0)
-    tilt_min_step_zone: float = Field(0.10, ge=0.0, le=1.0)
-    max_pan_step: float = Field(4.0, ge=0.0, le=20.0)
-    max_tilt_step: float = Field(3.0, ge=0.0, le=20.0)
+    pan_gain: float = Field(4.8, ge=0.0, le=30.0)
+    tilt_gain: float = Field(6.0, ge=0.0, le=30.0)
+    pan_dead_zone: float = Field(0.02, ge=0.0, le=0.5)
+    tilt_dead_zone: float = Field(0.025, ge=0.0, le=0.5)
+    pan_resume_zone: float = Field(0.03, ge=0.0, le=0.5)
+    tilt_resume_zone: float = Field(0.035, ge=0.0, le=0.5)
+    min_pan_step: float = Field(0.35, ge=0.0, le=20.0)
+    min_tilt_step: float = Field(0.7, ge=0.0, le=20.0)
+    pan_min_step_zone: float = Field(0.08, ge=0.0, le=1.0)
+    tilt_min_step_zone: float = Field(0.12, ge=0.0, le=1.0)
+    max_pan_step: float = Field(1.6, ge=0.0, le=20.0)
+    max_tilt_step: float = Field(1.8, ge=0.0, le=20.0)
     command_mode: Literal["stream", "settle"] = "stream"
     limit_margin_raw: int = Field(60, ge=0, le=2048)
-    stiction_eps_deg: float = Field(0.25, ge=0.0, le=10.0)
-    stiction_frames: int = Field(2, ge=1, le=30)
-    pan_breakaway_step: float = Field(1.6, ge=0.0, le=20.0)
-    pan_breakaway_step_pos: float | None = Field(default=1.4, ge=0.0, le=20.0)
-    pan_breakaway_step_neg: float | None = Field(default=2.8, ge=0.0, le=20.0)
-    pan_negative_scale: float = Field(1.8, ge=1.0, le=5.0)
-    tilt_breakaway_step: float = Field(1.8, ge=0.0, le=20.0)
+    stiction_eps_deg: float = Field(0.18, ge=0.0, le=10.0)
+    stiction_frames: int = Field(3, ge=1, le=30)
+    pan_breakaway_step: float = Field(1.2, ge=0.0, le=20.0)
+    pan_breakaway_step_pos: float | None = Field(default=1.0, ge=0.0, le=20.0)
+    pan_breakaway_step_neg: float | None = Field(default=2.0, ge=0.0, le=20.0)
+    pan_negative_scale: float = Field(1.45, ge=1.0, le=5.0)
+    tilt_breakaway_step: float = Field(1.4, ge=0.0, le=20.0)
     enable_idle_scan_fallback: bool = False
     lost_target_hold_sec: float = Field(1.0, ge=0.0, le=30.0)
     idle_scan_speed_percent: int = Field(18, ge=1, le=100)
@@ -103,3 +103,23 @@ class IdleScanStartRequest(BaseModel):
     move_duration_max_sec: float = Field(3.8, ge=0.2, le=10.0)
     dwell_sec_min: float = Field(0.8, ge=0.0, le=20.0)
     dwell_sec_max: float = Field(2.5, ge=0.0, le=20.0)
+
+
+class HaiGuiTangStartRequest(BaseModel):
+    pan_joint: str = "shoulder_pan"
+    tilt_joint: str = "elbow_flex"
+    speed_percent: int = Field(30, ge=1, le=100)
+    nod_amplitude_deg: float = Field(7.0, ge=0.5, le=25.0)
+    nod_cycles: int = Field(2, ge=1, le=6)
+    shake_amplitude_deg: float = Field(10.0, ge=0.5, le=30.0)
+    shake_cycles: int = Field(2, ge=1, le=6)
+    beat_duration_sec: float = Field(0.26, ge=0.05, le=3.0)
+    beat_pause_sec: float = Field(0.08, ge=0.0, le=2.0)
+    return_duration_sec: float = Field(0.24, ge=0.05, le=3.0)
+    settle_pause_sec: float = Field(0.10, ge=0.0, le=2.0)
+    auto_center_after_action: bool = True
+    capture_anchor_on_start: bool = True
+
+
+class HaiGuiTangActionRequest(BaseModel):
+    action: Literal["nod", "shake", "center", "reanchor"]

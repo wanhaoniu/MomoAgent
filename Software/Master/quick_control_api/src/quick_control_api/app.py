@@ -11,12 +11,15 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
 from .errors import QuickControlError
+from .scene_config import haiguitang_intro_video_file
 from .schemas import (
     AgentAskRequest,
     AgentWarmupRequest,
     CartesianJogRequest,
     ConnectRequest,
     FollowStartRequest,
+    HaiGuiTangActionRequest,
+    HaiGuiTangStartRequest,
     HomeRequest,
     IdleScanStartRequest,
     JointStepRequest,
@@ -491,6 +494,63 @@ def create_app() -> FastAPI:
     async def idle_scan_stop(request: Request) -> dict[str, Any]:
         service: QuickControlService = request.app.state.quick_control_service
         return _ok(service.idle_scan_stop())
+
+    @app.get("/api/v1/haiguitang/status")
+    async def haiguitang_status(request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(service.haiguitang_status())
+
+    @app.get("/api/v1/scenes/haiguitang/config")
+    async def haiguitang_scene_config(request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(service.haiguitang_scene_config())
+
+    @app.get("/api/v1/scenes/haiguitang/intro-video")
+    async def haiguitang_intro_video(request: Request) -> FileResponse:
+        del request
+        intro_video_file = haiguitang_intro_video_file()
+        if not intro_video_file.is_file():
+            raise QuickControlError(
+                "HAIGUITANG_INTRO_VIDEO_NOT_FOUND",
+                f"HaiGuiTang intro video not found: {intro_video_file}",
+                404,
+            )
+        return FileResponse(
+            path=intro_video_file,
+            media_type="video/mp4",
+            filename=intro_video_file.name,
+        )
+
+    @app.post("/api/v1/haiguitang/start")
+    async def haiguitang_start(payload: HaiGuiTangStartRequest, request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(
+            service.haiguitang_start(
+                pan_joint=payload.pan_joint,
+                tilt_joint=payload.tilt_joint,
+                speed_percent=payload.speed_percent,
+                nod_amplitude_deg=payload.nod_amplitude_deg,
+                nod_cycles=payload.nod_cycles,
+                shake_amplitude_deg=payload.shake_amplitude_deg,
+                shake_cycles=payload.shake_cycles,
+                beat_duration_sec=payload.beat_duration_sec,
+                beat_pause_sec=payload.beat_pause_sec,
+                return_duration_sec=payload.return_duration_sec,
+                settle_pause_sec=payload.settle_pause_sec,
+                auto_center_after_action=payload.auto_center_after_action,
+                capture_anchor_on_start=payload.capture_anchor_on_start,
+            )
+        )
+
+    @app.post("/api/v1/haiguitang/act")
+    async def haiguitang_act(payload: HaiGuiTangActionRequest, request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(service.haiguitang_act(action=payload.action))
+
+    @app.post("/api/v1/haiguitang/stop")
+    async def haiguitang_stop(request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(service.haiguitang_stop())
 
     @app.get("/api/v1/agent/status")
     async def agent_status(request: Request) -> dict[str, Any]:
