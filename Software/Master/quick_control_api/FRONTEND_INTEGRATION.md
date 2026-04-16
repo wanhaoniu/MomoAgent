@@ -1,18 +1,33 @@
 # Quick Control API Frontend Integration
 
-这份文档给前端 / App 同事使用，重点只覆盖当前已经确定的两部分：
+这份文档给前端 / App 同事使用，重点只讲当前推荐方案：
 
-- `agent` 文本交互
-- `tts` 语音播放
+- 聊天主链路使用 `WS /api/v1/ws/agent-stream`
+- 页面内保持长连接，不要每问一句就断开重连
+- 文本展示优先消费 `agent_delta`
+- 如需语音播报，继续走同一条 WebSocket，不要再直连另一套 TTS 服务
 
-当前推荐边界：
+这份文档适合直接转给前端同事落地。
 
-- 前端负责 UI、录音、STT、播放音频、展示状态
-- 控制器后端负责和 OpenClaw agent 交互
-- 如果需要 TTS，前端仍然只连控制器后端；由控制器后端再去桥接远端流式 TTS 服务
-- `follow` / `idle_scan` 属于机械臂行为层，不是本文件重点
+## 1. 结论先说
 
-## 1. Base URL
+如果 App 要做接近网页直问的体验，主流程请使用：
+
+- `WS /api/v1/ws/agent-stream`
+
+不推荐把下面这个接口当聊天主入口：
+
+- `POST /api/v1/agent/ask`
+
+原因很简单：
+
+- `POST /api/v1/agent/ask` 是“等最终结果再返回”
+- `WS /api/v1/ws/agent-stream` 能在生成过程中收到 `agent_delta`
+- 当前后端已经把 OpenClaw 会话对齐到主会话，并且把内部 bridge 改成常驻，连续多轮时延会明显更稳定
+
+如果前端继续使用单次 HTTP ask，就算后端已经修好了，会话体验还是会比网页慢。
+
+## 2. Base URL
 
 HTTP:
 
@@ -27,164 +42,114 @@ WebSocket:
 - HTTP: `http://127.0.0.1:8010`
 - WS: `ws://127.0.0.1:8010`
 
-## 2. 前端最推荐的接法
+## 3. 推荐接入方式
 
-### 推荐结论
+### 3.1 主流程
 
-如果前端要做“对话 + 语音播报”，优先使用：
+页面进入聊天态后，前端应：
 
-- `WS /api/v1/ws/agent-stream`
+1. 调一次 `GET /api/v1/health`
+2. 调一次 `GET /api/v1/agent/status`
+3. 建立 `WS /api/v1/ws/agent-stream`
+4. 等服务端返回 `ready`
+5. 用户后续所有问答都走这条 WebSocket
 
-这是当前最完整的单入口。它同时覆盖：
+### 3.2 为什么要保持长连接
 
-- 发起一轮 agent 对话
-- 收到文本回复
-- 可选触发 TTS
-- 收到流式音频块
-- 收到本轮结束状态
+当前链路里有两层“热起来之后会更快”的状态：
 
-### 什么时候还需要 REST
+- OpenClaw 主会话
+- quick_control_api 内部到 OpenClaw gateway 的 bridge 长连接
 
-前端通常只需要额外补这几个 REST：
+所以前端要尽量：
+
+- 进入聊天页时就连上 WebSocket
+- 在整个聊天页生命周期里保持连接
+- 不要每问一条消息就重新创建连接
+
+### 3.3 什么时候还用 REST
+
+REST 主要用来做状态、恢复和调试，不建议承担主聊天流量：
 
 - `GET /api/v1/health`
 - `GET /api/v1/agent/status`
 - `GET /api/v1/agent/last-turn`
-- `POST /api/v1/agent/warmup`
 - `POST /api/v1/agent/reset-session`
+- `POST /api/v1/agent/warmup`
 
-简单理解：
+`POST /api/v1/agent/ask` 建议只用于：
 
-- WebSocket 负责“进行中的一轮”
-- REST 负责“初始化、状态恢复、页面重进后的兜底”
+- 后台调试
+- 非聊天型一次性请求
+- 不需要流式展示的场景
 
-## 3. Agent 相关接口
+## 4. 页面推荐流程
 
-### 3.1 `GET /api/v1/health`
+### 4.1 进入聊天页
 
-用途：
+推荐顺序：
 
-- 判断控制器服务是否在线
-- 顺便拿到 `session` 和 `agent` 概况
-
-返回结构重点：
-
-```json
-{
-  "ok": true,
-  "data": {
-    "status": "ok",
-    "service": "momoagent-quick-control-api",
-    "session": {},
-    "agent": {}
-  }
-}
-```
-
-### 3.2 `GET /api/v1/agent/status`
-
-用途：
-
-- 页面初始化时读取 agent 当前状态
-- 判断当前是否 `busy`
-- 判断后端 TTS 是否可用
-
-关键字段：
-
-- `data.enabled`: agent 功能是否启用
-- `data.busy`: 是否正在处理上一轮
-- `data.session_id`: 当前 OpenClaw session id
-- `data.bridge_session_key`: bridge session key
-- `data.last_error`: 最近一次 agent 错误
-- `data.tts.enabled`: 是否开启 TTS 功能
-- `data.tts.available`: 当前是否可用
-- `data.tts.base_url`: 远端 TTS 服务地址
-- `data.tts.last_error`: 最近一次 TTS 健康检查错误
-- `data.last_turn`: 最近一轮的记录
-
-### 3.3 `GET /api/v1/agent/last-turn`
-
-用途：
-
-- 页面刷新后恢复“上一轮对话结果”
-- 调试时查看最后一轮的文本 / TTS 摘要
-
-关键字段：
-
-- `kind`: `ask` / `warmup` / `reset_session`
-- `status`: `ok` / `error` / `idle`
-- `prompt`: 用户输入
-- `reply`: agent 文本输出
-- `error`: 错误信息
-- `session_id`
-- `bridge_session_key`
-- `openclaw_elapsed_sec`
-- `bridge_timing`
-- `tts`
-- `updated_at`
-
-### 3.4 `POST /api/v1/agent/warmup`
-
-用途：
-
-- 建议 App 启动后调用一次，用来热启动 OpenClaw session
-- 减少首轮冷启动延迟
-
-请求体：
-
-```json
-{
-  "prompt": "请只回复“就绪”。"
-}
-```
+1. `GET /api/v1/health`
+2. `GET /api/v1/agent/status`
+3. 建立 `WS /api/v1/ws/agent-stream`
+4. 收到 `ready` 后，把输入框置为可发送
+5. 可选调用 `GET /api/v1/agent/last-turn` 恢复上一轮结果
 
 说明：
 
-- 不传也可以，后端有默认值
-- 前端通常只在页面初始化或连接完成后调用一次
+- `warmup` 不是必须
+- 如果非常在意“服务刚重启后第一问”的冷启动，可以在进入页面后补一次 `POST /api/v1/agent/warmup`
+- 但主流程依然应该是 WebSocket，不要回退成 HTTP ask
 
-### 3.5 `POST /api/v1/agent/reset-session`
+### 4.2 用户发送一条消息
 
-用途：
+前端本地先做 UI 动作：
 
-- 用户主动“新开对话”
-- 清掉当前 OpenClaw session 上下文
+1. 立即插入 user bubble
+2. 立即创建一个空的 assistant bubble
+3. 进入 loading / thinking 状态
+4. 禁止并发发送下一条消息
 
-无请求体。
-
-### 3.6 `POST /api/v1/agent/ask`
-
-用途：
-
-- 文本模式的一次性请求
-- 只拿最终文本结果，不拿流式 TTS 音频
-
-请求体：
+然后通过 WebSocket 发：
 
 ```json
 {
-  "message": "你好，请介绍一下你自己。"
+  "type": "ask",
+  "message": "你好",
+  "with_tts": false
 }
 ```
 
-适用场景：
+如果要播报语音：
 
-- 纯文本聊天
-- 调试 agent 是否可用
-- 不需要语音播报时
+```json
+{
+  "type": "ask",
+  "message": "你好，和我打个招呼。",
+  "with_tts": true
+}
+```
 
-如果前端需要 TTS，请优先使用 `WS /api/v1/ws/agent-stream`，不要先 `POST /agent/ask` 再自己拼第二套 TTS 调用链。
+### 4.3 一轮结束
 
-## 4. 流式 Agent + TTS
+以下任一情况视为本轮结束：
 
-### 4.1 `WS /api/v1/ws/agent-stream`
+- 收到 `turn_done`
+- 收到 `error`
 
-用途：
+结束后前端应：
 
-- 当前前端对接的主入口
-- 一次 WebSocket 连接上可以反复发送多轮 `ask`
+- 关闭 loading
+- 恢复发送按钮
+- 更新当前会话状态
 
-连接成功后，服务端会先主动发送：
+## 5. WebSocket 协议
+
+主入口：
+
+- `WS /api/v1/ws/agent-stream`
+
+连接成功后，服务端会先发一条：
 
 ```json
 {
@@ -195,11 +160,9 @@ WebSocket:
 }
 ```
 
-### 4.2 客户端发什么
+### 5.1 客户端可发送消息
 
 #### 心跳
-
-客户端可以发送：
 
 ```json
 {
@@ -216,8 +179,6 @@ WebSocket:
 ```
 
 #### 主动取状态
-
-客户端可以发送：
 
 ```json
 {
@@ -236,22 +197,10 @@ WebSocket:
 
 #### 发起一轮对话
 
-文本模式：
-
 ```json
 {
   "type": "ask",
-  "message": "你好",
-  "with_tts": false
-}
-```
-
-文本 + TTS 模式：
-
-```json
-{
-  "type": "ask",
-  "message": "你好，和我打个招呼。",
+  "message": "<用户文本>",
   "with_tts": true
 }
 ```
@@ -260,27 +209,102 @@ WebSocket:
 
 - `type`: 固定为 `ask`
 - `message`: 用户文本
-- `with_tts`: 是否让后端在拿到 agent 文本回复后继续触发流式 TTS
+- `with_tts`: 是否让后端在文本回复后继续桥接 TTS
 
-## 5. WebSocket 事件语义
+## 6. 前端必须处理的事件
 
-下面是前端最需要处理的事件。
+下面这几个事件是聊天主流程一定要接的。
 
-### 5.1 `turn_started`
+### 6.1 `ready`
 
-表示这一轮已被接受。
+表示当前 WebSocket 已可用。
+
+前端动作：
+
+- 标记连接成功
+- 允许发送第一条消息
+
+### 6.2 `turn_started`
+
+表示这一轮请求已经进入后端处理。
+
+示例：
 
 ```json
 {
   "type": "turn_started",
-  "with_tts": true,
+  "with_tts": false,
   "message": "你好"
 }
 ```
 
-### 5.2 `agent_reply`
+前端动作：
 
-表示 agent 文本结果已经出来。
+- 显示“处理中”
+- 记录本轮开始时间
+
+### 6.3 `agent_accepted`
+
+表示 OpenClaw gateway 已经接受这一轮请求。
+
+示例：
+
+```json
+{
+  "type": "agent_accepted",
+  "data": {
+    "run_id": "xxx",
+    "session_key": "agent:main:main",
+    "status": "accepted"
+  }
+}
+```
+
+前端动作：
+
+- 可选更新更细的状态文案，例如“已接单”
+- 通常不必单独渲染成消息
+
+### 6.4 `agent_delta`
+
+这是最重要的实时文本事件。
+
+示例：
+
+```json
+{
+  "type": "agent_delta",
+  "data": {
+    "run_id": "xxx",
+    "session_key": "agent:main:main",
+    "delta": "你好",
+    "reply": "你好，很高兴见到你。",
+    "elapsed_ms": 1820
+  }
+}
+```
+
+前端渲染规则一定要这样做：
+
+- 优先使用 `data.reply`
+- 把 `data.reply` 当作“当前完整文本”覆盖渲染
+- 不要简单把 `data.delta` append 到末尾
+
+原因：
+
+- 当前后端发出来的 `reply` 更适合作为累计全文
+- 部分情况下可能会出现重复 `agent_delta`
+- 如果前端按 append 模式处理，容易出现重复文本
+
+正确做法：
+
+- assistant bubble 的内容始终等于最近一次 `agent_delta.data.reply`
+
+### 6.5 `agent_reply`
+
+表示最终文本结果已经确定。
+
+示例：
 
 ```json
 {
@@ -289,234 +313,66 @@ WebSocket:
     "kind": "ask",
     "status": "ok",
     "prompt": "你好",
-    "reply": "你好呀！今天有什么我可以帮你的吗？",
+    "reply": "你好，很高兴见到你。",
     "error": "",
     "session_id": "...",
-    "bridge_session_key": "...",
-    "openclaw_elapsed_sec": 1.03,
+    "bridge_session_key": "agent:main:main",
+    "openclaw_elapsed_sec": 1.93,
     "bridge_timing": {
-      "accept_ms": 120.0,
-      "wait_ms": 890.0,
-      "history_ms": 30.0,
-      "total_ms": 1030.0
+      "accept_ms": 121,
+      "first_delta_ms": 1878,
+      "final_ms": 1893,
+      "history_ms": 42,
+      "wait_ms": 1772,
+      "total_ms": 1936
     },
     "tts": {
       "requested": false
     },
-    "updated_at": 1775391766.0
+    "updated_at": 1776139381.857922
   }
 }
 ```
 
-说明：
+前端动作：
 
-- 如果 `with_tts=false`，前端拿到这个事件后通常就可以直接展示文本，等待后面的 `turn_done`
-- 如果 `with_tts=true`，这只是文本先返回，后面还会继续收到 TTS 相关事件
+- 用 `data.reply` 覆盖最终文本
+- 如果不关心细节指标，`bridge_timing` 可以只打日志
 
-### 5.3 `tts_started`
+### 6.6 `turn_done`
 
-表示后端确认本轮准备开始桥接远端 TTS。
+表示这一轮彻底结束。
 
-```json
-{
-  "type": "tts_started",
-  "data": {
-    "requested": true,
-    "ok": false,
-    "base_url": "http://192.168.66.92:7999",
-    "model": "qwen/qwen3.5-35b-a3b",
-    "input_chars": 18,
-    "error": ""
-  }
-}
-```
-
-注意：
-
-- 这里的 `ok` 还不是“已经播完”，只是 TTS 请求已准备开始
-
-### 5.4 `tts_unavailable`
-
-表示用户请求了 TTS，但当前后端判断 TTS 不可用。
-
-```json
-{
-  "type": "tts_unavailable",
-  "data": {
-    "requested": true,
-    "ok": false,
-    "error": "Remote TTS bridge is unavailable ..."
-  }
-}
-```
-
-前端建议：
-
-- 文本照常展示
-- UI 上提示“语音暂不可用”
-- 不要把整轮 agent 视为失败
-
-### 5.5 `tts_session_ready`
-
-表示远端 TTS WebSocket session 已建立。
-
-```json
-{
-  "type": "tts_session_ready",
-  "session_id": "abc123",
-  "model": "qwen/qwen3.5-35b-a3b",
-  "sample_rate": 44100,
-  "interrupt_path": "/api/v1/sessions/abc123/interrupt"
-}
-```
-
-说明：
-
-- 目前前端不需要直接调用这个 `interrupt_path`
-- 这个字段主要用于调试和后续扩展
-
-### 5.6 `tts_llm_delta`
-
-表示远端 TTS 服务内部的增量文本。
-
-```json
-{
-  "type": "tts_llm_delta",
-  "content": "你好"
-}
-```
-
-前端建议：
-
-- 可以忽略
-- 不建议在 UI 上逐字显示它，因为会比较碎
-
-### 5.7 `tts_segment`
-
-表示远端 TTS 正在处理的一段文本。
-
-```json
-{
-  "type": "tts_segment",
-  "text": "你好，很高兴见到你。"
-}
-```
-
-前端建议：
-
-- 可选展示
-- 更适合做调试，不一定要暴露给普通用户
-
-### 5.8 `tts_segment_done`
-
-表示一个 TTS 文本分段已经合成完成。
-
-```json
-{
-  "type": "tts_segment_done",
-  "elapsed_seconds": 0.284,
-  "total_samples": 96320
-}
-```
-
-### 5.9 `audio_chunk`
-
-表示一段音频数据到达。这是前端真正需要播放的核心事件。
-
-```json
-{
-  "type": "audio_chunk",
-  "pcm16_base64": "...",
-  "sample_rate": 44100
-}
-```
-
-字段说明：
-
-- `pcm16_base64`: base64 编码后的单声道 PCM16 数据
-- `sample_rate`: 当前块对应的采样率
-
-前端需要做的事：
-
-1. base64 解码
-2. 按 `Int16` 解释 PCM 数据
-3. 转成 Web Audio 可播放的浮点采样
-4. 做一个小缓冲队列后顺序播放
-
-说明：
-
-- 目前是流式块，不是完整 mp3 / wav 文件
-- 不能直接把 `pcm16_base64` 当作音频 URL 使用
-
-### 5.10 `tts_warning`
-
-表示远端 TTS 在已经有部分音频产出后，遇到非致命警告。
-
-```json
-{
-  "type": "tts_warning",
-  "message": "..."
-}
-```
-
-前端建议：
-
-- 记录日志即可
-- 不一定要中断本地播放
-
-### 5.11 `interrupted`
-
-表示远端 TTS 会话被中断。
-
-```json
-{
-  "type": "interrupted",
-  "reason": "..."
-}
-```
-
-目前前端可以先把它视为“本轮 TTS 提前结束”。
-
-### 5.12 `turn_done`
-
-表示这一轮彻底结束，是前端最重要的结束事件。
+示例：
 
 ```json
 {
   "type": "turn_done",
   "data": {
-    "turn": {
-      "kind": "ask",
-      "status": "ok",
-      "prompt": "你好",
-      "reply": "你好呀！今天有什么我可以帮你的吗？",
-      "tts": {
-        "requested": true,
-        "ok": true,
-        "session_id": "abc123",
-        "spoken_text": "你好呀！今天有什么我可以帮你的吗？",
-        "sample_rate": 44100,
-        "audio_chunks": 26,
-        "audio_bytes": 135680,
-        "finish_reason": "remote_done",
-        "elapsed_sec": 2.13,
-        "error": ""
-      }
-    },
+    "turn": {},
     "status": {}
   }
 }
 ```
 
-前端建议：
+前端动作：
 
-- 把这一轮消息标记为完成
-- 用 `turn.tts` 更新播放摘要 / 调试信息
-- 用 `status` 刷新页面上的 agent 状态
+- 把当前 assistant bubble 标记为完成
+- 结束 loading
+- 重新允许发送下一条消息
+- 用 `status` 刷新顶部状态栏
 
-### 5.13 `error`
+注意：
 
-表示 WebSocket 请求级错误。
+- 聊天是否结束，以 `turn_done` 为准
+- 不要把 `agent_reply` 当作整个链路彻底结束
+- 如果 `with_tts=true`，`agent_reply` 之后还可能继续收到 TTS 事件
+
+### 6.7 `error`
+
+WebSocket 请求级错误。
+
+示例：
 
 ```json
 {
@@ -529,114 +385,350 @@ WebSocket:
 
 字段说明：
 
-- `stage`: 常见为 `request` / `agent` / `tts`
+- `stage`: 常见值为 `request` / `agent` / `tts`
 - `code`: 错误码
-- `message`: 错误说明
+- `message`: 错误描述
 
-## 6. 推荐的前端交互流程
+前端动作：
 
-### 6.1 页面初始化
+- 结束当前 loading
+- 恢复发送按钮
+- 把当前轮标记为失败
+- 给出 toast 或错误提示
 
-1. 调 `GET /api/v1/health`
-2. 调 `GET /api/v1/agent/status`
-3. 可选调一次 `POST /api/v1/agent/warmup`
-4. 建立 `WS /api/v1/ws/agent-stream`
+## 7. TTS 相关事件
 
-### 6.2 用户发送一条消息
+如果 `with_tts=true`，前端继续在同一条 WebSocket 上接收以下事件。
 
-1. 前端完成 STT，拿到文本
-2. 通过 WebSocket 发送：
+### 7.1 `tts_started`
+
+表示后端已准备开始桥接 TTS。
+
+### 7.2 `tts_unavailable`
+
+表示这轮请求了 TTS，但当前后端判断 TTS 不可用。
+
+前端动作：
+
+- 文本照常展示
+- UI 提示“语音暂不可用”
+- 不要把整轮对话判成失败
+
+### 7.3 `tts_session_ready`
+
+表示远端 TTS session 建立成功。
+
+这个事件主要用于调试，普通 UI 可以不展示。
+
+### 7.4 `tts_llm_delta`
+
+表示远端 TTS 内部的增量文本。
+
+前端建议：
+
+- 可以忽略
+- 不建议拿它做逐字字幕
+
+### 7.5 `tts_segment`
+
+表示当前 TTS 正在处理的文本片段。
+
+前端建议：
+
+- 可选记录日志
+- 普通用户界面通常不必展示
+
+### 7.6 `tts_segment_done`
+
+表示一个 TTS 分段已完成。
+
+### 7.7 `audio_chunk`
+
+这是真正需要播放的音频事件。
+
+示例：
 
 ```json
 {
-  "type": "ask",
-  "message": "<用户文本>",
-  "with_tts": true
+  "type": "audio_chunk",
+  "pcm16_base64": "...",
+  "sample_rate": 44100
 }
 ```
 
-3. 收到 `agent_reply` 后先显示文本
-4. 收到 `audio_chunk` 后开始流式播放
-5. 收到 `turn_done` 后把这轮标记结束
+字段说明：
 
-### 6.3 页面刷新 / 重连
+- `pcm16_base64`: base64 编码后的单声道 PCM16
+- `sample_rate`: 当前块采样率
 
-1. 重新建立 WebSocket
-2. 调 `GET /api/v1/agent/last-turn`
-3. 用最近一轮结果恢复 UI
+前端要做的事情：
 
-## 7. 音频播放实现建议
+1. base64 解码
+2. 按 `Int16` 解析 PCM
+3. 转成 Web Audio 可播放的浮点采样
+4. 自己维护一个小缓冲队列顺序播放
 
-### 7.1 推荐方案
+注意：
 
-前端使用 Web Audio API 自己维护一个 PCM 播放队列。
+- 这不是完整 mp3 / wav 文件
+- 不能把 `pcm16_base64` 当作 URL 直接播
 
-核心原因：
+### 7.8 `tts_warning`
 
-- 后端返回的是流式 `PCM16`
-- 不是一个完整文件
-- 如果每块到了就立刻播，容易卡顿
-- 做一个 100ms 到 300ms 左右的小缓冲会更稳
+表示远端 TTS 在已有部分结果的情况下返回了非致命警告。
 
-### 7.2 数据处理方式
+前端建议：
 
-每个 `audio_chunk`：
+- 打日志即可
+- 不一定要强制中断播放
 
-1. `atob()` 或等价方法解 base64
-2. 按 little-endian `Int16` 读取
-3. 归一化成 `[-1, 1]` 浮点
-4. 写入 `AudioBuffer`
-5. 串行调度播放时间
+### 7.9 `interrupted`
 
-### 7.3 前端要注意
+表示远端 TTS 被中断。
 
-- 收到第一块音频时再真正开始调度，通常更稳
-- 不建议把 `tts_llm_delta` 当逐字字幕显示
-- 如果用户点“停止播放”，当前版本先停止本地播放即可
-- 当前版本没有专门对前端暴露一个“停止远端 TTS”接口，所以先不要依赖远端中断能力做主交互
+前端动作：
 
-## 8. 错误格式
+- 可以视为“语音部分提前结束”
+- 文本轮次本身不一定失败
 
-### REST 错误
+## 8. 前端 UI 规则
+
+这部分是实现时最容易踩坑的地方。
+
+### 8.1 一次只允许一轮进行中
+
+当前后端是串行处理模型，同一时刻只允许一个 agent turn。
+
+前端建议：
+
+- 本轮未结束前禁用发送按钮
+- 如果用户连续点击，直接拦住，不要并发发多个 `ask`
+
+### 8.2 assistant 文本使用“覆盖更新”
+
+正确方式：
+
+- `assistantText = latestEvent.data.reply`
+
+错误方式：
+
+- `assistantText += latestEvent.data.delta`
+
+### 8.3 页面重进时恢复上一轮
+
+页面重进或 App 恢复时，建议补一次：
+
+- `GET /api/v1/agent/last-turn`
+
+用法：
+
+- 如果上一轮是 `status=ok`，可恢复最后一条 assistant 结果
+- 如果上一轮是 `status=error`，可恢复错误态
+
+### 8.4 断线重连
+
+如果 WebSocket 断开：
+
+1. UI 进入“连接中”
+2. 自动重连
+3. 重连成功后等待 `ready`
+4. 可选重新拉一次 `GET /api/v1/agent/status`
+5. 可选重新拉一次 `GET /api/v1/agent/last-turn`
+
+不要做的事：
+
+- 不要在断线后直接重发上一条用户消息，除非业务层自己做了幂等保护
+
+## 9. 是否还需要 warmup
+
+结论：
+
+- 不是必须
+- 可以保留，但只是优化第一问冷启动的辅助手段
+
+推荐理解：
+
+- 主体验靠 `WS /api/v1/ws/agent-stream`
+- `warmup` 只是“页面刚进入时，顺手把后端先热一下”
+
+如果前端要简化流程，可以先不接 `warmup`。
+
+## 10. REST 接口说明
+
+### 10.1 `GET /api/v1/health`
+
+用途：
+
+- 判断控制器服务是否在线
+- 顺便拿到 `session` 和 `agent` 概况
+
+### 10.2 `GET /api/v1/agent/status`
+
+用途：
+
+- 页面初始化时读取当前状态
+- 判断是否 `busy`
+- 判断 TTS 是否可用
+
+关键字段：
+
+- `data.enabled`
+- `data.busy`
+- `data.session_id`
+- `data.bridge_session_key`
+- `data.last_error`
+- `data.tts.enabled`
+- `data.tts.available`
+- `data.tts.last_error`
+- `data.last_turn`
+
+### 10.3 `GET /api/v1/agent/last-turn`
+
+用途：
+
+- 页面刷新后恢复最近一轮结果
+- 调试用
+
+### 10.4 `POST /api/v1/agent/reset-session`
+
+用途：
+
+- 用户主动点“新会话”
+- 清掉当前上下文
+
+### 10.5 `POST /api/v1/agent/warmup`
+
+用途：
+
+- 可选预热
+
+示例：
 
 ```json
 {
-  "ok": false,
-  "error": {
-    "code": "NOT_CONNECTED",
-    "message": "Robot is not connected"
+  "prompt": "请只回复“就绪”。"
+}
+```
+
+### 10.6 `POST /api/v1/agent/ask`
+
+不推荐作为聊天主入口。
+
+适合：
+
+- 后台调试
+- 不需要流式文本的场景
+
+不适合：
+
+- 面向用户的聊天主界面
+
+## 11. 一个最小可落地的前端状态机
+
+推荐前端只维护一个简单状态机：
+
+- `disconnected`
+- `connecting`
+- `ready`
+- `running`
+- `error`
+
+状态切换建议：
+
+- WebSocket 建立前: `connecting`
+- 收到 `ready`: `ready`
+- 发送 `ask` 后: `running`
+- 收到 `turn_done`: `ready`
+- 收到 `error`: `error`
+- 用户确认后或重连成功后: `ready`
+
+## 12. 伪代码示例
+
+```ts
+const ws = new WebSocket("ws://127.0.0.1:8010/api/v1/ws/agent-stream");
+
+let currentAssistantText = "";
+let running = false;
+
+ws.onmessage = (event) => {
+  const payload = JSON.parse(event.data);
+
+  if (payload.type === "ready") {
+    setConnectionState("ready");
+    return;
   }
+
+  if (payload.type === "turn_started") {
+    running = true;
+    currentAssistantText = "";
+    showAssistantBubble("");
+    showLoading(true);
+    return;
+  }
+
+  if (payload.type === "agent_delta") {
+    currentAssistantText = payload.data?.reply || payload.data?.delta || "";
+    updateAssistantBubble(currentAssistantText);
+    return;
+  }
+
+  if (payload.type === "agent_reply") {
+    currentAssistantText = payload.data?.reply || currentAssistantText;
+    updateAssistantBubble(currentAssistantText);
+    return;
+  }
+
+  if (payload.type === "audio_chunk") {
+    enqueuePcm16(payload.pcm16_base64, payload.sample_rate);
+    return;
+  }
+
+  if (payload.type === "turn_done") {
+    running = false;
+    showLoading(false);
+    setConnectionState("ready");
+    return;
+  }
+
+  if (payload.type === "error") {
+    running = false;
+    showLoading(false);
+    showError(payload.message || "Agent request failed");
+    setConnectionState("error");
+  }
+};
+
+function sendAsk(message: string, withTts = false) {
+  if (running) return;
+
+  ws.send(JSON.stringify({
+    type: "ask",
+    message,
+    with_tts: withTts,
+  }));
 }
 ```
 
-### WebSocket 错误
+## 13. 给前端同事的最短版本
 
-```json
-{
-  "type": "error",
-  "stage": "request",
-  "code": "INVALID_ARGUMENT",
-  "message": "Agent prompt is empty"
-}
-```
-
-## 9. 给前端同事的最短结论
-
-前端如果只关心“聊天 + 播放语音”，请按下面接：
+请按下面方式接：
 
 - 初始化：
   - `GET /api/v1/health`
   - `GET /api/v1/agent/status`
-  - 可选 `POST /api/v1/agent/warmup`
-- 主通道：
-  - `WS /api/v1/ws/agent-stream`
-- 恢复上一轮：
-  - `GET /api/v1/agent/last-turn`
-- 新开对话：
+  - 建立 `WS /api/v1/ws/agent-stream`
+- 主聊天：
+  - 全部走 WebSocket `ask`
+- 文本渲染：
+  - 用 `agent_delta.data.reply` 做覆盖更新
+- 语音播放：
+  - 收 `audio_chunk`，本地解码 PCM16 播放
+- 新会话：
   - `POST /api/v1/agent/reset-session`
+- 页面恢复：
+  - `GET /api/v1/agent/last-turn`
 
-最重要的一点：
+一句话总结：
 
-- 前端不要自己再去直连另一套 TTS 服务
-- 只需要向控制器后端发 `with_tts=true`
-- 然后在同一个 WebSocket 里接收 `audio_chunk` 并播放
+- 不要再把 `POST /api/v1/agent/ask` 当聊天主流程
+- 聊天页应该使用一条长连接 WebSocket，边收 `agent_delta` 边渲染

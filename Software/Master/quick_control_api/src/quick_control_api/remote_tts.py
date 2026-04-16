@@ -12,7 +12,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
-DEFAULT_REMOTE_TTS_BASE_URL = "http://192.168.1.103:7999"
+DEFAULT_REMOTE_TTS_BASE_URL = "http://10.22.6.82:7999"
 DEFAULT_REMOTE_TTS_MODEL = "qwen/qwen3.5-35b-a3b"
 DEFAULT_REMOTE_TTS_SYSTEM_PROMPT = (
     "You are a text-to-speech bridge. Repeat the user input verbatim so it can be spoken aloud. "

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MomoAgent MVP</string>
+    <string name="status_disconnected">未连接</string>
+    <string name="haiguitang_entry">海龟汤</string>
+    <string name="haiguitang_entry_hint">进入海龟汤全屏场景，自动播放 begin.mp4，并在互动态里等待 agent 通过 POST 切换表情。</string>
+    <string name="config_title">连接配置</string>
+    <string name="host_hint">控制器 IP 或域名，例如 192.168.1.20</string>
+    <string name="agent_port_hint">Agent 端口</string>
+    <string name="preview_port_hint">预览端口</string>
+    <string name="connect">连接</string>
+    <string name="disconnect">断开</string>
+    <string name="with_tts">使用后端流式 TTS</string>
+    <string name="preview_title">摄像头预览</string>
+    <string name="preview_waiting">预览未启动</string>
+    <string name="chat_title">对话</string>
+    <string name="conversation_placeholder">连接后可以输入文本，或点“语音输入”开始说话。</string>
+    <string name="message_hint">输入消息，或使用语音输入</string>
+    <string name="send">发送</string>
+    <string name="speak">语音输入</string>
+    <string name="speech_prompt">请开始说话</string>
+    <string name="haiguitang_title">海龟汤</string>
+    <string name="haiguitang_close">关闭</string>
+    <string name="haiguitang_subtitle_default">片头结束后进入互动模式</string>
+    <string name="haiguitang_placeholder_title">片头占位</string>
+    <string name="haiguitang_placeholder_body">当前还没有找到 begin.mp4 或 default.mp4，后续把视频放到 runtime/media 里就会自动识别。</string>
+    <string name="haiguitang_enter_interaction">进入互动</string>
+    <string name="haiguitang_skip_intro">跳过片头</string>
+    <string name="haiguitang_video_waiting">正在等待片头配置</string>
+    <string name="haiguitang_status_label">当前状态</string>
+    <string name="haiguitang_status_default">片头结束后会进入全屏角色表情，等待 agent 通过 POST 切换表情，也可以手动点头和摇头调试动作。</string>
+    <string name="haiguitang_status_loading">正在加载海龟汤场景配置...</string>
+    <string name="haiguitang_dialog_label">当前对话</string>
+    <string name="haiguitang_dialog_placeholder">点“对话”后开始说话，agent 的回复会显示在这里。</string>
+    <string name="haiguitang_expression_label">角色表情区</string>
+    <string name="haiguitang_expression_placeholder">等待默认角色视频或表情切换指令</string>
+    <string name="haiguitang_talk">对话</string>
+    <string name="haiguitang_nod">点头</string>
+    <string name="haiguitang_shake">摇头</string>
+    <string name="haiguitang_replay_intro">回到片头</string>
+</resources>

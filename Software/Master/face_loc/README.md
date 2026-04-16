@@ -117,7 +117,12 @@ python main.py
 - `GET /health`
 - `GET /latest`
 - `GET /status`
+- `GET /frame.jpg`
 - `WS /ws/stream`
+
+预览接口详细说明见：
+
+- [`FRAME_PREVIEW_API.md`](./FRAME_PREVIEW_API.md)
 
 示例：
 
@@ -125,6 +130,7 @@ python main.py
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/latest | jq
 curl http://127.0.0.1:8000/status | jq
+curl "http://127.0.0.1:8000/frame.jpg?max_width=960&quality=70" -o frame.jpg
 ```
 
 `/latest` 返回字段包括：

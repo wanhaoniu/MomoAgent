@@ -1,0 +1,8 @@
+-r base.txt
+
+# Qt / GUI stack
+PyQt5
+vtk
+requests
+python-dotenv
+sounddevice

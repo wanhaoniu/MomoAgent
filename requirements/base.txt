@@ -1,0 +1,38 @@
+# Base runtime for:
+# - mechanical arm control
+# - quick_control_api
+# - camera / face_loc headless flow
+
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+PyYAML>=6.0.1
+pybullet>=3.2
+opencv-python-headless>=4.8,<5
+
+# User-validated project dependencies
+lerobot
+ftservo-python-sdk
+datasets
+pillow
+numpy
+scipy
+pandas
+huggingface-hub
+transformers
+diffusers
+accelerate
+draccus
+inquirerpy
+pyserial
+pynput
+imageio
+imageio-ffmpeg
+tqdm
+pytest
+black
+isort
+matplotlib
+seaborn
+kinpy
+feetech-servo-sdk

@@ -5,18 +5,23 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from .errors import QuickControlError
+from .scene_config import haiguitang_intro_video_file, haiguitang_media_file
 from .schemas import (
     AgentAskRequest,
     AgentWarmupRequest,
     CartesianJogRequest,
     ConnectRequest,
     FollowStartRequest,
+    HaiGuiTangActionRequest,
+    HaiGuiTangSceneStateRequest,
+    HaiGuiTangStartRequest,
     HomeRequest,
     IdleScanStartRequest,
     JointStepRequest,
@@ -24,6 +29,137 @@ from .schemas import (
 from .service import QuickControlService
 
 AGENT_STREAM_TEST_PAGE = Path(__file__).resolve().parents[2] / "agent_stream_test.html"
+WEB_ROOT = Path(__file__).resolve().parents[5] / "Software" / "Web"
+
+
+class OpenClawChatStreamBridge:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._proc: Optional[asyncio.subprocess.Process] = None
+        self._command: tuple[str, ...] = ()
+
+    async def close(self) -> None:
+        async with self._lock:
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
+        proc = self._proc
+        self._proc = None
+        self._command = ()
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1.5)
+        except Exception:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except Exception:
+                    pass
+
+    async def _ensure_proc_locked(self, command: list[str]) -> asyncio.subprocess.Process:
+        normalized_command = tuple(str(part or "").strip() for part in (command or []) if str(part).strip())
+        if not normalized_command:
+            raise RuntimeError("OpenClaw chat stream bridge command is empty")
+
+        proc = self._proc
+        if (
+            proc is not None
+            and proc.returncode is None
+            and normalized_command == self._command
+            and proc.stdin is not None
+            and proc.stdout is not None
+        ):
+            return proc
+
+        await self._stop_locked()
+        proc = await asyncio.create_subprocess_exec(
+            *normalized_command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=str(Path(__file__).resolve().parents[5]),
+        )
+        self._proc = proc
+        self._command = normalized_command
+        return proc
+
+    async def relay(
+        self,
+        *,
+        command: list[str],
+        stdin_payload: dict[str, Any],
+        on_event: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> dict[str, Any]:
+        request_id = str(stdin_payload.get("id", "") or "").strip()
+        if not request_id:
+            raise RuntimeError("OpenClaw chat stream bridge request id is missing")
+
+        async with self._lock:
+            proc = await self._ensure_proc_locked(command)
+            if proc.stdin is None or proc.stdout is None:
+                await self._stop_locked()
+                raise RuntimeError("OpenClaw chat stream bridge pipes are unavailable")
+
+            payload_bytes = (json.dumps(stdin_payload, ensure_ascii=False) + "\n").encode("utf-8")
+            try:
+                proc.stdin.write(payload_bytes)
+                await proc.stdin.drain()
+                while True:
+                    raw_line = await proc.stdout.readline()
+                    if not raw_line:
+                        raise RuntimeError("OpenClaw chat stream bridge exited unexpectedly")
+                    text_line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not text_line:
+                        continue
+                    try:
+                        event = json.loads(text_line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    if str(event.get("id", "") or "").strip() != request_id:
+                        continue
+                    await on_event(event)
+                    event_type = str(event.get("type", "") or "").strip()
+                    if event_type == "done":
+                        final_payload = dict(event)
+                        final_payload["ok"] = True
+                        return final_payload
+                    if event_type == "error":
+                        return {
+                            "ok": False,
+                            "stage": str(event.get("stage", "") or "").strip(),
+                            "error": str(
+                                event.get("error", "") or "OpenClaw chat stream failed"
+                            ).strip(),
+                            "reply": str(event.get("reply", "") or "").strip(),
+                            "session_id": str(event.get("session_id", "") or "").strip(),
+                            "session_key": str(event.get("session_key", "") or "").strip(),
+                            "timing": dict(event.get("timing") or {}),
+                        }
+            except Exception:
+                await self._stop_locked()
+                raise
 
 
 async def _send_ws_error(
@@ -127,13 +263,59 @@ async def _relay_remote_tts_stream(
     return last_summary
 
 
+async def _relay_openclaw_chat_stream(
+    websocket: WebSocket,
+    *,
+    bridge: OpenClawChatStreamBridge,
+    command: list[str],
+    stdin_payload: dict[str, Any],
+) -> dict[str, Any]:
+    async def _forward_event(event: dict[str, Any]) -> None:
+        event_type = str(event.get("type", "")).strip()
+        if event_type == "accepted":
+            await websocket.send_json(
+                {
+                    "type": "agent_accepted",
+                    "data": {
+                        "run_id": str(event.get("run_id", "") or "").strip(),
+                        "session_key": str(event.get("session_key", "") or "").strip(),
+                        "status": str(event.get("status", "") or "").strip(),
+                    },
+                }
+            )
+            return
+
+        if event_type == "delta":
+            await websocket.send_json(
+                {
+                    "type": "agent_delta",
+                    "data": {
+                        "run_id": str(event.get("run_id", "") or "").strip(),
+                        "session_key": str(event.get("session_key", "") or "").strip(),
+                        "delta": str(event.get("delta", "") or "").strip(),
+                        "reply": str(event.get("reply", "") or "").strip(),
+                        "elapsed_ms": float(event.get("elapsed_ms", 0.0) or 0.0),
+                    },
+                }
+            )
+            return
+
+    return await bridge.relay(
+        command=command,
+        stdin_payload=stdin_payload,
+        on_event=_forward_event,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     service = QuickControlService()
     app.state.quick_control_service = service
+    app.state.openclaw_chat_stream_bridge = OpenClawChatStreamBridge()
     try:
         yield
     finally:
+        await app.state.openclaw_chat_stream_bridge.close()
         service.close()
 
 
@@ -143,6 +325,8 @@ def _ok(data: dict[str, Any]) -> dict[str, Any]:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="MomoAgent Quick Control API", version="0.1.0", lifespan=lifespan)
+    if WEB_ROOT.is_dir():
+        app.mount("/web", StaticFiles(directory=str(WEB_ROOT), html=True), name="web")
 
     @app.exception_handler(QuickControlError)
     async def quick_control_error_handler(_request: Request, exc: QuickControlError):
@@ -160,18 +344,26 @@ def create_app() -> FastAPI:
     @app.get("/api/v1/health")
     async def health(request: Request) -> dict[str, Any]:
         service: QuickControlService = request.app.state.quick_control_service
+        session_data, agent_data = await asyncio.gather(
+            asyncio.to_thread(service.session_status),
+            asyncio.to_thread(service.agent_status),
+        )
         return _ok(
             {
                 "status": "ok",
                 "service": "momoagent-quick-control-api",
-                "session": service.session_status(),
-                "agent": service.agent_status(),
+                "session": session_data,
+                "agent": agent_data,
             }
         )
 
     @app.get("/agent-test")
     async def agent_test_page() -> FileResponse:
         return FileResponse(AGENT_STREAM_TEST_PAGE)
+
+    @app.get("/haiguitang")
+    async def haiguitang_web_page() -> RedirectResponse:
+        return RedirectResponse(url="/web/", status_code=307)
 
     @app.get("/api/v1/session/status")
     async def session_status(request: Request) -> dict[str, Any]:
@@ -312,30 +504,123 @@ def create_app() -> FastAPI:
         service: QuickControlService = request.app.state.quick_control_service
         return _ok(service.idle_scan_stop())
 
+    @app.get("/api/v1/haiguitang/status")
+    async def haiguitang_status(request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(service.haiguitang_status())
+
+    @app.get("/api/v1/scenes/haiguitang/config")
+    async def haiguitang_scene_config(request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(service.haiguitang_scene_config())
+
+    @app.get("/api/v1/scenes/haiguitang/state")
+    async def haiguitang_scene_state(request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(service.haiguitang_scene_state())
+
+    @app.post("/api/v1/scenes/haiguitang/state")
+    async def haiguitang_scene_present(
+        payload: HaiGuiTangSceneStateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(
+            service.haiguitang_scene_present(
+                clip=payload.clip,
+                subtitle_text=payload.subtitle_text,
+                video_url=payload.video_url,
+                loop_playback=payload.loop_playback,
+            )
+        )
+
+    @app.get("/api/v1/scenes/haiguitang/intro-video")
+    async def haiguitang_intro_video(request: Request) -> FileResponse:
+        del request
+        intro_video_file = haiguitang_intro_video_file()
+        if intro_video_file is None or not intro_video_file.is_file():
+            raise QuickControlError(
+                "HAIGUITANG_INTRO_VIDEO_NOT_FOUND",
+                "HaiGuiTang intro video not found in runtime/media",
+                404,
+            )
+        return FileResponse(
+            path=intro_video_file,
+            media_type="video/mp4",
+            filename=intro_video_file.name,
+        )
+
+    @app.get("/api/v1/scenes/haiguitang/media/{media_name}")
+    async def haiguitang_media(request: Request, media_name: str) -> FileResponse:
+        del request
+        media_file = haiguitang_media_file(media_name)
+        if media_file is None or not media_file.is_file():
+            raise QuickControlError(
+                "HAIGUITANG_MEDIA_NOT_FOUND",
+                f"HaiGuiTang media not found: {media_name}",
+                404,
+            )
+        return FileResponse(
+            path=media_file,
+            media_type="video/mp4",
+            filename=media_file.name,
+        )
+
+    @app.post("/api/v1/haiguitang/start")
+    async def haiguitang_start(payload: HaiGuiTangStartRequest, request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(
+            service.haiguitang_start(
+                pan_joint=payload.pan_joint,
+                tilt_joint=payload.tilt_joint,
+                speed_percent=payload.speed_percent,
+                nod_amplitude_deg=payload.nod_amplitude_deg,
+                nod_cycles=payload.nod_cycles,
+                shake_amplitude_deg=payload.shake_amplitude_deg,
+                shake_cycles=payload.shake_cycles,
+                beat_duration_sec=payload.beat_duration_sec,
+                beat_pause_sec=payload.beat_pause_sec,
+                return_duration_sec=payload.return_duration_sec,
+                settle_pause_sec=payload.settle_pause_sec,
+                auto_center_after_action=payload.auto_center_after_action,
+                capture_anchor_on_start=payload.capture_anchor_on_start,
+            )
+        )
+
+    @app.post("/api/v1/haiguitang/act")
+    async def haiguitang_act(payload: HaiGuiTangActionRequest, request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(service.haiguitang_act(action=payload.action))
+
+    @app.post("/api/v1/haiguitang/stop")
+    async def haiguitang_stop(request: Request) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        return _ok(service.haiguitang_stop())
+
     @app.get("/api/v1/agent/status")
     async def agent_status(request: Request) -> dict[str, Any]:
         service: QuickControlService = request.app.state.quick_control_service
-        return _ok(service.agent_status())
+        return _ok(await asyncio.to_thread(service.agent_status))
 
     @app.get("/api/v1/agent/last-turn")
     async def agent_last_turn(request: Request) -> dict[str, Any]:
         service: QuickControlService = request.app.state.quick_control_service
-        return _ok(service.agent_last_turn())
+        return _ok(await asyncio.to_thread(service.agent_last_turn))
 
     @app.post("/api/v1/agent/warmup")
     async def agent_warmup(payload: AgentWarmupRequest, request: Request) -> dict[str, Any]:
         service: QuickControlService = request.app.state.quick_control_service
-        return _ok(service.agent_warmup(prompt=payload.prompt))
+        return _ok(await asyncio.to_thread(service.agent_warmup, prompt=payload.prompt))
 
     @app.post("/api/v1/agent/reset-session")
     async def agent_reset_session(request: Request) -> dict[str, Any]:
         service: QuickControlService = request.app.state.quick_control_service
-        return _ok(service.agent_reset_session())
+        return _ok(await asyncio.to_thread(service.agent_reset_session))
 
     @app.post("/api/v1/agent/ask")
     async def agent_ask(payload: AgentAskRequest, request: Request) -> dict[str, Any]:
         service: QuickControlService = request.app.state.quick_control_service
-        return _ok(service.agent_ask(message=payload.message))
+        return _ok(await asyncio.to_thread(service.agent_ask, message=payload.message))
 
     @app.websocket("/api/v1/ws/state")
     async def ws_state(websocket: WebSocket):
@@ -354,7 +639,12 @@ def create_app() -> FastAPI:
         service: QuickControlService = websocket.app.state.quick_control_service
         try:
             while True:
-                await websocket.send_json({"type": "agent", "data": service.agent_status()})
+                await websocket.send_json(
+                    {
+                        "type": "agent",
+                        "data": await asyncio.to_thread(service.agent_status),
+                    }
+                )
                 await asyncio.sleep(0.2)
         except WebSocketDisconnect:
             return
@@ -363,11 +653,12 @@ def create_app() -> FastAPI:
     async def ws_agent_stream(websocket: WebSocket):
         await websocket.accept()
         service: QuickControlService = websocket.app.state.quick_control_service
+        initial_status = await asyncio.to_thread(service.agent_status)
         await websocket.send_json(
             {
                 "type": "ready",
                 "data": {
-                    "status": service.agent_status(),
+                    "status": initial_status,
                 },
             }
         )
@@ -388,10 +679,11 @@ def create_app() -> FastAPI:
                     await websocket.send_json({"type": "pong"})
                     continue
                 if op == "status":
+                    status_payload = await asyncio.to_thread(service.agent_status)
                     await websocket.send_json(
                         {
                             "type": "status",
-                            "data": service.agent_status(),
+                            "data": status_payload,
                         }
                     )
                     continue
@@ -424,7 +716,11 @@ def create_app() -> FastAPI:
                 )
 
                 try:
-                    result = await asyncio.to_thread(service.agent_ask, message=message)
+                    stream_spec = await asyncio.to_thread(
+                        service.agent_build_stream_turn_spec,
+                        kind="ask",
+                        prompt=message,
+                    )
                 except QuickControlError as exc:
                     await _send_ws_error(
                         websocket,
@@ -433,14 +729,99 @@ def create_app() -> FastAPI:
                         message=exc.message,
                     )
                     continue
-                except Exception as exc:  # noqa: BLE001
-                    await _send_ws_error(
-                        websocket,
-                        stage="agent",
-                        code="AGENT_FAILED",
-                        message=str(exc),
+
+                if bool(stream_spec.get("ok")):
+                    try:
+                        stream_result = await _relay_openclaw_chat_stream(
+                            websocket,
+                            bridge=websocket.app.state.openclaw_chat_stream_bridge,
+                            command=list(stream_spec.get("command") or []),
+                            stdin_payload=dict(stream_spec.get("stdin_payload") or {}),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        await asyncio.to_thread(
+                            service.agent_fail_stream_turn,
+                            kind="ask",
+                            prompt=message,
+                            error=str(exc),
+                            bridge_session_key=str(
+                                stream_spec.get("bridge_session_key", "") or ""
+                            ).strip(),
+                        )
+                        await _send_ws_error(
+                            websocket,
+                            stage="agent",
+                            code="AGENT_FAILED",
+                            message=str(exc),
+                        )
+                        continue
+
+                    stream_timing = dict(stream_result.get("timing") or {})
+                    history_error = str(stream_result.get("history_error", "") or "").strip()
+                    if history_error:
+                        stream_timing["history_error"] = history_error
+
+                    if not bool(stream_result.get("ok")):
+                        error_message = str(
+                            stream_result.get("error", "") or "OpenClaw chat stream failed"
+                        ).strip()
+                        await asyncio.to_thread(
+                            service.agent_fail_stream_turn,
+                            kind="ask",
+                            prompt=message,
+                            error=error_message,
+                            session_id=str(stream_result.get("session_id", "") or "").strip(),
+                            bridge_session_key=str(
+                                stream_result.get("session_key", "")
+                                or stream_spec.get("bridge_session_key", "")
+                                or ""
+                            ).strip(),
+                            openclaw_elapsed_sec=float(stream_timing.get("total_ms", 0.0) or 0.0)
+                            / 1000.0,
+                            bridge_timing=stream_timing,
+                        )
+                        await _send_ws_error(
+                            websocket,
+                            stage="agent",
+                            code="AGENT_FAILED",
+                            message=error_message,
+                        )
+                        continue
+
+                    result = await asyncio.to_thread(
+                        service.agent_complete_stream_turn,
+                        kind="ask",
+                        prompt=message,
+                        reply=str(stream_result.get("reply", "") or "").strip(),
+                        session_id=str(stream_result.get("session_id", "") or "").strip(),
+                        bridge_session_key=str(
+                            stream_result.get("session_key", "")
+                            or stream_spec.get("bridge_session_key", "")
+                            or ""
+                        ).strip(),
+                        openclaw_elapsed_sec=float(stream_timing.get("total_ms", 0.0) or 0.0)
+                        / 1000.0,
+                        bridge_timing=stream_timing,
                     )
-                    continue
+                else:
+                    try:
+                        result = await asyncio.to_thread(service.agent_ask, message=message)
+                    except QuickControlError as exc:
+                        await _send_ws_error(
+                            websocket,
+                            stage="agent",
+                            code=exc.code,
+                            message=exc.message,
+                        )
+                        continue
+                    except Exception as exc:  # noqa: BLE001
+                        await _send_ws_error(
+                            websocket,
+                            stage="agent",
+                            code="AGENT_FAILED",
+                            message=str(exc),
+                        )
+                        continue
 
                 turn = dict(result.get("turn") or {})
                 reply = str(turn.get("reply", "") or "").strip()
@@ -483,7 +864,7 @@ def create_app() -> FastAPI:
                         "type": "turn_done",
                         "data": {
                             "turn": turn,
-                            "status": service.agent_status(),
+                            "status": await asyncio.to_thread(service.agent_status),
                         },
                     }
                 )
