@@ -749,11 +749,14 @@ class SoArmMoceController:
                 pass
 
     def _apply_position_mode_registers(self, bus) -> None:
+        wrote_any = False
         for joint_name, spec in self._joint_specs.items():
             calibration_entry = self._calibration_payload.get(joint_name, {})
             for register_name, register_value in spec.policy.register_writes(calibration_entry):
-                bus.write(register_name, joint_name, int(register_value), normalize=False)
-        time.sleep(0.02)
+                if self._write_register_if_needed(bus, register_name, joint_name, int(register_value)):
+                    wrote_any = True
+        if wrote_any:
+            time.sleep(0.02)
 
     def _apply_gripper_registers(self, bus) -> None:
         if self._gripper_spec is None or not self._gripper_integrated:
@@ -765,10 +768,21 @@ class SoArmMoceController:
         # standalone ratio-based control, which would block valid replay targets.
         # So the integrated controller keeps the homing offset, but widens the
         # hardware position limits to the full single-turn register range.
-        bus.write("Operating_Mode", self._gripper_spec.name, POSITION_MODE_VALUE, normalize=False)
-        bus.write("Homing_Offset", self._gripper_spec.name, int(self._gripper_spec.homing_offset), normalize=False)
-        bus.write("Min_Position_Limit", self._gripper_spec.name, SINGLE_TURN_RAW_MIN, normalize=False)
-        bus.write("Max_Position_Limit", self._gripper_spec.name, SINGLE_TURN_RAW_MAX, normalize=False)
+        wrote_any = False
+        wrote_any = self._write_register_if_needed(
+            bus, "Operating_Mode", self._gripper_spec.name, POSITION_MODE_VALUE
+        ) or wrote_any
+        wrote_any = self._write_register_if_needed(
+            bus, "Homing_Offset", self._gripper_spec.name, int(self._gripper_spec.homing_offset)
+        ) or wrote_any
+        wrote_any = self._write_register_if_needed(
+            bus, "Min_Position_Limit", self._gripper_spec.name, SINGLE_TURN_RAW_MIN
+        ) or wrote_any
+        wrote_any = self._write_register_if_needed(
+            bus, "Max_Position_Limit", self._gripper_spec.name, SINGLE_TURN_RAW_MAX
+        ) or wrote_any
+        if wrote_any:
+            time.sleep(0.02)
 
     def _prime_startup_references_from_current_pose(self, bus) -> dict[str, int]:
         raw_present = self._read_raw_present_position(bus)
@@ -799,6 +813,20 @@ class SoArmMoceController:
             joint_name: int(active_bus.read("Present_Position", joint_name, normalize=False))
             for joint_name in JOINTS
         }
+
+    def _read_joint_register_raw(self, bus, register_name: str, joint_name: str) -> int | None:
+        try:
+            return int(bus.read(register_name, joint_name, normalize=False))
+        except Exception:
+            return None
+
+    def _write_register_if_needed(self, bus, register_name: str, joint_name: str, target_value: int | float) -> bool:
+        desired_raw = int(target_value)
+        current_raw = self._read_joint_register_raw(bus, register_name, joint_name)
+        if current_raw is not None and current_raw == desired_raw:
+            return False
+        bus.write(register_name, joint_name, desired_raw, normalize=False)
+        return True
 
     def _current_relative_raw_from_raw(self, joint_name: str, present_raw: int | float) -> int:
         spec = self._joint_specs[joint_name]
@@ -1034,11 +1062,21 @@ class SoArmMoceController:
     def _hold_raw_positions(self, bus, raw_present: Mapping[str, int]) -> None:
         self._write_raw_goal_positions(bus, raw_present)
 
-    def _write_raw_goal_positions(self, bus, goal_raw_by_joint: Mapping[str, int]) -> None:
+    def _write_raw_goal_positions(
+        self,
+        bus,
+        goal_raw_by_joint: Mapping[str, int],
+        *,
+        only_when_goal_differs: bool = False,
+    ) -> None:
         for joint_name in JOINTS:
             if joint_name not in goal_raw_by_joint:
                 continue
-            bus.write("Goal_Position", joint_name, int(goal_raw_by_joint[joint_name]), normalize=False)
+            goal_raw = int(goal_raw_by_joint[joint_name])
+            if only_when_goal_differs:
+                self._write_register_if_needed(bus, "Goal_Position", joint_name, goal_raw)
+                continue
+            bus.write("Goal_Position", joint_name, goal_raw, normalize=False)
 
     def _build_raw_hold_command(self, bus=None) -> dict[str, int]:
         # Compatibility helper for older skill scripts: when torque is re-enabled
@@ -1072,6 +1110,7 @@ class SoArmMoceController:
             self._write_raw_goal_positions(
                 active_bus,
                 {str(joint_name): int(value) for joint_name, value in joint_goal_raw.items() if joint_name in JOINTS},
+                only_when_goal_differs=True,
             )
 
         gripper_goal_raw = payload.get("gripper_goal_raw")

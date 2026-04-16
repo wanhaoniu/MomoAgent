@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>海龟汤 | MomoAgent Scene</title>
-  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./styles.css?v=20260416e" />
 </head>
 <body>
   <div class="app-shell">
@@ -90,6 +90,18 @@
         </section>
 
         <section class="panel-section">
+          <h3>Agent 互动</h3>
+          <label class="field-label" for="agentPromptInput">发给 OpenClaw</label>
+          <textarea id="agentPromptInput" rows="3" placeholder="例如：我猜这件事和死者自己有关吗？"></textarea>
+          <div class="action-row">
+            <button id="agentAskButton" class="solid-button" type="button">问 Agent</button>
+          </div>
+          <p class="helper-text">
+            这会调用 <code>POST /api/v1/haiguitang/agent/turn</code>，由后端统一完成 OpenClaw 对话、字幕切换、表情片段和点头/摇头动作。后面接 STT 时也可以直接复用这条接口。
+          </p>
+        </section>
+
+        <section class="panel-section">
           <h3>场景切换</h3>
           <div class="action-grid">
             <button class="scene-action" data-clip="intro" data-loop="false" type="button">片头</button>
@@ -146,6 +158,6 @@
     </aside>
   </div>
 
-  <script src="./app.js"></script>
+  <script src="./app.js?v=20260416e"></script>
 </body>
 </html>

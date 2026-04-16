@@ -8,10 +8,12 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .errors import QuickControlError
+from .haiguitang_agent import build_haiguitang_agent_prompt, parse_haiguitang_agent_reply
 from .scene_config import haiguitang_intro_video_file, haiguitang_media_file
 from .schemas import (
     AgentAskRequest,
@@ -20,6 +22,7 @@ from .schemas import (
     ConnectRequest,
     FollowStartRequest,
     HaiGuiTangActionRequest,
+    HaiGuiTangAgentTurnRequest,
     HaiGuiTangSceneStateRequest,
     HaiGuiTangStartRequest,
     HomeRequest,
@@ -30,6 +33,21 @@ from .service import QuickControlService
 
 AGENT_STREAM_TEST_PAGE = Path(__file__).resolve().parents[2] / "agent_stream_test.html"
 WEB_ROOT = Path(__file__).resolve().parents[5] / "Software" / "Web"
+HAIGUITANG_AGENT_MOTION_START_PAYLOAD = {
+    "pan_joint": "shoulder_pan",
+    "tilt_joint": "elbow_flex",
+    "speed_percent": 30,
+    "nod_amplitude_deg": 7.0,
+    "nod_cycles": 2,
+    "shake_amplitude_deg": 10.0,
+    "shake_cycles": 2,
+    "beat_duration_sec": 0.26,
+    "beat_pause_sec": 0.08,
+    "return_duration_sec": 0.24,
+    "settle_pause_sec": 0.10,
+    "auto_center_after_action": True,
+    "capture_anchor_on_start": True,
+}
 
 
 class OpenClawChatStreamBridge:
@@ -323,8 +341,188 @@ def _ok(data: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "data": data}
 
 
+async def _run_openclaw_turn(
+    *,
+    service: QuickControlService,
+    bridge: OpenClawChatStreamBridge,
+    kind: str,
+    prompt: str,
+) -> dict[str, Any]:
+    stream_spec = await asyncio.to_thread(
+        service.agent_build_stream_turn_spec,
+        kind=kind,
+        prompt=prompt,
+    )
+    if bool(stream_spec.get("ok")):
+
+        async def _ignore_event(_event: dict[str, Any]) -> None:
+            return
+
+        try:
+            stream_result = await bridge.relay(
+                command=list(stream_spec.get("command") or []),
+                stdin_payload=dict(stream_spec.get("stdin_payload") or {}),
+                on_event=_ignore_event,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await asyncio.to_thread(
+                service.agent_fail_stream_turn,
+                kind=kind,
+                prompt=prompt,
+                error=str(exc),
+                bridge_session_key=str(stream_spec.get("bridge_session_key", "") or "").strip(),
+            )
+            raise QuickControlError("AGENT_FAILED", str(exc), 500) from exc
+
+        stream_timing = dict(stream_result.get("timing") or {})
+        history_error = str(stream_result.get("history_error", "") or "").strip()
+        if history_error:
+            stream_timing["history_error"] = history_error
+
+        if not bool(stream_result.get("ok")):
+            error_message = str(
+                stream_result.get("error", "") or "OpenClaw chat stream failed"
+            ).strip()
+            await asyncio.to_thread(
+                service.agent_fail_stream_turn,
+                kind=kind,
+                prompt=prompt,
+                error=error_message,
+                session_id=str(stream_result.get("session_id", "") or "").strip(),
+                bridge_session_key=str(
+                    stream_result.get("session_key", "")
+                    or stream_spec.get("bridge_session_key", "")
+                    or ""
+                ).strip(),
+                openclaw_elapsed_sec=float(stream_timing.get("total_ms", 0.0) or 0.0) / 1000.0,
+                bridge_timing=stream_timing,
+            )
+            raise QuickControlError("AGENT_FAILED", error_message, 500)
+
+        return {
+            "reply": str(stream_result.get("reply", "") or "").strip(),
+            "session_id": str(stream_result.get("session_id", "") or "").strip(),
+            "bridge_session_key": str(
+                stream_result.get("session_key", "")
+                or stream_spec.get("bridge_session_key", "")
+                or ""
+            ).strip(),
+            "openclaw_elapsed_sec": float(stream_timing.get("total_ms", 0.0) or 0.0) / 1000.0,
+            "bridge_timing": stream_timing,
+        }
+
+    result = await asyncio.to_thread(service.agent_ask, message=prompt)
+    turn = dict(result.get("turn") or {})
+    return {
+        "reply": str(turn.get("reply", "") or "").strip(),
+        "session_id": str(turn.get("session_id", "") or "").strip(),
+        "bridge_session_key": str(turn.get("bridge_session_key", "") or "").strip(),
+        "openclaw_elapsed_sec": float(turn.get("openclaw_elapsed_sec", 0.0) or 0.0),
+        "bridge_timing": dict(turn.get("bridge_timing") or {}),
+    }
+
+
+async def _ensure_haiguitang_motion_ready(service: QuickControlService) -> dict[str, Any]:
+    session_status = await asyncio.to_thread(service.session_status)
+    if not bool(session_status.get("connected")):
+        await asyncio.to_thread(
+            service.connect,
+            prefer_real=True,
+            allow_sim_fallback=False,
+        )
+
+    haiguitang_status = await asyncio.to_thread(service.haiguitang_status)
+    worker_payload = dict(haiguitang_status.get("haiguitang") or {})
+    if bool(worker_payload.get("enabled")) and bool(worker_payload.get("running")):
+        return haiguitang_status
+
+    return await asyncio.to_thread(
+        service.haiguitang_start,
+        **HAIGUITANG_AGENT_MOTION_START_PAYLOAD,
+    )
+
+
+async def _apply_haiguitang_agent_directive(
+    *,
+    service: QuickControlService,
+    directive: dict[str, Any],
+) -> dict[str, Any]:
+    scene_state = await asyncio.to_thread(
+        service.haiguitang_scene_present,
+        clip=str(directive.get("clip", "default") or "default"),
+        subtitle_text=str(directive.get("subtitle_text", "") or ""),
+        video_url="",
+        loop_playback=bool(directive.get("loop_playback", True)),
+    )
+
+    action = str(directive.get("action", "none") or "none").strip().lower()
+    hardware_result: dict[str, Any] = {}
+    control_error = ""
+    if action in {"nod", "shake"}:
+        try:
+            await _ensure_haiguitang_motion_ready(service)
+            hardware_result = await asyncio.to_thread(service.haiguitang_act, action=action)
+        except QuickControlError as exc:
+            control_error = exc.message
+        except Exception as exc:  # noqa: BLE001
+            control_error = str(exc)
+
+    return {
+        "directive": dict(directive),
+        "state": scene_state,
+        "hardware": hardware_result,
+        "control_error": control_error,
+    }
+
+
+async def _run_haiguitang_agent_turn(
+    *,
+    service: QuickControlService,
+    bridge: OpenClawChatStreamBridge,
+    message: str,
+) -> dict[str, Any]:
+    user_message = str(message or "").strip()
+    if not user_message:
+        raise QuickControlError("INVALID_ARGUMENT", "Agent prompt is empty", 400)
+
+    upstream_turn = await _run_openclaw_turn(
+        service=service,
+        bridge=bridge,
+        kind="haiguitang",
+        prompt=build_haiguitang_agent_prompt(user_message),
+    )
+    directive = parse_haiguitang_agent_reply(str(upstream_turn.get("reply", "") or ""))
+    turn_result = await asyncio.to_thread(
+        service.agent_complete_stream_turn,
+        kind="haiguitang",
+        prompt=user_message,
+        reply=directive.spoken_text,
+        session_id=str(upstream_turn.get("session_id", "") or "").strip(),
+        bridge_session_key=str(upstream_turn.get("bridge_session_key", "") or "").strip(),
+        openclaw_elapsed_sec=float(upstream_turn.get("openclaw_elapsed_sec", 0.0) or 0.0),
+        bridge_timing=dict(upstream_turn.get("bridge_timing") or {}),
+    )
+    scene_result = await _apply_haiguitang_agent_directive(
+        service=service,
+        directive=directive.payload(),
+    )
+    turn = dict(turn_result.get("turn") or {})
+    turn["raw_reply"] = directive.raw_reply
+    turn["parse_mode"] = directive.parse_mode
+    return {
+        "turn": turn,
+        "scene": scene_result,
+    }
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="MomoAgent Quick Control API", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     if WEB_ROOT.is_dir():
         app.mount("/web", StaticFiles(directory=str(WEB_ROOT), html=True), name="web")
 
@@ -533,6 +731,19 @@ def create_app() -> FastAPI:
                 loop_playback=payload.loop_playback,
             )
         )
+
+    @app.post("/api/v1/haiguitang/agent/turn")
+    async def haiguitang_agent_turn(
+        payload: HaiGuiTangAgentTurnRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        result = await _run_haiguitang_agent_turn(
+            service=service,
+            bridge=request.app.state.openclaw_chat_stream_bridge,
+            message=payload.message,
+        )
+        return _ok(result)
 
     @app.get("/api/v1/scenes/haiguitang/intro-video")
     async def haiguitang_intro_video(request: Request) -> FileResponse:
