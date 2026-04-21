@@ -149,14 +149,14 @@ OPENAI_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "run_skill",
-            "description": "Run a higher-level robot behavior skill by name. Skills that depend on Cartesian motion may be unavailable.",
+            "name": "run_robot_behavior",
+            "description": "Run a higher-level curated robot behavior by name. Only use this for robot motions or gripper behaviors like home/open_gripper/close_gripper, never for nanobot SKILL.md skills such as weather/github/tmux/summarize.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Skill name. Joint-level skills are preferred; Cartesian-motion skills may be unavailable.",
+                        "description": "Robot behavior name such as home, open_gripper, or close_gripper. Do not pass nanobot builtin skill names like weather, github, tmux, or summarize.",
                     },
                     "params": {
                         "type": "object",
@@ -459,6 +459,8 @@ class LocalToolDispatcher:
             "set_gripper",
             "rotate_joint",
             "scan_for_object",
+            "run_robot_behavior",
+            "run_robot_skill",
             "run_skill",
         ):
             return self._dispatch_via_tool_requester(func, args)
@@ -508,13 +510,13 @@ class LocalToolDispatcher:
                 width=args.get("width", 960),
                 height=args.get("height", 720),
             )
-        if func == "run_skill":
+        if func in {"run_robot_behavior", "run_robot_skill", "run_skill"}:
             name = str(args.get("name", "")).strip()
             params = args.get("params", {})
             if not isinstance(params, dict):
                 params = {}
             if not name:
-                raise ValueError("run_skill requires non-empty name")
+                raise ValueError("run_robot_behavior requires non-empty name")
             # Mock fallback behavior when no main-thread requester is provided.
             if name in ("dance_short", "dance", "wave"):
                 return json.dumps(

@@ -9,10 +9,10 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .agent_client import AgentReply
 from .config import (
     MOMO_AGENT_RUNTIME_DIR,
     OPENCLAW_THINKING_DEFAULT,
@@ -141,11 +141,7 @@ def _sanitize_openclaw_reply(text: str) -> str:
     return raw
 
 
-@dataclass
-class OpenClawReply:
-    text: str
-    session_id: str
-    raw_payload: Any
+OpenClawReply = AgentReply
 
 
 class OpenClawGatewayBridgeClient:

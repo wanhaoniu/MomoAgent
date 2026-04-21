@@ -7,6 +7,8 @@ from typing import Any
 
 ALLOWED_HAIGUITANG_AGENT_CLIPS = frozenset({"default", "nod", "shake", "outro"})
 ALLOWED_HAIGUITANG_AGENT_ACTIONS = frozenset({"none", "nod", "shake"})
+ALLOWED_HAIGUITANG_DIFFICULTIES = frozenset({"easy", "medium", "hard"})
+ALLOWED_HAIGUITANG_ROUND_STATUS = frozenset({"ongoing", "solved", "revealed"})
 DEFAULT_SUBTITLE_LIMIT = 30
 
 _JSON_CODE_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.IGNORECASE | re.DOTALL)
@@ -88,6 +90,7 @@ class HaiGuiTangAgentDirective:
     clip: str = "default"
     action: str = "none"
     loop_playback: bool = True
+    round_status: str = "ongoing"
     mood: str = ""
     parse_mode: str = "heuristic"
     raw_reply: str = ""
@@ -108,16 +111,56 @@ def build_haiguitang_agent_prompt(user_message: str) -> str:
         '  "subtitle_text": "用于悬浮字幕的短句",\n'
         '  "clip": "default|nod|shake|outro",\n'
         '  "action": "none|nod|shake",\n'
-        '  "loop_playback": true\n'
+        '  "loop_playback": true,\n'
+        '  "round_status": "ongoing|solved|revealed"\n'
         "}\n"
         "规则：\n"
         "1. 肯定、认可、接近正确时，用 clip=nod、action=nod、loop_playback=false。\n"
         "2. 否定、纠正、猜错时，用 clip=shake、action=shake、loop_playback=false。\n"
         "3. 思考、卖关子、继续追问时，用 clip=default、action=none、loop_playback=true。\n"
         "4. 揭晓或结束时，用 clip=outro、action=none、loop_playback=false。\n"
-        "5. spoken_text 保持自然中文；subtitle_text 更短，尽量不超过 24 个字。\n"
+        "5. 如果玩家还没真正答出核心真相，round_status=ongoing。普通的是非问题即使答“是”，也仍然通常是 ongoing。\n"
+        "6. 只有玩家已经猜中核心答案或真相时，round_status=solved。\n"
+        "7. 如果你直接公布谜底、解释真相、宣布结束，则 round_status=revealed。\n"
+        "8. spoken_text 保持自然中文；subtitle_text 更短，尽量不超过 24 个字。\n"
         "用户输入：\n"
         f"{message}"
+    )
+
+
+def build_haiguitang_round_start_prompt(difficulty: str) -> str:
+    normalized = _normalize_difficulty(difficulty)
+    difficulty_label = {
+        "easy": "简单",
+        "medium": "中等",
+        "hard": "困难",
+    }[normalized]
+    difficulty_rules = {
+        "easy": "题面要直观一些，线索更清楚，答案不要太绕。",
+        "medium": "题面保留一定反转，但整体仍然能通过追问逐步摸到真相。",
+        "hard": "题面可以更迷惑一些，但仍要自洽、可推理，不要靠纯随机脑洞。",
+    }[normalized]
+    return (
+        "你现在是“海龟汤”网页场景里的出题角色，要立刻开始一局新的海龟汤。\n"
+        "你的输出会被程序直接解析，并驱动全屏视频和机械臂动作。\n"
+        "请只输出一个 JSON 对象，不要输出 markdown、解释、前缀或代码块。\n"
+        "字段要求：\n"
+        "{\n"
+        '  "spoken_text": "要说给用户听的完整中文台词",\n'
+        '  "subtitle_text": "用于悬浮字幕的短句",\n'
+        '  "clip": "default",\n'
+        '  "action": "none",\n'
+        '  "loop_playback": true,\n'
+        '  "round_status": "ongoing"\n'
+        "}\n"
+        "开局规则：\n"
+        "1. 现在是新一局的开场，你要先出题。\n"
+        f"2. 本局难度必须是：{difficulty_label}。\n"
+        f"3. {difficulty_rules}\n"
+        "4. spoken_text 只说题面和引导语，不要直接说谜底、真相、答案或原因。\n"
+        "5. spoken_text 用自然中文控制在 2 到 4 句，适合直接口播。\n"
+        "6. subtitle_text 是题面的短摘要，尽量不超过 24 个字。\n"
+        "7. 开局一律保持 clip=default、action=none、loop_playback=true、round_status=ongoing。\n"
     )
 
 
@@ -150,6 +193,13 @@ def _directive_from_payload(payload: dict[str, Any], raw_reply: str) -> HaiGuiTa
     )
     clip = _normalize_clip(clip_source)
     action = _normalize_action(action_source)
+    round_status = _normalize_round_status(
+        payload.get("round_status")
+        or payload.get("game_status")
+        or payload.get("status")
+        or payload.get("roundState")
+        or ""
+    )
     mood = _clean_text(payload.get("mood") or payload.get("tone") or "")
     loop_value = payload.get("loop_playback")
     loop_playback = bool(loop_value) if isinstance(loop_value, bool) else clip == "default"
@@ -173,6 +223,7 @@ def _directive_from_payload(payload: dict[str, Any], raw_reply: str) -> HaiGuiTa
         clip=clip,
         action=action,
         loop_playback=loop_playback,
+        round_status=round_status,
         mood=mood,
         parse_mode="json",
         raw_reply=_clean_text(raw_reply),
@@ -188,6 +239,7 @@ def _directive_from_text(raw_reply: str) -> HaiGuiTangAgentDirective:
         clip=clip,
         action=action,
         loop_playback=loop_playback,
+        round_status=_infer_round_status(spoken_text, clip=clip, action=action),
         mood="",
         parse_mode="heuristic",
         raw_reply=spoken_text,
@@ -270,6 +322,31 @@ def _normalize_action(value: Any) -> str:
     return normalized
 
 
+def _normalize_difficulty(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in ALLOWED_HAIGUITANG_DIFFICULTIES:
+        return "medium"
+    return normalized
+
+
+def _normalize_round_status(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in ALLOWED_HAIGUITANG_ROUND_STATUS:
+        return "ongoing"
+    return normalized
+
+
+def _infer_round_status(text: str, *, clip: str, action: str) -> str:
+    normalized_text = _clean_text(text)
+    if clip == "outro":
+        return "revealed"
+    if any(keyword in normalized_text for keyword in ("答对", "猜对", "你说中了", "就是这样", "完全正确")):
+        return "solved"
+    if clip == "nod" and action == "nod" and any(keyword in normalized_text for keyword in ("正确", "没错")):
+        return "solved"
+    return "ongoing"
+
+
 def _coerce_scene_controls(
     *,
     clip: str,
@@ -330,5 +407,6 @@ def _truncate_text(value: str, limit: int) -> str:
 __all__ = [
     "HaiGuiTangAgentDirective",
     "build_haiguitang_agent_prompt",
+    "build_haiguitang_round_start_prompt",
     "parse_haiguitang_agent_reply",
 ]

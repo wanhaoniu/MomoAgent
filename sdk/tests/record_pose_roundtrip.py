@@ -12,6 +12,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SDK_SRC = REPO_ROOT / "sdk" / "src"
+if str(SDK_SRC) not in sys.path:
+    sys.path.insert(0, str(SDK_SRC))
+
 from soarmmoce_sdk.cli_common import cli_bool, print_error, print_success
 from soarmmoce_sdk import JOINTS, MULTI_TURN_JOINTS, SoArmMoceController, ValidationError, to_jsonable
 

@@ -30,6 +30,12 @@
 
 - `ws://<host>:8010/api/v1/ws/agent-stream`
 
+实时 STT：
+
+- `GET /api/v1/stt/aws/status`
+- `WS /api/v1/ws/stt`
+- 接入说明见 [`../../docs/realtime-stt-app-integration.md`](../../docs/realtime-stt-app-integration.md)
+
 视频预览：
 
 - `http://<host>:8000/frame.jpg?max_width=960&quality=70`

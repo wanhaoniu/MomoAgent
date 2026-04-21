@@ -73,7 +73,7 @@ class QuickControlService:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._robot: Optional[RuntimeRobot] = None
-        self._agent = AgentService()
+        self._agent = AgentService(tool_requester=self._agent_tool_request)
         env_sdk_config = str(os.getenv("SOARMMOCE_CONFIG", "")).strip()
         self._primary_config_path = env_sdk_config or (
             str(DEFAULT_SDK_REAL_CONFIG_PATH) if DEFAULT_SDK_REAL_CONFIG_PATH.exists() else ""
@@ -588,6 +588,213 @@ class QuickControlService:
             return {
                 "source": str(source or "home"),
                 "accepted": True,
+            }
+
+    def _agent_move_robot_arm(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self._stop_for_manual_motion_locked()
+            robot = self._require_robot()
+            x = float(payload.get("x", 0.0) or 0.0)
+            y = float(payload.get("y", 0.0) or 0.0)
+            z = float(payload.get("z", 0.0) or 0.0)
+            frame = str(payload.get("frame", "base") or "base").strip().lower()
+            duration = float(np.clip(float(payload.get("duration", 2.0) or 2.0), 0.2, 20.0))
+            wait = bool(payload.get("wait", True))
+            if frame not in {"base", "tool"}:
+                raise QuickControlError("INVALID_ARGUMENT", "frame must be 'base' or 'tool'", 400)
+
+            if frame == "tool":
+                robot.move_delta(
+                    dx=x,
+                    dy=y,
+                    dz=z,
+                    frame="tool",
+                    duration=duration,
+                    wait=wait,
+                )
+            else:
+                robot.move_pose(
+                    xyz=[x, y, z],
+                    rpy=None,
+                    duration=duration,
+                    wait=wait,
+                )
+
+            state = robot.get_state()
+            return {
+                "ok": True,
+                "message": "cartesian move completed",
+                "backend": self._transport_name_from_robot(robot),
+                "frame": frame,
+                "requested_xyz_m": [x, y, z],
+                "actual_xyz_m": [
+                    float(v) for v in np.asarray(state.tcp_pose.xyz, dtype=float).reshape(3).tolist()
+                ],
+                "actual_rpy_rad": [
+                    float(v) for v in np.asarray(state.tcp_pose.rpy, dtype=float).reshape(3).tolist()
+                ],
+                "duration": duration,
+                "wait": wait,
+            }
+
+    def _agent_get_robot_state(self) -> dict[str, Any]:
+        with self._lock:
+            robot = self._require_robot()
+            state = robot.get_state()
+            joint_names = list(
+                getattr(state.joint_state, "names", [])
+                or getattr(robot.robot_model, "joint_names", [])
+                or DEFAULT_JOINT_NAMES
+            )
+            joints: dict[str, float] = {}
+            for index, value in enumerate(np.asarray(state.joint_state.q, dtype=float).reshape(-1).tolist()):
+                name = str(joint_names[index]) if index < len(joint_names) else f"joint_{index + 1}"
+                joints[name] = float(value)
+
+            return {
+                "ok": True,
+                "backend": self._transport_name_from_robot(robot),
+                "connected": True,
+                "timestamp": float(getattr(state, "timestamp", time.time()) or time.time()),
+                "joints_rad": joints,
+                "ee_xyz_m": [
+                    float(v) for v in np.asarray(state.tcp_pose.xyz, dtype=float).reshape(3).tolist()
+                ],
+                "ee_rpy_rad": [
+                    float(v) for v in np.asarray(state.tcp_pose.rpy, dtype=float).reshape(3).tolist()
+                ],
+                "gripper": {
+                    "available": bool(getattr(state.gripper_state, "available", False)),
+                    "open_ratio": getattr(state.gripper_state, "open_ratio", None),
+                    "moving": getattr(state.gripper_state, "moving", None),
+                },
+            }
+
+    def _agent_set_gripper(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self._stop_for_manual_motion_locked()
+            robot = self._require_robot()
+            ratio = float(np.clip(float(payload.get("open_ratio", 1.0) or 1.0), 0.0, 1.0))
+            wait = bool(payload.get("wait", True))
+            robot.set_gripper(open_ratio=ratio, wait=wait)
+            state = robot.get_state()
+            return {
+                "ok": True,
+                "message": "gripper command completed",
+                "backend": self._transport_name_from_robot(robot),
+                "open_ratio_target": ratio,
+                "open_ratio_actual": getattr(state.gripper_state, "open_ratio", None),
+                "wait": wait,
+            }
+
+    def _agent_rotate_joint(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self._stop_for_manual_motion_locked()
+            robot = self._require_robot()
+            joint_name = str(payload.get("joint_name", "") or "").strip()
+            if not joint_name:
+                raise QuickControlError("INVALID_ARGUMENT", "joint_name is required", 400)
+
+            duration = float(np.clip(float(payload.get("duration", 1.0) or 1.0), 0.2, 20.0))
+            wait = bool(payload.get("wait", True))
+            target_deg = payload.get("target_deg")
+            delta_deg = payload.get("delta_deg")
+            if target_deg is None and delta_deg is None:
+                raise QuickControlError(
+                    "INVALID_ARGUMENT",
+                    "rotate_joint requires target_deg or delta_deg",
+                    400,
+                )
+
+            joint_names = list(getattr(robot.robot_model, "joint_names", []) or [])
+            index = self._joint_index_by_name(joint_names, joint_name)
+            q_before = float(np.asarray(robot.get_state().joint_state.q, dtype=float).reshape(-1)[index])
+            if target_deg is None:
+                requested_target_deg = float(math.degrees(q_before) + float(delta_deg or 0.0))
+                requested_delta_deg = float(delta_deg or 0.0)
+            else:
+                requested_target_deg = float(target_deg)
+                requested_delta_deg = float(requested_target_deg - math.degrees(q_before))
+
+            q_after = robot.rotate_joint(
+                joint=joint_names[index],
+                target_deg=requested_target_deg if target_deg is not None else None,
+                delta_deg=None if target_deg is not None else requested_delta_deg,
+                duration=duration,
+                wait=wait,
+            )
+            actual_target_deg = float(math.degrees(float(np.asarray(q_after, dtype=float).reshape(-1)[index])))
+            return {
+                "ok": True,
+                "message": "joint rotated",
+                "backend": self._transport_name_from_robot(robot),
+                "joint_name": str(joint_names[index]),
+                "requested_delta_deg": requested_delta_deg,
+                "requested_target_deg": requested_target_deg,
+                "actual_target_deg": actual_target_deg,
+                "wait": wait,
+            }
+
+    def _agent_run_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
+        name = str(payload.get("name", "") or "").strip().lower()
+        params = payload.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
+        if not name:
+            raise QuickControlError("INVALID_ARGUMENT", "run_robot_behavior requires non-empty name", 400)
+
+        if name in {"home", "go_home", "move_home", "startup_pose"}:
+            speed_percent = int(np.clip(int(params.get("speed_percent", 50) or 50), 1, 100))
+            result = self.home(source="home", speed_percent=speed_percent)
+            return {"ok": True, "skill": name, "result": result}
+        if name in {"open_gripper", "gripper_open"}:
+            return {"ok": True, "skill": name, "result": self._agent_set_gripper({"open_ratio": 1.0, "wait": True})}
+        if name in {"close_gripper", "gripper_close"}:
+            return {"ok": True, "skill": name, "result": self._agent_set_gripper({"open_ratio": 0.0, "wait": True})}
+        raise QuickControlError(
+            "UNSUPPORTED_SKILL",
+            f"unsupported skill: {name}",
+            400,
+        )
+
+    def _agent_tool_request(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        request_id: str,
+        timeout_sec: float,
+    ) -> dict[str, Any]:
+        del timeout_sec
+        try:
+            name = str(tool_name or "").strip()
+            if name == "move_robot_arm":
+                result = self._agent_move_robot_arm(args)
+            elif name == "get_robot_state":
+                result = self._agent_get_robot_state()
+            elif name == "stop_robot":
+                self.stop()
+                result = {"ok": True, "message": "stopped"}
+            elif name == "set_gripper":
+                result = self._agent_set_gripper(args)
+            elif name == "rotate_joint":
+                result = self._agent_rotate_joint(args)
+            elif name in {"run_robot_behavior", "run_robot_skill", "run_skill"}:
+                result = self._agent_run_skill(args)
+            else:
+                result = {"ok": False, "error": f"unsupported tool: {name}"}
+                return {"ok": False, "request_id": request_id, "result": result}
+            return {"ok": True, "request_id": request_id, "result": result}
+        except QuickControlError as exc:
+            return {
+                "ok": False,
+                "request_id": request_id,
+                "result": {"ok": False, "code": exc.code, "error": exc.message},
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "request_id": request_id,
+                "result": {"ok": False, "error": str(exc).strip() or "tool request failed"},
             }
 
     def stop(self) -> dict[str, Any]:

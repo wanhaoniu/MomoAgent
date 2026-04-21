@@ -16,6 +16,7 @@ sdk/dist/
 faster_whisper_local/
 cosyvoice_local/
 .venv/
+.venv-nanobot/
 .vscode/``
 *.jpg
 autograsp/
@@ -26,3 +27,7 @@ __MACOSX/
 *.env
 .lock
 sdk/src/soarmmoce_sdk/runtime/
+Software/Master/momo_agent/runtime/nanobot/
+Software/Master/momo_agent/runtime/nanobot_workspace/
+Software/Master/momo_agent/runtime/nanobot_session_state.json
+external/nanobot/

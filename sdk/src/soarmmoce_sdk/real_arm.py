@@ -644,10 +644,9 @@ class SoArmMoceController:
                 connect()
 
             self._bus = bus
-            self._apply_position_mode_registers(bus)
-            self._apply_gripper_registers(bus)
+            # Normal runtime connect must be read-only. Register rewrites belong
+            # to explicit calibration/repair flows, not everyday GUI connects.
             self._prime_startup_references_from_current_pose(bus)
-            self.apply_hold_state(self.capture_hold_state(bus), bus=bus)
             return bus
         except Exception:
             self._bus = None
@@ -747,42 +746,6 @@ class SoArmMoceController:
                     path.unlink()
             except Exception:
                 pass
-
-    def _apply_position_mode_registers(self, bus) -> None:
-        wrote_any = False
-        for joint_name, spec in self._joint_specs.items():
-            calibration_entry = self._calibration_payload.get(joint_name, {})
-            for register_name, register_value in spec.policy.register_writes(calibration_entry):
-                if self._write_register_if_needed(bus, register_name, joint_name, int(register_value)):
-                    wrote_any = True
-        if wrote_any:
-            time.sleep(0.02)
-
-    def _apply_gripper_registers(self, bus) -> None:
-        if self._gripper_spec is None or not self._gripper_integrated:
-            return
-        # The gripper stays in the same single-turn position mode used by the arm.
-        # For integrated pose record/replay we command the gripper by the raw
-        # register values captured from Present_Position. Some historical gripper
-        # calibration files contain very narrow range_min/range_max values for
-        # standalone ratio-based control, which would block valid replay targets.
-        # So the integrated controller keeps the homing offset, but widens the
-        # hardware position limits to the full single-turn register range.
-        wrote_any = False
-        wrote_any = self._write_register_if_needed(
-            bus, "Operating_Mode", self._gripper_spec.name, POSITION_MODE_VALUE
-        ) or wrote_any
-        wrote_any = self._write_register_if_needed(
-            bus, "Homing_Offset", self._gripper_spec.name, int(self._gripper_spec.homing_offset)
-        ) or wrote_any
-        wrote_any = self._write_register_if_needed(
-            bus, "Min_Position_Limit", self._gripper_spec.name, SINGLE_TURN_RAW_MIN
-        ) or wrote_any
-        wrote_any = self._write_register_if_needed(
-            bus, "Max_Position_Limit", self._gripper_spec.name, SINGLE_TURN_RAW_MAX
-        ) or wrote_any
-        if wrote_any:
-            time.sleep(0.02)
 
     def _prime_startup_references_from_current_pose(self, bus) -> dict[str, int]:
         raw_present = self._read_raw_present_position(bus)
