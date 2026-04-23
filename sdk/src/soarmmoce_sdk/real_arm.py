@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 try:
@@ -68,9 +69,16 @@ DEFAULT_MOTOR_IDS = {
 DEFAULT_JOINT_SETTLE_TOLERANCE_RAW = 16
 DEFAULT_JOINT_POLL_INTERVAL_S = 0.02
 DEFAULT_JOINT_WAIT_TIMEOUT_S = 2.5
+DEFAULT_COMMAND_SPEED_PERCENT = 50
+DEFAULT_JOINT_REFERENCE_DURATION_S = 0.20
+DEFAULT_JOINT_DURATION_MIN_S = 0.08
+DEFAULT_JOINT_DURATION_MAX_S = 12.0
 GRIPPER_JOINT_NAME = "gripper"
 DEFAULT_GRIPPER_SETTLE_TOLERANCE_RAW = 12
 DEFAULT_GRIPPER_POLL_INTERVAL_S = 0.02
+DEFAULT_GRIPPER_REFERENCE_DURATION_S = 0.50
+DEFAULT_GRIPPER_DURATION_MIN_S = 0.10
+DEFAULT_GRIPPER_DURATION_MAX_S = 3.0
 JOINTS = (
     "shoulder_pan",
     "shoulder_lift",
@@ -1198,6 +1206,77 @@ class SoArmMoceController:
                 time.sleep(max(0.0, dt))
         return True
 
+    @staticmethod
+    def _normalize_speed_percent(speed_percent: int | float | None) -> int:
+        if speed_percent is None:
+            return int(DEFAULT_COMMAND_SPEED_PERCENT)
+        try:
+            value = int(round(float(speed_percent)))
+        except Exception:
+            return int(DEFAULT_COMMAND_SPEED_PERCENT)
+        return int(max(1, min(100, value)))
+
+    @staticmethod
+    def _speed_scale(speed_percent: int | float | None) -> float:
+        return max(0.1, float(SoArmMoceController._normalize_speed_percent(speed_percent)) / 100.0)
+
+    def _auto_joint_motion_duration(
+        self,
+        *,
+        before_state: AttrDict,
+        target_deg_by_joint: Mapping[str, float],
+        speed_percent: int | float | None,
+    ) -> float:
+        if not target_deg_by_joint:
+            return 0.0
+        joint_state = getattr(before_state, "joint_state", {})
+        reference_step_deg = max(0.1, float(self.config.joint_step_deg))
+        max_delta_deg = 0.0
+        for joint_name, target_deg in target_deg_by_joint.items():
+            current_deg = float(joint_state[joint_name])
+            max_delta_deg = max(max_delta_deg, abs(float(target_deg) - current_deg))
+        if max_delta_deg <= 1e-9:
+            return 0.0
+        duration = (max_delta_deg / reference_step_deg) * (
+            float(DEFAULT_JOINT_REFERENCE_DURATION_S) / self._speed_scale(speed_percent)
+        )
+        return float(np.clip(duration, DEFAULT_JOINT_DURATION_MIN_S, DEFAULT_JOINT_DURATION_MAX_S))
+
+    def _resolve_joint_motion_duration(
+        self,
+        *,
+        before_state: AttrDict,
+        target_deg_by_joint: Mapping[str, float],
+        duration: float | None,
+        speed_percent: int | float | None,
+    ) -> tuple[float, str]:
+        if duration is not None:
+            return max(0.0, float(duration)), "override"
+        return self._auto_joint_motion_duration(
+            before_state=before_state,
+            target_deg_by_joint=target_deg_by_joint,
+            speed_percent=speed_percent,
+        ), "auto"
+
+    def _resolve_gripper_duration(
+        self,
+        *,
+        current_ratio: float | None,
+        target_ratio: float,
+        duration: float | None,
+        speed_percent: int | float | None,
+    ) -> tuple[float, str]:
+        if duration is not None:
+            return max(0.0, float(duration)), "override"
+        delta_ratio = abs(float(target_ratio) - float(current_ratio)) if current_ratio is not None else 1.0
+        if delta_ratio <= 1e-9:
+            return 0.0, "auto"
+        duration_value = float(delta_ratio) * (
+            float(DEFAULT_GRIPPER_REFERENCE_DURATION_S) / self._speed_scale(speed_percent)
+        )
+        duration_value = float(np.clip(duration_value, DEFAULT_GRIPPER_DURATION_MIN_S, DEFAULT_GRIPPER_DURATION_MAX_S))
+        return duration_value, "auto"
+
     def _append_sdk_debug_log(self, message: str) -> None:
         self.config.runtime_dir.mkdir(parents=True, exist_ok=True)
         path = self.config.runtime_dir / "sdk_multi_turn_debug.log"
@@ -1210,7 +1289,8 @@ class SoArmMoceController:
         targets_deg: Mapping[str, Any] | Iterable[Any],
         *,
         multi_turn_targets_continuous_raw: Mapping[str, Any] | None = None,
-        duration: float = 1.0,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
         trace: bool = False,
@@ -1250,12 +1330,23 @@ class SoArmMoceController:
             goal_raw_by_joint[joint_name] = int(goal_raw)
             start_relative_raw_by_joint[joint_name] = float(before_state["relative_raw_position"][joint_name])
 
+        resolved_duration, duration_source = self._resolve_joint_motion_duration(
+            before_state=before_state,
+            target_deg_by_joint=accepted_target_deg,
+            duration=duration,
+            speed_percent=speed_percent,
+        )
+        resolved_speed_percent = self._normalize_speed_percent(speed_percent)
+
         if trace:
             self._append_sdk_debug_log(
                 "[INFO] move_goal start "
                 f"target_joint_deg={json.dumps(accepted_target_deg, ensure_ascii=False, sort_keys=True)} "
                 f"target_multi_turn_continuous_raw={json.dumps({k: v for k, v in effective_relative_raw.items() if k in MULTI_TURN_JOINTS}, ensure_ascii=False, sort_keys=True)} "
                 f"before_joint_deg={json.dumps({joint_name: before_state['joint_state'][joint_name] for joint_name in accepted_target_deg}, ensure_ascii=False, sort_keys=True)} "
+                f"duration_sec={float(resolved_duration):.4f} "
+                f"duration_source={duration_source} "
+                f"speed_percent={resolved_speed_percent} "
                 f"bus_cmd={json.dumps(goal_raw_by_joint, ensure_ascii=False, sort_keys=True)}"
             )
 
@@ -1265,7 +1356,7 @@ class SoArmMoceController:
                 bus=bus,
                 start_relative_raw_by_joint=start_relative_raw_by_joint,
                 target_relative_raw_by_joint=effective_relative_raw,
-                duration=float(duration),
+                duration=float(resolved_duration),
             )
         if not interpolated:
             self._write_raw_goal_positions(bus, goal_raw_by_joint)
@@ -1275,7 +1366,12 @@ class SoArmMoceController:
                 self._last_multi_turn_goal_raw_mod[joint_name] = int(goal_raw)
 
         if wait:
-            wait_summary = self._wait_for_motion(bus, goal_raw_by_joint, duration=float(duration), timeout=timeout)
+            wait_summary = self._wait_for_motion(
+                bus,
+                goal_raw_by_joint,
+                duration=float(resolved_duration),
+                timeout=timeout,
+            )
             if not bool(wait_summary.get("settled", False)):
                 error_by_joint = dict(wait_summary.get("error_by_joint", {}))
                 present_raw_by_joint = dict(wait_summary.get("present_raw_by_joint", {}))
@@ -1302,6 +1398,9 @@ class SoArmMoceController:
             "action": "move_joints",
             "targets_deg": accepted_target_deg,
             "goal_raw": goal_raw_by_joint,
+            "duration_sec": float(resolved_duration),
+            "duration_source": str(duration_source),
+            "speed_percent": int(resolved_speed_percent),
             "state": state,
         }
 
@@ -1323,7 +1422,8 @@ class SoArmMoceController:
         joint: str,
         target_deg: float | None = None,
         delta_deg: float | None = None,
-        duration: float = 1.0,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
         trace: bool = False,
@@ -1339,7 +1439,8 @@ class SoArmMoceController:
         final_target_deg = float(target_deg) if target_deg is not None else base_deg + float(delta_deg)
         move_result = self.move_joints(
             {joint_name: final_target_deg},
-            duration=float(duration),
+            duration=duration,
+            speed_percent=speed_percent,
             wait=bool(wait),
             timeout=timeout,
             trace=trace,
@@ -1347,12 +1448,20 @@ class SoArmMoceController:
         move_result["target_deg"] = float(final_target_deg)
         return move_result
 
-    def home(self, *, duration: float = 1.0, wait: bool = True, timeout: float | None = None) -> dict[str, Any]:
+    def home(
+        self,
+        *,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
+        wait: bool = True,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         # Startup position is intentionally the runtime zero reference, so "home"
         # simply commands zero relative joint angle for every axis.
         result = self.move_joints(
             {joint_name: 0.0 for joint_name in JOINTS},
-            duration=float(duration),
+            duration=duration,
+            speed_percent=speed_percent,
             wait=bool(wait),
             timeout=timeout,
         )
@@ -1390,7 +1499,8 @@ class SoArmMoceController:
         *,
         q0: Iterable[Any] | None = None,
         seed_policy: str = "current",
-        duration: float = 1.0,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
         trace: bool = False,
@@ -1439,7 +1549,8 @@ class SoArmMoceController:
 
         move_result = self.move_joints(
             ik_result.q_user.tolist(),
-            duration=float(duration),
+            duration=duration,
+            speed_percent=speed_percent,
             wait=bool(wait),
             timeout=timeout,
             trace=trace,
@@ -1472,7 +1583,8 @@ class SoArmMoceController:
         rpy: Iterable[Any] | None = None,
         *,
         frame: str = "base",
-        duration: float = 1.0,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
         trace: bool = False,
@@ -1488,7 +1600,8 @@ class SoArmMoceController:
                 dry=float(delta_rpy[1]),
                 drz=float(delta_rpy[2]),
                 frame="tool",
-                duration=float(duration),
+                duration=duration,
+                speed_percent=speed_percent,
                 wait=bool(wait),
                 timeout=timeout,
                 trace=trace,
@@ -1497,7 +1610,8 @@ class SoArmMoceController:
         return self.move_pose(
             xyz=[float(x), float(y), float(z)],
             rpy=rpy,
-            duration=float(duration),
+            duration=duration,
+            speed_percent=speed_percent,
             wait=bool(wait),
             timeout=timeout,
             trace=trace,
@@ -1513,7 +1627,8 @@ class SoArmMoceController:
         dry: float = 0.0,
         drz: float = 0.0,
         frame: str = "base",
-        duration: float = 1.0,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
         trace: bool = False,
@@ -1559,7 +1674,8 @@ class SoArmMoceController:
         result = self.move_pose(
             xyz=target_xyz.tolist(),
             rpy=target_rpy.tolist() if should_constrain_orientation else None,
-            duration=float(duration),
+            duration=duration,
+            speed_percent=speed_percent,
             wait=bool(wait),
             timeout=timeout,
             trace=trace,
@@ -1638,31 +1754,76 @@ class SoArmMoceController:
         self,
         *,
         open_ratio: float = 1.0,
-        duration: float = 1.0,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
     ) -> dict[str, Any]:
+        current_ratio = None
+        try:
+            state_before = self.get_gripper_state()
+            if state_before is not None:
+                value = state_before.get("open_ratio")
+                current_ratio = None if value is None else float(value)
+        except Exception:
+            current_ratio = None
+        resolved_duration, duration_source = self._resolve_gripper_duration(
+            current_ratio=current_ratio,
+            target_ratio=float(open_ratio),
+            duration=duration,
+            speed_percent=speed_percent,
+        )
+        resolved_speed_percent = self._normalize_speed_percent(speed_percent)
         goal_raw = self._open_ratio_to_gripper_goal_raw(open_ratio)
         self.write_gripper_raw(goal_raw)
         settled = None
         if wait:
-            effective_timeout = timeout if timeout is not None else max(float(duration) * 2.0, 0.5)
+            effective_timeout = timeout if timeout is not None else max(float(resolved_duration) * 2.0, 0.5)
             settled = self._wait_for_gripper_settled(goal_raw=goal_raw, timeout=effective_timeout)
         state = self.get_state()
         return {
             "action": "set_gripper",
             "goal_open_ratio": float(min(1.0, max(0.0, float(open_ratio)))),
             "goal_raw": int(goal_raw),
+            "duration_sec": float(resolved_duration),
+            "duration_source": str(duration_source),
+            "speed_percent": int(resolved_speed_percent),
             "wait": bool(wait),
             "settled": settled,
             "state": state,
         }
 
-    def open_gripper(self, *, duration: float = 1.0, wait: bool = True, timeout: float | None = None) -> dict[str, Any]:
-        return self.set_gripper(open_ratio=1.0, duration=duration, wait=wait, timeout=timeout)
+    def open_gripper(
+        self,
+        *,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
+        wait: bool = True,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return self.set_gripper(
+            open_ratio=1.0,
+            duration=duration,
+            speed_percent=speed_percent,
+            wait=wait,
+            timeout=timeout,
+        )
 
-    def close_gripper(self, *, duration: float = 1.0, wait: bool = True, timeout: float | None = None) -> dict[str, Any]:
-        return self.set_gripper(open_ratio=0.0, duration=duration, wait=wait, timeout=timeout)
+    def close_gripper(
+        self,
+        *,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
+        wait: bool = True,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return self.set_gripper(
+            open_ratio=0.0,
+            duration=duration,
+            speed_percent=speed_percent,
+            wait=wait,
+            timeout=timeout,
+        )
 
     def meta(self) -> AttrDict:
         startup_raw = {

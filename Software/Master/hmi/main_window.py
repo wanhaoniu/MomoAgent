@@ -1052,7 +1052,7 @@ class ArmControlGUI(QMainWindow):
     def _execute_sdk_joint_step(self, command: Dict[str, Any]) -> object:
         idx = int(command["joint_index"])
         delta = float(command["delta"])
-        duration = float(command["duration"])
+        speed_percent = int(command.get("speed_percent", self.speed_percent))
         if idx < 0:
             raise ValueError("Joint index must be non-negative")
 
@@ -1078,15 +1078,20 @@ class ArmControlGUI(QMainWindow):
                 raise ValueError(f"Joint index {idx} out of range")
             lo, hi = robot.robot_model.joint_limits[idx]
             q_target[idx] = float(np.clip(q_target[idx] + delta, float(lo), float(hi)))
-            robot.move_joints(q_target, duration=duration, wait=True)
+            robot.move_joints(
+                q_target,
+                speed_percent=speed_percent,
+                wait=True,
+            )
             return robot.get_state()
 
     def _execute_sdk_cartesian_jog(self, command: Dict[str, Any]) -> object:
         key_norm = str(command["key"]).strip().upper()
         step_mm = float(command.get("step_mm", 1.0))
         step_rad = float(command.get("step_rad", math.radians(1.0)))
-        duration = float(command.get("duration", 0.2))
         frame = "tool" if bool(command.get("use_tool", False)) else "base"
+        duration = command.get("duration")
+        speed_percent = int(command.get("speed_percent", self.speed_percent))
         delta_kwargs = {
             "dx": 0.0,
             "dy": 0.0,
@@ -1118,19 +1123,29 @@ class ArmControlGUI(QMainWindow):
 
         with self._sdk_lock:
             robot = self._sdk_get_robot()
-            robot.move_delta(
-                frame=frame,
-                duration=duration,
-                wait=wait_motion,
+            move_kwargs = {
+                "frame": frame,
+                "speed_percent": speed_percent,
+                "wait": wait_motion,
                 **delta_kwargs,
-            )
+            }
+            if duration is not None:
+                move_kwargs["duration"] = float(duration)
+            robot.move_delta(**move_kwargs)
             return robot.get_state()
 
     def _execute_sdk_home(self, command: Dict[str, Any]) -> object:
-        duration = float(command["duration"])
+        duration = command.get("duration")
+        speed_percent = int(command.get("speed_percent", self.speed_percent))
         with self._sdk_lock:
             robot = self._sdk_get_robot()
-            robot.home(duration=duration, wait=True)
+            home_kwargs = {
+                "speed_percent": speed_percent,
+                "wait": True,
+            }
+            if duration is not None:
+                home_kwargs["duration"] = float(duration)
+            robot.home(**home_kwargs)
             return robot.get_state()
 
     def _execute_sdk_stop(self) -> object:
@@ -1192,15 +1207,13 @@ class ArmControlGUI(QMainWindow):
             return
         step_deg = max(0.1, float(self.quick_page.step_angle_spin.value()))
         delta = math.radians(step_deg) * float(direction)
-        speed_scale = max(0.1, float(self.speed_percent) / 100.0)
-        duration = float(np.clip(0.20 / speed_scale, 0.08, 0.60))
         self._enqueue_sdk_command(
             {
                 "kind": "joint_step",
                 "source": "joint:step",
                 "joint_index": int(idx),
                 "delta": float(delta),
-                "duration": duration,
+                "speed_percent": int(self.speed_percent),
             },
             drop_kinds=("stop",),
         )
@@ -1411,19 +1424,23 @@ class ArmControlGUI(QMainWindow):
         if is_continuous:
             duration = float(np.clip(0.15 / speed_scale, 0.08, 0.5))
         else:
-            duration = float(np.clip(0.20 / speed_scale, 0.08, 0.60))
+            duration = None
+
+        command = {
+            "kind": "cartesian_jog",
+            "source": f"jog:{key_norm}",
+            "key": key_norm,
+            "step_mm": float(step_mm),
+            "step_rad": float(step_rad),
+            "use_tool": bool(use_tool),
+            "speed_percent": int(self.speed_percent),
+            "wait_motion": not is_continuous,
+        }
+        if duration is not None:
+            command["duration"] = float(duration)
 
         self._enqueue_sdk_command(
-            {
-                "kind": "cartesian_jog",
-                "source": f"jog:{key_norm}",
-                "key": key_norm,
-                "step_mm": float(step_mm),
-                "step_rad": float(step_rad),
-                "use_tool": bool(use_tool),
-                "duration": duration,
-                "wait_motion": not is_continuous,
-            },
+            command,
             drop_kinds=("cartesian_jog", "stop") if is_continuous else ("stop",),
         )
 
@@ -1431,9 +1448,13 @@ class ArmControlGUI(QMainWindow):
         self._on_quick_jog_released(enqueue_stop=False)
         try:
             robot = self._sdk_get_robot()
-            speed_scale = max(0.1, float(self.speed_percent) / 100.0)
-            duration_val = float(duration) if duration is not None else float(np.clip(1.8 / speed_scale, 0.5, 5.0))
-            robot.home(duration=duration_val, wait=True)
+            home_kwargs = {
+                "speed_percent": int(self.speed_percent),
+                "wait": True,
+            }
+            if duration is not None:
+                home_kwargs["duration"] = float(duration)
+            robot.home(**home_kwargs)
             state_after = robot.get_state()
             self._sync_sim_from_sdk_state(state_after)
             self._sdk_last_gui_sync_ts = time.time()
@@ -1448,15 +1469,14 @@ class ArmControlGUI(QMainWindow):
     def _enqueue_sdk_home(self, duration: Optional[float] = None, source: str = "home"):
         self._on_quick_jog_released(enqueue_stop=False)
         self._clear_pending_sdk_commands()
-        speed_scale = max(0.1, float(self.speed_percent) / 100.0)
-        duration_val = float(duration) if duration is not None else float(np.clip(1.8 / speed_scale, 0.5, 5.0))
-        self._enqueue_sdk_command(
-            {
-                "kind": "home",
-                "source": f"home:{source}",
-                "duration": duration_val,
-            }
-        )
+        command = {
+            "kind": "home",
+            "source": f"home:{source}",
+            "speed_percent": int(self.speed_percent),
+        }
+        if duration is not None:
+            command["duration"] = float(duration)
+        self._enqueue_sdk_command(command)
 
     def _on_quick_origin(self):
         self._enqueue_sdk_home(source="origin")

@@ -1,57 +1,57 @@
 {
-  "saved_at": "2026-04-21 22:26:58",
+  "saved_at": "2026-04-21 22:43:21",
   "pose_count": 2,
   "poses": [
     {
       "index": 1,
       "joint_targets_deg": {
-        "shoulder_pan": -51.767578125,
-        "shoulder_lift": 0.01658313679245283,
-        "elbow_flex": 0.0,
+        "shoulder_pan": -57.216796875,
+        "shoulder_lift": 27.677255306603776,
+        "elbow_flex": 0.015694754464285716,
         "wrist_flex": -0.0,
         "wrist_roll": 0.0
       },
       "tcp_pose": {
         "xyz": [
-          0.2057945877313614,
-          -0.18750855326652527,
-          0.25831425189971924
+          0.247498020529747,
+          -0.18138468265533447,
+          0.12732622027397156
         ],
         "rpy": [
-          1.5710858706740418,
-          3.6606916040764096e-06,
-          0.9322147192430442
+          2.0541295362168928,
+          5.417925301314102e-06,
+          1.0273219265634272
         ]
       },
       "raw_present_position": {
-        "shoulder_pan": 2369,
-        "shoulder_lift": 910,
-        "elbow_flex": 2208,
-        "wrist_flex": 381,
+        "shoulder_pan": 1730,
+        "shoulder_lift": 707,
+        "elbow_flex": 723,
+        "wrist_flex": 594,
         "wrist_roll": 3723
       },
       "register_56_signed": {
-        "shoulder_lift": 910,
-        "elbow_flex": 2208,
+        "shoulder_lift": 707,
+        "elbow_flex": 723,
         "wrist_roll": 3723
       },
       "multi_turn_state": {
         "shoulder_lift": {
-          "startup_raw": 911,
-          "current_raw": 910,
-          "continuous_raw": -1,
-          "relative_raw": -1,
-          "motor_deg": -0.087890625,
-          "joint_deg": 0.01658313679245283,
+          "startup_raw": 2376,
+          "current_raw": 707,
+          "continuous_raw": -1669,
+          "relative_raw": -1669,
+          "motor_deg": -146.689453125,
+          "joint_deg": 27.677255306603776,
           "goal_raw": null
         },
         "elbow_flex": {
-          "startup_raw": 2208,
-          "current_raw": 2208,
-          "continuous_raw": 0,
-          "relative_raw": 0,
-          "motor_deg": 0.0,
-          "joint_deg": 0.0,
+          "startup_raw": 722,
+          "current_raw": 723,
+          "continuous_raw": 1,
+          "relative_raw": 1,
+          "motor_deg": 0.087890625,
+          "joint_deg": 0.015694754464285716,
           "goal_raw": null
         },
         "wrist_roll": {
@@ -69,68 +69,68 @@
         "present_raw": null
       },
       "replay_joint_targets_deg": {
-        "shoulder_pan": -51.767578125,
-        "shoulder_lift": 0.01658313679245283,
-        "elbow_flex": 0.0,
+        "shoulder_pan": -57.216796875,
+        "shoulder_lift": 27.677255306603776,
+        "elbow_flex": 0.015694754464285716,
         "wrist_flex": -0.0,
         "wrist_roll": 0.0
       },
       "replay_multi_turn_continuous_raw": {
-        "shoulder_lift": -1.0,
-        "elbow_flex": 0.0,
+        "shoulder_lift": -1669.0,
+        "elbow_flex": 1.0,
         "wrist_roll": 0.0
       }
     },
     {
       "index": 2,
       "joint_targets_deg": {
-        "shoulder_pan": 13.18359375,
-        "shoulder_lift": 0.01658313679245283,
-        "elbow_flex": -37.62032645089286,
-        "wrist_flex": -0.087890625,
+        "shoulder_pan": 5.009765625,
+        "shoulder_lift": 27.677255306603776,
+        "elbow_flex": 0.015694754464285716,
+        "wrist_flex": -0.0,
         "wrist_roll": 0.0
       },
       "tcp_pose": {
         "xyz": [
-          -0.06784309446811676,
-          -0.2517338991165161,
-          0.3886714279651642
+          -0.03893522545695305,
+          -0.332976371049881,
+          0.12732622027397156
         ],
         "rpy": [
-          0.9129531789532567,
-          1.4180683631797342e-06,
-          -0.20139636295072652
+          2.0541298063173015,
+          5.38594543422583e-06,
+          -0.05873648965561674
         ]
       },
       "raw_present_position": {
-        "shoulder_pan": 3108,
-        "shoulder_lift": 910,
-        "elbow_flex": -189,
-        "wrist_flex": 382,
+        "shoulder_pan": 2438,
+        "shoulder_lift": 707,
+        "elbow_flex": 723,
+        "wrist_flex": 594,
         "wrist_roll": 3723
       },
       "register_56_signed": {
-        "shoulder_lift": 910,
-        "elbow_flex": -189,
+        "shoulder_lift": 707,
+        "elbow_flex": 723,
         "wrist_roll": 3723
       },
       "multi_turn_state": {
         "shoulder_lift": {
-          "startup_raw": 911,
-          "current_raw": 910,
-          "continuous_raw": -1,
-          "relative_raw": -1,
-          "motor_deg": -0.087890625,
-          "joint_deg": 0.01658313679245283,
+          "startup_raw": 2376,
+          "current_raw": 707,
+          "continuous_raw": -1669,
+          "relative_raw": -1669,
+          "motor_deg": -146.689453125,
+          "joint_deg": 27.677255306603776,
           "goal_raw": null
         },
         "elbow_flex": {
-          "startup_raw": 2208,
-          "current_raw": -189,
-          "continuous_raw": -2397,
-          "relative_raw": -2397,
-          "motor_deg": -210.673828125,
-          "joint_deg": -37.62032645089286,
+          "startup_raw": 722,
+          "current_raw": 723,
+          "continuous_raw": 1,
+          "relative_raw": 1,
+          "motor_deg": 0.087890625,
+          "joint_deg": 0.015694754464285716,
           "goal_raw": null
         },
         "wrist_roll": {
@@ -148,15 +148,15 @@
         "present_raw": null
       },
       "replay_joint_targets_deg": {
-        "shoulder_pan": 13.18359375,
-        "shoulder_lift": 0.01658313679245283,
-        "elbow_flex": -37.62032645089286,
-        "wrist_flex": -0.087890625,
+        "shoulder_pan": 5.009765625,
+        "shoulder_lift": 27.677255306603776,
+        "elbow_flex": 0.015694754464285716,
+        "wrist_flex": -0.0,
         "wrist_roll": 0.0
       },
       "replay_multi_turn_continuous_raw": {
-        "shoulder_lift": -1.0,
-        "elbow_flex": -2397.0,
+        "shoulder_lift": -1669.0,
+        "elbow_flex": 1.0,
         "wrist_roll": 0.0
       }
     }

@@ -63,11 +63,18 @@ class CompatibleRuntimeRobot:
         self,
         targets_deg,
         *,
-        duration: float = 1.0,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        return self._controller.move_joints(targets_deg, duration=duration, wait=wait, timeout=timeout)
+        return self._controller.move_joints(
+            targets_deg,
+            duration=duration,
+            speed_percent=speed_percent,
+            wait=wait,
+            timeout=timeout,
+        )
 
     def move_joint(
         self,
@@ -75,7 +82,8 @@ class CompatibleRuntimeRobot:
         joint: str,
         target_deg: float | None = None,
         delta_deg: float | None = None,
-        duration: float = 1.0,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
     ) -> dict[str, Any]:
@@ -84,6 +92,7 @@ class CompatibleRuntimeRobot:
             target_deg=target_deg,
             delta_deg=delta_deg,
             duration=duration,
+            speed_percent=speed_percent,
             wait=wait,
             timeout=timeout,
         )
@@ -94,7 +103,8 @@ class CompatibleRuntimeRobot:
         joint: str,
         target_deg: float | None = None,
         delta_deg: float | None = None,
-        duration: float = 1.0,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
     ) -> np.ndarray:
@@ -103,6 +113,7 @@ class CompatibleRuntimeRobot:
             target_deg=target_deg,
             delta_deg=delta_deg,
             duration=duration,
+            speed_percent=speed_percent,
             wait=wait,
             timeout=timeout,
         )
@@ -118,7 +129,8 @@ class CompatibleRuntimeRobot:
         dry: float = 0.0,
         drz: float = 0.0,
         frame: str = "base",
-        duration: float = 1.0,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
     ) -> dict[str, Any]:
@@ -131,6 +143,7 @@ class CompatibleRuntimeRobot:
             drz=drz,
             frame=frame,
             duration=duration,
+            speed_percent=speed_percent,
             wait=wait,
             timeout=timeout,
         )
@@ -142,8 +155,20 @@ class CompatibleRuntimeRobot:
         result = self._controller.move_tcp(*args, **kwargs)
         return np.asarray(result["state"]["joint_state"]["q"], dtype=float).reshape(-1)
 
-    def home(self, *, duration: float = 1.0, wait: bool = True, timeout: float | None = None) -> dict[str, Any]:
-        return self._controller.home(duration=duration, wait=wait, timeout=timeout)
+    def home(
+        self,
+        *,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
+        wait: bool = True,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return self._controller.home(
+            duration=duration,
+            speed_percent=speed_percent,
+            wait=wait,
+            timeout=timeout,
+        )
 
     def stop(self) -> dict[str, Any]:
         return self._controller.stop()
@@ -152,22 +177,48 @@ class CompatibleRuntimeRobot:
         self,
         *,
         open_ratio: float = 1.0,
-        duration: float = 1.0,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
     ) -> dict[str, Any]:
         return self._controller.set_gripper(
             open_ratio=open_ratio,
             duration=duration,
+            speed_percent=speed_percent,
             wait=wait,
             timeout=timeout,
         )
 
-    def open_gripper(self, *, duration: float = 1.0, wait: bool = True, timeout: float | None = None) -> dict[str, Any]:
-        return self._controller.open_gripper(duration=duration, wait=wait, timeout=timeout)
+    def open_gripper(
+        self,
+        *,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
+        wait: bool = True,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return self._controller.open_gripper(
+            duration=duration,
+            speed_percent=speed_percent,
+            wait=wait,
+            timeout=timeout,
+        )
 
-    def close_gripper(self, *, duration: float = 1.0, wait: bool = True, timeout: float | None = None) -> dict[str, Any]:
-        return self._controller.close_gripper(duration=duration, wait=wait, timeout=timeout)
+    def close_gripper(
+        self,
+        *,
+        duration: float | None = None,
+        speed_percent: int | float | None = None,
+        wait: bool = True,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return self._controller.close_gripper(
+            duration=duration,
+            speed_percent=speed_percent,
+            wait=wait,
+            timeout=timeout,
+        )
 
     def _resolve_home_q(self) -> np.ndarray:
         return np.zeros(len(JOINTS), dtype=float)

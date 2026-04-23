@@ -8,6 +8,7 @@
   const VOICE_FINAL_DEBOUNCE_MS = 900;
   const VOICE_LISTEN_RESUME_DELAY_MS = 420;
   const TTS_PLAYBACK_TAIL_PAD_MS = 260;
+  const VOICE_INTERRUPT_SETTLE_MS = 520;
   const MOTION_START_PAYLOAD = {
     pan_joint: "shoulder_pan",
     tilt_joint: "elbow_flex",
@@ -165,9 +166,14 @@
     return "等待开局";
   }
 
+  function ttsCancellationReason(error) {
+    return String((error && error.message) || error || "").trim().toLowerCase();
+  }
+
   function isTtsCancellationError(error) {
-    const message = String((error && error.message) || error || "").trim().toLowerCase();
+    const message = ttsCancellationReason(error);
     return [
+      "voice_mode_interrupt",
       "voice_mode_start",
       "voice_mode_disabled",
       "round_restart",
@@ -196,6 +202,13 @@
       window.localStorage.setItem(key, value);
     } catch (_error) {
     }
+  }
+
+  function delay(ms) {
+    const waitMs = Math.max(0, Number(ms || 0));
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, waitMs);
+    });
   }
 
   function isLoopbackHost(hostname) {
@@ -744,6 +757,28 @@
     runtime.ttsNextStartTime = 0;
   }
 
+  async function interruptSpeakingAndStartVoiceMode() {
+    const isSpeaking = String(runtime.voicePhase || "").trim().toLowerCase() === "speaking";
+    if (!isSpeaking) {
+      await enableVoiceMode();
+      return;
+    }
+
+    runtime.voiceModeActive = false;
+    clearVoiceDebounceTimer();
+    clearVoiceRestartTimer();
+    stopCurrentTtsPlayback("voice_mode_interrupt");
+    resetVoicePendingSegments();
+    runtime.voiceLastUtterance = "";
+    updateUserSpeechOverlay();
+    setVoicePhase("idle");
+    setStatus("已打断播报，正在准备录音...");
+    log("已打断当前播报，准备开始新一轮录音。");
+
+    await delay(VOICE_INTERRUPT_SETTLE_MS);
+    await enableVoiceMode();
+  }
+
   function decodePcm16Base64ToFloat32(base64Value) {
     const raw = String(base64Value || "").trim();
     if (!raw) {
@@ -1043,6 +1078,10 @@
       setStatus("这一轮语音问答已结束，可以开始下一次录音。");
       return true;
     } catch (error) {
+      if (isTtsCancellationError(error)) {
+        log(`语音播报已取消：${ttsCancellationReason(error) || "unknown"}`);
+        return false;
+      }
       if (turnSerial !== runtime.voiceTurnSerial) {
         return false;
       }
@@ -1113,8 +1152,15 @@
         log(`${label}难度题面已播报，等待点击开始录音。`);
       }
     } catch (error) {
-      if (isTtsCancellationError(error) && runtime.voiceModeActive) {
-        log(`${label}难度开场播报已被手动打断，已切到录音状态。`);
+      if (isTtsCancellationError(error)) {
+        const reason = ttsCancellationReason(error);
+        if (reason === "voice_mode_interrupt" || reason === "voice_mode_start") {
+          log(`${label}难度开场播报已被手动打断，正在切到录音状态。`);
+        } else if (reason === "round_restart") {
+          log(`${label}难度开场播报已被新的难度选择覆盖。`);
+        } else {
+          log(`${label}难度开场播报已取消：${reason || "unknown"}`);
+        }
         return;
       }
       setVoicePhase("error");
@@ -1780,6 +1826,7 @@
       fallbackTitle: "视频不可用",
       fallbackBody: "当前视频还没准备好。",
       onEnded: null,
+      onUnavailable: null,
       ...options,
     };
 
@@ -1794,8 +1841,11 @@
     const token = ++runtime.playToken;
     hideFallback();
     elements.sceneVideo.pause();
+    elements.sceneVideo.autoplay = true;
+    elements.sceneVideo.defaultMuted = true;
     elements.sceneVideo.loop = Boolean(settings.loop);
     elements.sceneVideo.muted = true;
+    elements.sceneVideo.volume = 0;
     elements.sceneVideo.playsInline = true;
     elements.sceneVideo.src = url;
     elements.sceneVideo.load();
@@ -1809,8 +1859,16 @@
       }
     };
 
-    elements.sceneVideo.onerror = () => {
+    elements.sceneVideo.onerror = async () => {
       if (token !== runtime.playToken) {
+        return;
+      }
+      if (typeof settings.onUnavailable === "function") {
+        await settings.onUnavailable({
+          kind: "media_error",
+          url,
+          message: `视频加载失败：${url}`,
+        });
         return;
       }
       showFallback(settings.fallbackTitle, settings.fallbackBody);
@@ -1820,6 +1878,21 @@
     try {
       await elements.sceneVideo.play();
     } catch (error) {
+      if (token !== runtime.playToken) {
+        return;
+      }
+      if (String((error && error.name) || "").trim() === "AbortError") {
+        log(`视频切换已被新的片段接管：${url}`);
+        return;
+      }
+      if (typeof settings.onUnavailable === "function") {
+        await settings.onUnavailable({
+          kind: "play_rejected",
+          url,
+          message: String((error && error.message) || error || "视频播放失败").trim(),
+        });
+        return;
+      }
       showFallback(
         settings.fallbackTitle,
         `${settings.fallbackBody} 浏览器阻止了自动播放，请点右上角“沉浸模式”后再试一次。`,
@@ -1835,8 +1908,22 @@
       loop: true,
       status: "角色已入戏，等待下一次切换。",
       fallbackTitle: "等待默认角色视频",
-      fallbackBody: "没有检测到 default.mp4。请把默认表情视频放到 runtime/media 目录里。",
+      fallbackBody: "默认角色视频暂时还播不起来。请先确认 `default.mp4` 或 `begin.mp4` 能在浏览器里正常打开。",
     });
+  }
+
+  async function fallbackToDefaultLoop(sceneState, message) {
+    const detail = String(message || "").trim();
+    if (detail) {
+      log(detail);
+      setStatus(detail);
+    }
+    try {
+      await playDefaultLoop(sceneState);
+    } catch (error) {
+      log(`回退默认角色视频失败：${error.message}`);
+      throw error;
+    }
   }
 
   async function playIntro(url) {
@@ -1851,9 +1938,15 @@
       loop: false,
       status: "片头播放中...",
       fallbackTitle: "片头暂不可用",
-      fallbackBody: "没有检测到 begin.mp4，已经回退到默认角色视频。",
+      fallbackBody: "片头暂时播不起来，正在回退到默认角色视频。",
       onEnded: () => {
         playDefaultLoop(runtime.latestSceneState);
+      },
+      onUnavailable: async (reason) => {
+        await fallbackToDefaultLoop(
+          runtime.latestSceneState,
+          `片头播放失败，已回退到默认角色视频。${reason && reason.message ? ` ${reason.message}` : ""}`.trim(),
+        );
       },
     });
   }
@@ -1887,11 +1980,17 @@
         loop: shouldLoop,
         status: "切换到点头反馈。",
         fallbackTitle: "点头表情未就绪",
-        fallbackBody: "没有检测到 nod.mp4，已经回退到默认角色视频。",
+        fallbackBody: "点头表情暂时播不起来，正在回退到默认角色视频。",
         onEnded: () => {
           if (!shouldLoop) {
             playDefaultLoop(sceneState);
           }
+        },
+        onUnavailable: async (reason) => {
+          await fallbackToDefaultLoop(
+            sceneState,
+            `点头片段播放失败，已回退到默认角色视频。${reason && reason.message ? ` ${reason.message}` : ""}`.trim(),
+          );
         },
       });
       return;
@@ -1903,11 +2002,17 @@
         loop: shouldLoop,
         status: "切换到摇头反馈。",
         fallbackTitle: "摇头表情未就绪",
-        fallbackBody: "没有检测到 shake.mp4，已经回退到默认角色视频。",
+        fallbackBody: "摇头表情暂时播不起来，正在回退到默认角色视频。",
         onEnded: () => {
           if (!shouldLoop) {
             playDefaultLoop(sceneState);
           }
+        },
+        onUnavailable: async (reason) => {
+          await fallbackToDefaultLoop(
+            sceneState,
+            `摇头片段播放失败，已回退到默认角色视频。${reason && reason.message ? ` ${reason.message}` : ""}`.trim(),
+          );
         },
       });
       return;
@@ -1919,11 +2024,17 @@
         loop: shouldLoop,
         status: "结束片段播放中。",
         fallbackTitle: "结束片段未就绪",
-        fallbackBody: "没有检测到 end.mp4，已经回退到默认角色视频。",
+        fallbackBody: "结束片段暂时播不起来，正在回退到默认角色视频。",
         onEnded: () => {
           if (!shouldLoop) {
             playDefaultLoop(sceneState);
           }
+        },
+        onUnavailable: async (reason) => {
+          await fallbackToDefaultLoop(
+            sceneState,
+            `结束片段播放失败，已回退到默认角色视频。${reason && reason.message ? ` ${reason.message}` : ""}`.trim(),
+          );
         },
       });
       return;
@@ -2218,6 +2329,10 @@
       elements.voiceModeButton.addEventListener("click", async () => {
         try {
           if (runtime.roundStartPending) {
+            return;
+          }
+          if (runtime.voicePhase === "speaking") {
+            await interruptSpeakingAndStartVoiceMode();
             return;
           }
           if (runtime.voiceModeActive) {
