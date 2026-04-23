@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>海龟汤 | MomoAgent Scene</title>
-  <link rel="stylesheet" href="./styles.css?v=20260416e" />
+  <link rel="stylesheet" href="./styles.css?v=20260421voice6" />
 </head>
 <body>
   <div class="app-shell">
@@ -20,6 +20,9 @@
       </div>
 
       <div class="hud-actions">
+        <button id="difficultyButton" class="ghost-button difficulty-button" type="button">选择难度</button>
+        <button id="voiceModeButton" class="solid-button voice-button" type="button">开始录音</button>
+        <span id="voiceModeBadge" class="micro-badge">等待录音</span>
         <button id="fullscreenButton" class="ghost-button" type="button">沉浸模式</button>
         <button id="consoleToggleButton" class="solid-button" type="button">控制台</button>
       </div>
@@ -59,10 +62,61 @@
 
       <div class="scene-pill sync-pill" id="syncBadge">同步中</div>
 
+      <div id="riddleCard" class="riddle-card">
+        <div class="riddle-card-header">
+          <span class="riddle-card-kicker">当前谜题</span>
+          <span id="riddleStatusBadge" class="micro-badge">等待开局</span>
+        </div>
+        <div id="riddleText" class="riddle-card-text"></div>
+      </div>
+
+      <div id="turnCard" class="turn-card">
+        <div class="turn-card-header">
+          <span class="turn-card-kicker">本轮问答</span>
+        </div>
+        <div class="turn-card-block">
+          <p class="turn-card-role">你问</p>
+          <div id="turnUserText" class="turn-card-text"></div>
+        </div>
+        <div class="turn-card-block">
+          <p class="turn-card-role">Agent 答</p>
+          <div id="turnAgentText" class="turn-card-text"></div>
+        </div>
+      </div>
+
+      <div id="userSpeechWrap" class="user-speech-wrap">
+        <span class="user-speech-label">本次录音</span>
+        <div id="userSpeechText" class="user-speech-box"></div>
+      </div>
+
       <div class="subtitle-wrap">
         <div id="subtitleText" class="subtitle-box"></div>
       </div>
     </main>
+
+    <div id="modePicker" class="mode-picker">
+      <div class="mode-picker-card">
+        <p class="mode-picker-kicker">Round Setup</p>
+        <h2>先选一局难度</h2>
+        <p id="modePickerHelpText" class="mode-picker-text">
+          进入后会由 Agent 先说题面。你听完后点击“开始录音”，就能开始和 Agent 对话。
+        </p>
+        <div class="mode-picker-grid">
+          <button class="mode-card" data-difficulty="easy" type="button">
+            <span class="mode-card-title">简单</span>
+            <span class="mode-card-body">线索更直观，比较适合先跑通整套语音流程。</span>
+          </button>
+          <button class="mode-card" data-difficulty="medium" type="button">
+            <span class="mode-card-title">中等</span>
+            <span class="mode-card-body">保留一点反转，需要多问几轮才能摸到真相。</span>
+          </button>
+          <button class="mode-card" data-difficulty="hard" type="button">
+            <span class="mode-card-title">困难</span>
+            <span class="mode-card-body">题面更迷惑，但依然要求自洽，适合挑战模式。</span>
+          </button>
+        </div>
+      </div>
+    </div>
 
     <aside id="consolePanel" class="console-panel">
       <div class="console-card">
@@ -99,6 +153,39 @@
           <p class="helper-text">
             这会调用 <code>POST /api/v1/haiguitang/agent/turn</code>，由后端统一完成 OpenClaw 对话、字幕切换、表情片段和点头/摇头动作。后面接 STT 时也可以直接复用这条接口。
           </p>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title-row">
+            <h3>实时 STT</h3>
+            <span id="sttStateBadge" class="micro-badge">未连接</span>
+          </div>
+          <p class="helper-text">
+            浏览器会采集麦克风音频，转成 <code>16kHz / mono / PCM</code>，通过 <code>WS /api/v1/ws/stt</code> 转发到 AWS Transcribe。这里只做调试，不会把 AWS 密钥暴露给网页。
+          </p>
+          <label class="field-label" for="audioInputSelect">麦克风输入</label>
+          <div class="inline-field">
+            <select id="audioInputSelect"></select>
+            <button id="audioInputRefreshButton" class="ghost-button compact" type="button">刷新设备</button>
+          </div>
+          <p id="audioInputHintText" class="helper-text">
+            现在默认只会用浏览器当前默认麦克风。你可以在这里明确选 AirPods。
+          </p>
+          <div class="action-row">
+            <button id="sttStartButton" class="solid-button" type="button">开始听写</button>
+            <button id="sttStopButton" class="ghost-button" type="button" disabled>停止</button>
+            <button id="sttClearButton" class="ghost-button" type="button">清空</button>
+            <button id="sttUsePromptButton" class="ghost-button" type="button">填入 Agent</button>
+          </div>
+          <p id="sttMetaText" class="helper-text">等待连接 AWS 实时 STT。</p>
+          <div class="transcript-card">
+            <p class="transcript-label">最终结果</p>
+            <div id="sttFinalText" class="transcript-output">还没有转写结果。</div>
+          </div>
+          <div class="transcript-card transcript-card-live">
+            <p class="transcript-label">实时片段</p>
+            <div id="sttPartialText" class="transcript-output transcript-output-live">等待你开始说话。</div>
+          </div>
         </section>
 
         <section class="panel-section">
@@ -158,6 +245,6 @@
     </aside>
   </div>
 
-  <script src="./app.js?v=20260416e"></script>
+  <script src="./app.js?v=20260421voice6"></script>
 </body>
 </html>

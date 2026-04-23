@@ -1078,7 +1078,7 @@ class ArmControlGUI(QMainWindow):
                 raise ValueError(f"Joint index {idx} out of range")
             lo, hi = robot.robot_model.joint_limits[idx]
             q_target[idx] = float(np.clip(q_target[idx] + delta, float(lo), float(hi)))
-            robot.move_joints(q_target, duration=duration, wait=False)
+            robot.move_joints(q_target, duration=duration, wait=True)
             return robot.get_state()
 
     def _execute_sdk_cartesian_jog(self, command: Dict[str, Any]) -> object:
@@ -1114,13 +1114,14 @@ class ArmControlGUI(QMainWindow):
 
         field_name, sign, magnitude = key_map[key_norm]
         delta_kwargs[field_name] = float(sign) * float(magnitude)
+        wait_motion = bool(command.get("wait_motion", False))
 
         with self._sdk_lock:
             robot = self._sdk_get_robot()
             robot.move_delta(
                 frame=frame,
                 duration=duration,
-                wait=False,
+                wait=wait_motion,
                 **delta_kwargs,
             )
             return robot.get_state()
@@ -1129,7 +1130,7 @@ class ArmControlGUI(QMainWindow):
         duration = float(command["duration"])
         with self._sdk_lock:
             robot = self._sdk_get_robot()
-            robot.home(duration=duration, wait=False)
+            robot.home(duration=duration, wait=True)
             return robot.get_state()
 
     def _execute_sdk_stop(self) -> object:
@@ -1421,6 +1422,7 @@ class ArmControlGUI(QMainWindow):
                 "step_rad": float(step_rad),
                 "use_tool": bool(use_tool),
                 "duration": duration,
+                "wait_motion": not is_continuous,
             },
             drop_kinds=("cartesian_jog", "stop") if is_continuous else ("stop",),
         )
@@ -1873,10 +1875,7 @@ class ArmControlGUI(QMainWindow):
         with self._sdk_lock:
             try:
                 robot = self._sdk_build_robot(primary_cfg)
-                try:
-                    robot.connect(passive=True)
-                except TypeError:
-                    robot.connect()
+                robot.connect()
                 transport_name = self._sdk_transport_name(robot).lower()
                 mode = "simulation" if "mock" in transport_name else "connected"
                 self._sdk_set_runtime_state(mode, robot=robot, config_path=primary_cfg)

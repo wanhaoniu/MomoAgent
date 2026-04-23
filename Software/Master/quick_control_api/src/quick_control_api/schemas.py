@@ -134,3 +134,7 @@ class HaiGuiTangSceneStateRequest(BaseModel):
 
 class HaiGuiTangAgentTurnRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
+
+
+class HaiGuiTangRoundStartRequest(BaseModel):
+    difficulty: Literal["easy", "medium", "hard"] = "medium"

@@ -6,8 +6,8 @@ import time
 from dataclasses import replace
 from typing import Optional
 
+from .agent_client import AgentReply, build_agent_client
 from .config import MomoAgentConfig, load_config
-from .openclaw_client import OpenClawReply, build_openclaw_client
 from .speech import audio_input_unavailable_message, record_until_enter, speak_text, transcribe_audio
 
 
@@ -18,12 +18,15 @@ def _join_text(parts: list[str]) -> str:
 class MomoAgentApp:
     def __init__(self, config: MomoAgentConfig) -> None:
         self._config = config
-        self._openclaw = build_openclaw_client(config.openclaw)
+        self._client = build_agent_client(config)
 
     def close(self) -> None:
-        self._openclaw.close()
+        self._client.close()
 
-    def _print_bridge_timing(self, reply: OpenClawReply) -> None:
+    def _backend_label(self) -> str:
+        return str(self._config.agent_backend or "openclaw").strip() or "openclaw"
+
+    def _print_bridge_timing(self, reply: AgentReply) -> None:
         payload = reply.raw_payload
         if not isinstance(payload, dict):
             return
@@ -38,7 +41,7 @@ class MomoAgentApp:
         history_ms = float(timing.get("history_ms", 0.0) or 0.0)
         total_ms = float(timing.get("total_ms", 0.0) or 0.0)
         print(
-            "[timing] openclaw-bridge "
+            "[timing] agent-bridge "
             f"accept={accept_ms/1000.0:.2f}s "
             f"wait={wait_ms/1000.0:.2f}s "
             f"history={history_ms/1000.0:.2f}s "
@@ -54,15 +57,15 @@ class MomoAgentApp:
         except Exception as exc:
             print(f"[tts] 播放失败: {exc}", flush=True)
 
-    def ask_text(self, text: str, speak: bool = True) -> OpenClawReply:
+    def ask_text(self, text: str, speak: bool = True) -> AgentReply:
         message = str(text or "").strip()
         if not message:
             raise RuntimeError("输入为空")
         started = time.perf_counter()
-        reply = self._openclaw.ask(message)
+        reply = self._client.ask(message)
         elapsed = time.perf_counter() - started
         print(f"[agent] {reply.text}", flush=True)
-        print(f"[timing] openclaw={elapsed:.2f}s", flush=True)
+        print(f"[timing] {self._backend_label()}={elapsed:.2f}s", flush=True)
         self._print_bridge_timing(reply)
         if speak:
             self._speak_reply(reply.text)
@@ -70,17 +73,17 @@ class MomoAgentApp:
 
     def warmup(self) -> None:
         started = time.perf_counter()
-        reply = self._openclaw.ask("请只回复“就绪”。")
+        reply = self._client.ask("请只回复“就绪”。")
         elapsed = time.perf_counter() - started
         print(f"[warmup] {reply.text}", flush=True)
-        print(f"[timing] warmup-openclaw={elapsed:.2f}s", flush=True)
+        print(f"[timing] warmup-{self._backend_label()}={elapsed:.2f}s", flush=True)
         self._print_bridge_timing(reply)
 
     def reset_session(self) -> None:
-        self._openclaw.reset_session()
-        print("[session] 已重置本地缓存的 OpenClaw session", flush=True)
+        self._client.reset_session()
+        print(f"[session] 已重置本地缓存的 {self._backend_label()} session", flush=True)
 
-    def run_voice_turn(self, speak: bool = True) -> OpenClawReply:
+    def run_voice_turn(self, speak: bool = True) -> AgentReply:
         started = time.perf_counter()
         wav_bytes = record_until_enter(self._config.audio)
         record_elapsed = time.perf_counter() - started
@@ -105,7 +108,7 @@ class MomoAgentApp:
 
     def run_shell(self) -> int:
         print("Momo Agent shell", flush=True)
-        print("输入自然语言会直接发给 OpenClaw。", flush=True)
+        print(f"输入自然语言会直接发给当前 agent backend: {self._backend_label()}", flush=True)
         print(
             "命令: /voice 录音一轮, /say 文本播报, /session 查看会话, /warmup 预热, /reset 重置会话, /quit 退出",
             flush=True,
@@ -127,8 +130,8 @@ class MomoAgentApp:
                 print("命令: /voice, /say <text>, /session, /warmup, /reset, /quit", flush=True)
                 continue
             if command == "/session":
-                session_id = str(self._openclaw.session_id or "").strip()
-                session_key = str(self._openclaw.bridge_session_key or "").strip()
+                session_id = str(self._client.session_id or "").strip()
+                session_key = str(self._client.bridge_session_key or "").strip()
                 print(
                     f"[session] current={session_id or '<empty>'} bridge_key={session_key or '<empty>'}",
                     flush=True,
@@ -192,7 +195,7 @@ class MomoAgentApp:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Lightweight voice/text OpenClaw agent for demos without the PyQt GUI."
+        description="Lightweight voice/text agent for demos without the PyQt GUI."
     )
     parser.add_argument(
         "--no-tts",
@@ -202,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force-new-session",
         action="store_true",
-        help="Force a fresh OpenClaw session for this run.",
+        help="Force a fresh agent session for this run.",
     )
     parser.add_argument(
         "--max-record-sec",
@@ -214,10 +217,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("shell", help="Run the interactive shell")
 
-    ask_parser = subparsers.add_parser("ask", help="Send one text prompt to OpenClaw")
+    ask_parser = subparsers.add_parser("ask", help="Send one text prompt to the current agent backend")
     ask_parser.add_argument("text", nargs="+", help="Prompt text")
 
-    voice_parser = subparsers.add_parser("voice", help="Record one voice turn and send it to OpenClaw")
+    voice_parser = subparsers.add_parser("voice", help="Record one voice turn and send it to the current agent backend")
     voice_parser.add_argument(
         "--no-speak",
         action="store_true",
@@ -241,22 +244,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     say_parser = subparsers.add_parser("say", help="Only play TTS for the given text")
     say_parser.add_argument("text", nargs="+", help="Text to speak")
-    subparsers.add_parser("warmup", help="Warm the current OpenClaw session once")
-    subparsers.add_parser("reset-session", help="Clear the cached OpenClaw session state")
+    subparsers.add_parser("warmup", help="Warm the current agent session once")
+    subparsers.add_parser("reset-session", help="Clear the cached agent session state")
     return parser
 
 
 def _apply_cli_overrides(config: MomoAgentConfig, args: argparse.Namespace) -> MomoAgentConfig:
     openclaw = config.openclaw
+    nanobot = config.nanobot
     if getattr(args, "force_new_session", False):
         openclaw = replace(openclaw, force_new_session=True, session_id="")
+        nanobot = replace(nanobot, force_new_session=True, session_key="")
     tts = config.tts
     if getattr(args, "no_tts", False):
         tts = replace(tts, enabled=False)
     audio = config.audio
     if args.max_record_sec is not None:
         audio = replace(audio, max_record_sec=max(1.0, float(args.max_record_sec)))
-    return MomoAgentConfig(audio=audio, stt=config.stt, tts=tts, openclaw=openclaw)
+    return MomoAgentConfig(
+        audio=audio,
+        stt=config.stt,
+        tts=tts,
+        agent_backend=config.agent_backend,
+        openclaw=openclaw,
+        nanobot=nanobot,
+    )
 
 
 def main(argv: Optional[list[str]] = None) -> int:

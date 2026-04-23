@@ -21,8 +21,8 @@ for _extra_path in (str(MASTER_ROOT), str(SDK_SRC)):
     sys.path[:] = [path for path in sys.path if os.path.normpath(path or os.curdir) != norm]
     sys.path.insert(0, _extra_path)
 
+from momo_agent.agent_client import AgentReply, ToolRequester, build_agent_client
 from momo_agent.config import load_config as load_momo_agent_config
-from momo_agent.openclaw_client import OpenClawReply, build_openclaw_client
 
 from .errors import QuickControlError
 from .remote_tts import RemoteTtsMonitor
@@ -34,6 +34,7 @@ OPENCLAW_CHAT_STREAM_BRIDGE_SCRIPT = (
 
 @dataclass
 class AgentTurnRecord:
+    backend: str = "openclaw"
     kind: str = "idle"
     status: str = "idle"
     prompt: str = ""
@@ -48,14 +49,37 @@ class AgentTurnRecord:
 
 
 class AgentService:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        tool_requester: ToolRequester | None = None,
+        tool_request_timeout_sec: float = 6.0,
+    ) -> None:
         self._lock = threading.RLock()
-        self._openclaw_config = load_momo_agent_config().openclaw
+        self._config = load_momo_agent_config()
+        self._agent_backend = str(self._config.agent_backend or "openclaw").strip() or "openclaw"
+        self._openclaw_config = self._config.openclaw
+        self._nanobot_config = self._config.nanobot
+        self._tool_requester = tool_requester
+        self._tool_request_timeout_sec = max(2.0, float(tool_request_timeout_sec))
         self._client = None
         self._remote_tts = RemoteTtsMonitor()
         self._busy = False
         self._last_error = ""
-        self._last_turn = AgentTurnRecord(updated_at=time.time())
+        self._resolved_status_fields = {
+            "thinking": str(self._nanobot_config.reasoning_effort or "").strip()
+            if self._agent_backend == "nanobot"
+            else str(self._openclaw_config.thinking or "").strip(),
+            "skill_name": str(self._nanobot_config.skill_name or "").strip()
+            if self._agent_backend == "nanobot"
+            else str(self._openclaw_config.skill_name or "").strip(),
+            "local_mode": True if self._agent_backend == "nanobot" else bool(self._openclaw_config.local_mode),
+            "robot_mode": True if self._agent_backend == "nanobot" else bool(self._openclaw_config.robot_mode),
+            "timeout_sec": float(self._nanobot_config.timeout_sec)
+            if self._agent_backend == "nanobot"
+            else float(self._openclaw_config.timeout_sec),
+        }
+        self._last_turn = AgentTurnRecord(backend=self._agent_backend, updated_at=time.time())
 
     def close(self) -> None:
         with self._lock:
@@ -68,10 +92,34 @@ class AgentService:
                 pass
 
     def _ensure_client_locked(self):
-        if not bool(self._openclaw_config.enabled):
-            raise QuickControlError("AGENT_DISABLED", "OpenClaw agent is disabled", 503)
+        enabled = bool(self._openclaw_config.enabled)
+        timeout_sec = float(self._openclaw_config.timeout_sec)
+        skill_name = str(self._openclaw_config.skill_name or "").strip()
+        local_mode = bool(self._openclaw_config.local_mode)
+        robot_mode = bool(self._openclaw_config.robot_mode)
+        thinking = str(self._openclaw_config.thinking or "").strip()
+        if self._agent_backend == "nanobot":
+            enabled = bool(self._nanobot_config.enabled)
+            timeout_sec = float(self._nanobot_config.timeout_sec)
+            skill_name = str(self._nanobot_config.skill_name or "").strip()
+            local_mode = True
+            robot_mode = True
+            thinking = str(self._nanobot_config.reasoning_effort or "").strip()
+        if not enabled:
+            raise QuickControlError("AGENT_DISABLED", "Configured agent backend is disabled", 503)
         if self._client is None:
-            self._client = build_openclaw_client(self._openclaw_config)
+            self._client = build_agent_client(
+                self._config,
+                tool_requester=self._tool_requester,
+                tool_request_timeout_sec=self._tool_request_timeout_sec,
+            )
+        self._resolved_status_fields = {
+            "thinking": thinking,
+            "skill_name": skill_name,
+            "local_mode": local_mode,
+            "robot_mode": robot_mode,
+            "timeout_sec": timeout_sec,
+        }
         return self._client
 
     def _resolve_node_bin(self) -> str:
@@ -80,7 +128,7 @@ class AgentService:
         return shutil.which("node") or shutil.which("nodejs") or ""
 
     @staticmethod
-    def _extract_bridge_timing(reply: OpenClawReply) -> dict[str, float]:
+    def _extract_bridge_timing(reply: AgentReply) -> dict[str, float]:
         payload = reply.raw_payload
         if not isinstance(payload, dict):
             return {}
@@ -106,14 +154,16 @@ class AgentService:
             client = self._client
             session_id = str(client.session_id).strip() if client is not None else ""
             bridge_key = str(client.bridge_session_key).strip() if client is not None else ""
+            resolved = getattr(self, "_resolved_status_fields", {})
             return {
-                "enabled": bool(self._openclaw_config.enabled),
+                "backend": self._agent_backend,
+                "enabled": bool(self._nanobot_config.enabled if self._agent_backend == "nanobot" else self._openclaw_config.enabled),
                 "busy": bool(self._busy),
-                "thinking": str(self._openclaw_config.thinking or "").strip(),
-                "skill_name": str(self._openclaw_config.skill_name or "").strip(),
-                "local_mode": bool(self._openclaw_config.local_mode),
-                "robot_mode": bool(self._openclaw_config.robot_mode),
-                "timeout_sec": float(self._openclaw_config.timeout_sec),
+                "thinking": str(resolved.get("thinking", "") or "").strip(),
+                "skill_name": str(resolved.get("skill_name", "") or "").strip(),
+                "local_mode": bool(resolved.get("local_mode", False)),
+                "robot_mode": bool(resolved.get("robot_mode", True)),
+                "timeout_sec": float(resolved.get("timeout_sec", 0.0) or 0.0),
                 "session_id": session_id,
                 "bridge_session_key": bridge_key,
                 "last_error": str(self._last_error or "").strip(),
@@ -142,6 +192,7 @@ class AgentService:
             elapsed = time.perf_counter() - started
             bridge_timing = self._extract_bridge_timing(reply)
             turn = AgentTurnRecord(
+                backend=self._agent_backend,
                 kind=str(kind or "ask"),
                 status="ok",
                 prompt=message,
@@ -171,6 +222,7 @@ class AgentService:
             with self._lock:
                 self._last_error = str(exc).strip() or "Agent turn failed"
                 self._last_turn = AgentTurnRecord(
+                    backend=self._agent_backend,
                     kind=str(kind or "ask"),
                     status="error",
                     prompt=message,
@@ -196,6 +248,11 @@ class AgentService:
         message = str(prompt or "").strip()
         if not message:
             raise QuickControlError("INVALID_ARGUMENT", "Agent prompt is empty", 400)
+        if self._agent_backend != "openclaw":
+            return {
+                "ok": False,
+                "reason": f"{self._agent_backend} backend does not support gateway chat streaming",
+            }
         if self._openclaw_config.local_mode:
             return {
                 "ok": False,
@@ -258,6 +315,7 @@ class AgentService:
                     bridge_session_key=str(bridge_session_key or "").strip(),
                 )
             turn = AgentTurnRecord(
+                backend=self._agent_backend,
                 kind=str(kind or "ask"),
                 status="ok",
                 prompt=message,
@@ -303,6 +361,7 @@ class AgentService:
                     resolved_bridge_session_key = str(client.bridge_session_key or "").strip()
             self._last_error = error_text
             self._last_turn = AgentTurnRecord(
+                backend=self._agent_backend,
                 kind=str(kind or "ask"),
                 status="error",
                 prompt=message,
@@ -326,6 +385,7 @@ class AgentService:
             client.reset_session()
             self._last_error = ""
             self._last_turn = AgentTurnRecord(
+                backend=self._agent_backend,
                 kind="reset_session",
                 status="ok",
                 prompt="",

@@ -12,8 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from .aws_transcribe_realtime import AwsRealtimeSttSession, status_payload as aws_stt_status_payload
 from .errors import QuickControlError
-from .haiguitang_agent import build_haiguitang_agent_prompt, parse_haiguitang_agent_reply
+from .haiguitang_agent import (
+    build_haiguitang_agent_prompt,
+    build_haiguitang_round_start_prompt,
+    parse_haiguitang_agent_reply,
+)
 from .scene_config import haiguitang_intro_video_file, haiguitang_media_file
 from .schemas import (
     AgentAskRequest,
@@ -23,6 +28,7 @@ from .schemas import (
     FollowStartRequest,
     HaiGuiTangActionRequest,
     HaiGuiTangAgentTurnRequest,
+    HaiGuiTangRoundStartRequest,
     HaiGuiTangSceneStateRequest,
     HaiGuiTangStartRequest,
     HomeRequest,
@@ -447,10 +453,15 @@ async def _apply_haiguitang_agent_directive(
     service: QuickControlService,
     directive: dict[str, Any],
 ) -> dict[str, Any]:
+    scene_subtitle_text = str(
+        directive.get("spoken_text")
+        or directive.get("subtitle_text")
+        or ""
+    ).strip()
     scene_state = await asyncio.to_thread(
         service.haiguitang_scene_present,
         clip=str(directive.get("clip", "default") or "default"),
-        subtitle_text=str(directive.get("subtitle_text", "") or ""),
+        subtitle_text=scene_subtitle_text,
         video_url="",
         loop_playback=bool(directive.get("loop_playback", True)),
     )
@@ -515,6 +526,45 @@ async def _run_haiguitang_agent_turn(
     }
 
 
+async def _run_haiguitang_round_start(
+    *,
+    service: QuickControlService,
+    bridge: OpenClawChatStreamBridge,
+    difficulty: str,
+) -> dict[str, Any]:
+    normalized_difficulty = str(difficulty or "").strip().lower() or "medium"
+    prompt = build_haiguitang_round_start_prompt(normalized_difficulty)
+    upstream_turn = await _run_openclaw_turn(
+        service=service,
+        bridge=bridge,
+        kind="haiguitang",
+        prompt=prompt,
+    )
+    directive = parse_haiguitang_agent_reply(str(upstream_turn.get("reply", "") or ""))
+    turn_result = await asyncio.to_thread(
+        service.agent_complete_stream_turn,
+        kind="haiguitang",
+        prompt=f"[start_round] difficulty={normalized_difficulty}",
+        reply=directive.spoken_text,
+        session_id=str(upstream_turn.get("session_id", "") or "").strip(),
+        bridge_session_key=str(upstream_turn.get("bridge_session_key", "") or "").strip(),
+        openclaw_elapsed_sec=float(upstream_turn.get("openclaw_elapsed_sec", 0.0) or 0.0),
+        bridge_timing=dict(upstream_turn.get("bridge_timing") or {}),
+    )
+    scene_result = await _apply_haiguitang_agent_directive(
+        service=service,
+        directive=directive.payload(),
+    )
+    turn = dict(turn_result.get("turn") or {})
+    turn["raw_reply"] = directive.raw_reply
+    turn["parse_mode"] = directive.parse_mode
+    return {
+        "difficulty": normalized_difficulty,
+        "turn": turn,
+        "scene": scene_result,
+    }
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="MomoAgent Quick Control API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
@@ -554,6 +604,10 @@ def create_app() -> FastAPI:
                 "agent": agent_data,
             }
         )
+
+    @app.get("/api/v1/stt/aws/status")
+    async def aws_stt_status(_request: Request) -> dict[str, Any]:
+        return _ok(aws_stt_status_payload())
 
     @app.get("/agent-test")
     async def agent_test_page() -> FileResponse:
@@ -742,6 +796,19 @@ def create_app() -> FastAPI:
             service=service,
             bridge=request.app.state.openclaw_chat_stream_bridge,
             message=payload.message,
+        )
+        return _ok(result)
+
+    @app.post("/api/v1/haiguitang/start-round")
+    async def haiguitang_start_round(
+        payload: HaiGuiTangRoundStartRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        service: QuickControlService = request.app.state.quick_control_service
+        result = await _run_haiguitang_round_start(
+            service=service,
+            bridge=request.app.state.openclaw_chat_stream_bridge,
+            difficulty=payload.difficulty,
         )
         return _ok(result)
 
@@ -1077,6 +1144,203 @@ def create_app() -> FastAPI:
                             "turn": turn,
                             "status": await asyncio.to_thread(service.agent_status),
                         },
+                    }
+                )
+        except WebSocketDisconnect:
+            return
+
+    @app.websocket("/api/v1/ws/stt")
+    async def ws_stt(websocket: WebSocket):
+        await websocket.accept()
+        session = AwsRealtimeSttSession()
+        await session.send_ready(websocket)
+        try:
+            while True:
+                message = await websocket.receive()
+                message_type = str(message.get("type", "") or "").strip()
+                if message_type == "websocket.disconnect":
+                    break
+                if message_type != "websocket.receive":
+                    continue
+
+                if message.get("bytes") is not None:
+                    try:
+                        await session.send_audio(bytes(message.get("bytes") or b""))
+                    except Exception as exc:  # noqa: BLE001
+                        await session.send_error(
+                            websocket,
+                            stage="audio",
+                            code="AUDIO_SEND_FAILED",
+                            message=str(exc),
+                        )
+                    continue
+
+                text_payload = str(message.get("text", "") or "").strip()
+                if not text_payload:
+                    continue
+                try:
+                    payload = json.loads(text_payload)
+                except json.JSONDecodeError:
+                    await session.send_error(
+                        websocket,
+                        stage="request",
+                        code="INVALID_JSON",
+                        message="WebSocket message must be valid JSON text or binary audio",
+                    )
+                    continue
+                if not isinstance(payload, dict):
+                    await session.send_error(
+                        websocket,
+                        stage="request",
+                        code="INVALID_MESSAGE",
+                        message="WebSocket JSON message must be an object",
+                    )
+                    continue
+
+                op = str(payload.get("type", "") or "").strip().lower()
+                if op == "ping":
+                    await session.send_json(websocket, {"type": "pong"})
+                    continue
+                if op == "status":
+                    await session.send_json(
+                        websocket,
+                        {
+                            "type": "status",
+                            "data": {
+                                "state": session.state,
+                                "config": aws_stt_status_payload(session.config),
+                            },
+                        },
+                    )
+                    continue
+                if op == "start":
+                    try:
+                        await session.start(websocket, payload)
+                    except Exception as exc:  # noqa: BLE001
+                        await session.send_error(
+                            websocket,
+                            stage="start",
+                            code="STT_START_FAILED",
+                            message=str(exc),
+                        )
+                    continue
+                if op == "stop":
+                    try:
+                        await session.stop(websocket, reason="client_stop", notify=True)
+                    except Exception as exc:  # noqa: BLE001
+                        await session.send_error(
+                            websocket,
+                            stage="stop",
+                            code="STT_STOP_FAILED",
+                            message=str(exc),
+                        )
+                    continue
+
+                await session.send_error(
+                    websocket,
+                    stage="request",
+                    code="UNSUPPORTED_OP",
+                    message=f"Unsupported WebSocket op: {op or '<empty>'}",
+                )
+        except WebSocketDisconnect:
+            return
+        finally:
+            await session.close()
+
+    @app.websocket("/api/v1/ws/tts")
+    async def ws_tts(websocket: WebSocket):
+        await websocket.accept()
+        service: QuickControlService = websocket.app.state.quick_control_service
+        try:
+            while True:
+                message = await websocket.receive()
+                message_type = str(message.get("type", "") or "").strip()
+                if message_type == "websocket.disconnect":
+                    break
+                if message_type != "websocket.receive":
+                    continue
+
+                text_payload = str(message.get("text", "") or "").strip()
+                if not text_payload:
+                    continue
+
+                try:
+                    payload = json.loads(text_payload)
+                except json.JSONDecodeError:
+                    await _send_ws_error(
+                        websocket,
+                        stage="request",
+                        code="INVALID_JSON",
+                        message="WebSocket message must be valid JSON text",
+                    )
+                    continue
+
+                if not isinstance(payload, dict):
+                    await _send_ws_error(
+                        websocket,
+                        stage="request",
+                        code="INVALID_MESSAGE",
+                        message="WebSocket JSON message must be an object",
+                    )
+                    continue
+
+                op = str(payload.get("type", "") or "").strip().lower()
+                if op == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
+                if op == "status":
+                    await websocket.send_json(
+                        {
+                            "type": "status",
+                            "data": service.agent_tts_status(),
+                        }
+                    )
+                    continue
+                if op != "speak":
+                    await _send_ws_error(
+                        websocket,
+                        stage="request",
+                        code="UNSUPPORTED_OP",
+                        message=f"Unsupported WebSocket op: {op or '<empty>'}",
+                    )
+                    continue
+
+                text = str(payload.get("text", "") or "").strip()
+                if not text:
+                    await _send_ws_error(
+                        websocket,
+                        stage="request",
+                        code="INVALID_ARGUMENT",
+                        message="TTS input text is empty",
+                    )
+                    continue
+
+                tts_spec = service.agent_build_tts_stream_spec(text=text)
+                tts_summary = dict(tts_spec.get("summary") or {"requested": True})
+                if not bool(tts_spec.get("ok")):
+                    await websocket.send_json(
+                        {
+                            "type": "tts_unavailable",
+                            "data": tts_summary,
+                        }
+                    )
+                    continue
+
+                await websocket.send_json(
+                    {
+                        "type": "tts_started",
+                        "data": tts_summary,
+                    }
+                )
+                tts_summary = await _relay_remote_tts_stream(
+                    websocket,
+                    command=list(tts_spec.get("command") or []),
+                    stdin_payload=dict(tts_spec.get("stdin_payload") or {}),
+                )
+                await websocket.send_json(
+                    {
+                        "type": "tts_result",
+                        "data": tts_summary,
                     }
                 )
         except WebSocketDisconnect:
