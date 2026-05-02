@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Visual tuner for baking soarmMoce joint zero offsets into the URDF.
 
-This tool only adjusts the URDF zero pose by rotating joint origins.
-It does not calibrate joint limits. Use the dedicated URDF limit calibration
-script for min/max travel measurement.
+This tool adjusts the URDF zero pose by rotating joint origins and shifts
+existing joint limits into the same new joint-coordinate frame. It does not
+measure new physical travel; use the dedicated URDF limit calibration script
+when you need fresh min/max travel measurements.
 """
 
 from __future__ import annotations
@@ -278,12 +279,36 @@ def _patched_joint_origins(urdf_path: Path, offsets_deg: Dict[str, float]) -> tu
         current_xyz = _parse_xyz(origin_elem.get("xyz"))
         current_rpy = _parse_xyz(origin_elem.get("rpy"))
         current_rot = _rotation_matrix_from_rpy(current_rpy)
-        delta_rot = _rotation_matrix_from_axis_angle(axis_unit, float(np.deg2rad(float(offset_deg))))
+        offset_rad = float(np.deg2rad(float(offset_deg)))
+        delta_rot = _rotation_matrix_from_axis_angle(axis_unit, offset_rad)
         new_rot = current_rot @ delta_rot
         new_rpy = _rpy_from_rotation_matrix(new_rot)
 
         origin_elem.set("xyz", _format_floats(list(current_xyz)))
         origin_elem.set("rpy", _format_floats(list(new_rpy)))
+
+        limit_update: Dict[str, object] | None = None
+        limit_elem = joint_elem.find("limit")
+        if limit_elem is not None:
+            try:
+                old_lower = float(limit_elem.get("lower"))
+                old_upper = float(limit_elem.get("upper"))
+            except (TypeError, ValueError):
+                old_lower = math.nan
+                old_upper = math.nan
+            if math.isfinite(old_lower) and math.isfinite(old_upper) and old_lower < old_upper:
+                new_lower = old_lower - offset_rad
+                new_upper = old_upper - offset_rad
+                limit_elem.set("lower", f"{new_lower:.8f}")
+                limit_elem.set("upper", f"{new_upper:.8f}")
+                limit_update = {
+                    "old_lower_rad": float(old_lower),
+                    "old_upper_rad": float(old_upper),
+                    "new_lower_rad": float(new_lower),
+                    "new_upper_rad": float(new_upper),
+                    "new_lower_deg": float(np.rad2deg(new_lower)),
+                    "new_upper_deg": float(np.rad2deg(new_upper)),
+                }
 
         diagnostics[sdk_joint] = {
             "urdf_joint": urdf_joint,
@@ -292,6 +317,7 @@ def _patched_joint_origins(urdf_path: Path, offsets_deg: Dict[str, float]) -> tu
             "old_rpy_rad": [float(v) for v in current_rpy],
             "new_rpy_rad": [float(v) for v in new_rpy],
             "new_rpy_deg": [float(v) for v in np.rad2deg(new_rpy)],
+            "limit_update": limit_update,
         }
 
     return tree, diagnostics

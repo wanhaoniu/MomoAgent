@@ -20,9 +20,9 @@ def main() -> None:
     # key 可以用 SDK 关节名，例如 shoulder_lift；不要用硬件舵机 ID。
     ZERO_POSE_DEG = {
         "shoulder_pan": 0.0,
-        "shoulder_lift": 0.0,
-        "elbow_flex": 0.0,
-        "wrist_flex": 0.0,
+        "shoulder_lift": -90.0,
+        "elbow_flex": 90.0,
+        "wrist_flex": -90.0,
         "wrist_roll": 0.0,
     }
 
@@ -97,7 +97,7 @@ def bake_urdf_initial_pose(
 
     return {
         "action": "bake_urdf_initial_pose",
-        "note_cn": "填写角度已从稳定基准 URDF 烘焙为目标 URDF 的 q=0 初始姿态。",
+        "note_cn": "填写角度已从稳定基准 URDF 烘焙为目标 URDF 的 q=0 初始姿态；原有关节 limit 也已同步换算到新的 q=0 坐标系。",
         "write_in_place": bool(write_in_place),
         "source_urdf_path": str(target_urdf_path),
         "base_urdf_path": str(base_path),

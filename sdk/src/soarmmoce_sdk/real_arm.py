@@ -24,6 +24,7 @@ from .kinematics_pybullet import PYBULLET_AVAILABLE, PYBULLET_IMPORT_ERROR, Pybu
 RAW_COUNTS_PER_REV = 4096
 RAW_DEGREES_PER_REV = 360.0
 HALF_RAW_COUNTS_PER_REV = RAW_COUNTS_PER_REV // 2
+SINGLE_TURN_ZERO_RAW = RAW_COUNTS_PER_REV // 2
 SINGLE_TURN_RAW_MIN = 0
 SINGLE_TURN_RAW_MAX = RAW_COUNTS_PER_REV - 1
 POSITION_MODE_VALUE = 0
@@ -36,6 +37,7 @@ DEFAULT_LINEAR_STEP_M = 0.01
 DEFAULT_JOINT_STEP_DEG = 5.0
 DEFAULT_CARTESIAN_SETTLE_TIME_S = 0.15
 DEFAULT_IK_JOINT_STEP_DEG = 8.0
+DEFAULT_IK_MAX_STEP_RAD = 0.15
 DEFAULT_JOINT_SCALES = {
     "shoulder_pan": 1.0,
     "shoulder_lift": -5.3,
@@ -226,6 +228,7 @@ class SoArmMoceConfig:
     ik_damping: float = 0.05 #阻尼系数，增加数值会使IK解更平滑但可能无法完全收敛到目标
     ik_step_scale: float = 0.8 #IK每次迭代的步长缩放，过大可能导致震荡，过小则收敛过慢
     ik_joint_step_deg: float = DEFAULT_IK_JOINT_STEP_DEG
+    ik_max_step_rad: float = DEFAULT_IK_MAX_STEP_RAD
     ik_orientation_tol_rad: float = 0.02
     ik_seed_bias: float = 0.02
     gripper_available: bool = True
@@ -305,7 +308,16 @@ class SingleTurnPositionPolicy(JointPositionPolicy):
         return _signed_single_turn_delta(current_raw, startup_raw)
 
     def relative_to_absolute_goal_raw(self, *, startup_raw: int, relative_raw: int | float) -> int:
-        return _wrap_single_turn_raw(startup_raw + int(round(float(relative_raw))))
+        goal_raw = int(round(float(startup_raw) + float(relative_raw)))
+        self.validate_goal_raw(goal_raw)
+        return goal_raw
+
+    def validate_goal_raw(self, raw_value: int) -> None:
+        if raw_value < SINGLE_TURN_RAW_MIN or raw_value > SINGLE_TURN_RAW_MAX:
+            raise HardwareError(
+                "Requested bounded single-turn goal would cross the 0/4095 wrap boundary: "
+                f"{raw_value}. This is blocked to avoid a large wrap-around move."
+            )
 
 
 class MultiTurnPositionPolicy(JointPositionPolicy):
@@ -349,6 +361,9 @@ class JointSpec:
     motor_id: int
     reduction_ratio: float
     policy: JointPositionPolicy
+    range_min: int | None = None
+    range_max: int | None = None
+    zero_raw: int | None = None
 
 
 def resolve_config(path: str | Path | None = None) -> SoArmMoceConfig:
@@ -398,6 +413,7 @@ def resolve_config(path: str | Path | None = None) -> SoArmMoceConfig:
         ik_damping=float(ik.get("damping", 0.05)),
         ik_step_scale=float(ik.get("step_scale", 0.8)),
         ik_joint_step_deg=float(ik.get("joint_step_deg", DEFAULT_IK_JOINT_STEP_DEG)),
+        ik_max_step_rad=float(ik.get("max_step_rad", DEFAULT_IK_MAX_STEP_RAD)),
         ik_orientation_tol_rad=float(ik.get("rot_tol", 0.02)),
         ik_seed_bias=float(ik.get("seed_bias", 0.02)),
         gripper_available=bool(transport.get("gripper_available", True)),
@@ -416,7 +432,9 @@ class SoArmMoceController:
     - Multi-turn joints disable both hardware position limits by writing 0/0, and
       set register 18 (Phase) to 28, which exposes the signed absolute range
       `-30719 .. 30719` required by the hardware.
-    - Startup position is recorded once and used as the runtime zero reference.
+    - Multi-turn startup position is recorded once and used as the runtime zero reference.
+      Bounded single-turn joints use the calibrated half-turn raw position as
+      their zero reference so they do not drift toward the 0/4095 wrap boundary.
       
     """
 
@@ -441,10 +459,7 @@ class SoArmMoceController:
         self.robot_model = _as_attrdict(
             {
                 "joint_names": list(JOINTS),
-                "joint_limits": [
-                    (-2.0 * math.pi, 2.0 * math.pi) if joint in MULTI_TURN_JOINTS else (-math.pi, math.pi)
-                    for joint in JOINTS
-                ],
+                "joint_limits": self._build_robot_model_joint_limits(),
             }
         )
 
@@ -481,6 +496,21 @@ class SoArmMoceController:
     def _build_joint_specs(self) -> dict[str, JointSpec]:
         specs: dict[str, JointSpec] = {}
         for joint_name in JOINTS:
+            calibration_entry = self._calibration_payload.get(joint_name)
+            raw_range_min = None
+            raw_range_max = None
+            zero_raw = None
+            if isinstance(calibration_entry, Mapping) and joint_name in BOUNDED_SINGLE_TURN_JOINTS:
+                try:
+                    raw_range_min = int(calibration_entry["range_min"])
+                    raw_range_max = int(calibration_entry["range_max"])
+                except Exception:
+                    raw_range_min = None
+                    raw_range_max = None
+                try:
+                    zero_raw = int(calibration_entry.get("zero_present_raw", SINGLE_TURN_ZERO_RAW))
+                except Exception:
+                    zero_raw = SINGLE_TURN_ZERO_RAW
             if joint_name in MULTI_TURN_JOINTS:
                 policy = MULTI_TURN_POLICY
             elif joint_name in BOUNDED_SINGLE_TURN_JOINTS:
@@ -492,8 +522,32 @@ class SoArmMoceController:
                 motor_id=DEFAULT_MOTOR_IDS[joint_name],
                 reduction_ratio=float(self.config.joint_scales[joint_name]),
                 policy=policy,
+                range_min=raw_range_min,
+                range_max=raw_range_max,
+                zero_raw=zero_raw,
             )
         return specs
+
+    def _build_robot_model_joint_limits(self) -> list[tuple[float, float]]:
+        limits: list[tuple[float, float]] = []
+        for joint_name in JOINTS:
+            spec = self._joint_specs[joint_name]
+            if (
+                spec.policy is SINGLE_TURN_POLICY
+                and spec.range_min is not None
+                and spec.range_max is not None
+            ):
+                zero_raw = int(spec.zero_raw if spec.zero_raw is not None else SINGLE_TURN_ZERO_RAW)
+                values_rad = []
+                for raw_value in (int(spec.range_min), int(spec.range_max)):
+                    relative_raw = int(raw_value) - int(zero_raw)
+                    values_rad.append(math.radians(self._relative_raw_to_joint_deg(joint_name, relative_raw)))
+                limits.append((float(min(values_rad)), float(max(values_rad))))
+            elif joint_name in MULTI_TURN_JOINTS:
+                limits.append((-2.0 * math.pi, 2.0 * math.pi))
+            else:
+                limits.append((-math.pi, math.pi))
+        return limits
 
     def _ensure_kinematics(self, *, required: bool = False) -> PybulletKinematicsModel | None:
         if self._kinematics is not None:
@@ -759,13 +813,20 @@ class SoArmMoceController:
         raw_present = self._read_raw_present_position(bus)
         self._joint_runtime_state = {
             joint_name: JointRuntimeState(
-                startup_raw=self._joint_specs[joint_name].policy.normalize_present_raw(raw_present[joint_name]),
+                startup_raw=self._startup_reference_raw_for_joint(joint_name, raw_present[joint_name]),
                 last_raw=self._joint_specs[joint_name].policy.normalize_present_raw(raw_present[joint_name]),
             )
             for joint_name in JOINTS
         }
         self._multi_turn_state = self._build_multi_turn_state(raw_present)
         return raw_present
+
+    def _startup_reference_raw_for_joint(self, joint_name: str, present_raw: int | float) -> int:
+        spec = self._joint_specs[joint_name]
+        if spec.policy is SINGLE_TURN_POLICY:
+            zero_raw = SINGLE_TURN_ZERO_RAW if spec.zero_raw is None else int(spec.zero_raw)
+            return int(spec.policy.normalize_present_raw(zero_raw))
+        return int(spec.policy.normalize_present_raw(present_raw))
 
     def _prime_multi_turn_state_from_current_pose(self, bus) -> dict[str, int]:
         return self._prime_startup_references_from_current_pose(bus)
@@ -804,7 +865,10 @@ class SoArmMoceController:
         normalized_raw = spec.policy.normalize_present_raw(present_raw)
         runtime_state = self._joint_runtime_state.get(joint_name)
         if runtime_state is None:
-            runtime_state = JointRuntimeState(startup_raw=normalized_raw, last_raw=normalized_raw)
+            runtime_state = JointRuntimeState(
+                startup_raw=self._startup_reference_raw_for_joint(joint_name, normalized_raw),
+                last_raw=normalized_raw,
+            )
         relative_raw = spec.policy.relative_raw(current_raw=normalized_raw, startup_raw=runtime_state.startup_raw)
         self._joint_runtime_state[joint_name] = JointRuntimeState(
             startup_raw=runtime_state.startup_raw,
@@ -838,7 +902,26 @@ class SoArmMoceController:
             relative_raw=relative_raw,
         )
         spec.policy.validate_goal_raw(goal_raw)
+        self._validate_calibrated_single_turn_goal_raw(joint_name, goal_raw)
         return int(goal_raw)
+
+    def _validate_calibrated_single_turn_goal_raw(self, joint_name: str, goal_raw: int) -> None:
+        spec = self._joint_specs[joint_name]
+        if spec.policy is not SINGLE_TURN_POLICY:
+            return
+        if spec.range_min is None or spec.range_max is None:
+            return
+        lo = int(spec.range_min)
+        hi = int(spec.range_max)
+        if hi <= lo:
+            return
+        goal = int(goal_raw)
+        if lo <= goal <= hi:
+            return
+        raise HardwareError(
+            f"Requested goal for bounded single-turn joint '{joint_name}' is outside the calibrated raw range: "
+            f"goal_raw={goal}, allowed=[{lo}, {hi}]. This is blocked to avoid an unsafe large move."
+        )
 
     def _joint_deg_to_absolute_goal_raw(self, joint_name: str, joint_deg: int | float) -> int:
         return self._relative_raw_to_absolute_goal_raw(joint_name, self._joint_deg_to_relative_raw(joint_name, joint_deg))
@@ -1456,8 +1539,8 @@ class SoArmMoceController:
         wait: bool = True,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        # Startup position is intentionally the runtime zero reference, so "home"
-        # simply commands zero relative joint angle for every axis.
+        # Zero angle means calibrated midpoint for 1/4 and startup reference for
+        # the absolute-raw multi-turn joints.
         result = self.move_joints(
             {joint_name: 0.0 for joint_name in JOINTS},
             duration=duration,
@@ -1499,6 +1582,7 @@ class SoArmMoceController:
         *,
         q0: Iterable[Any] | None = None,
         seed_policy: str = "current",
+        max_joint_delta_rad: float | None = None,
         duration: float | None = None,
         speed_percent: int | float | None = None,
         wait: bool = True,
@@ -1546,6 +1630,24 @@ class SoArmMoceController:
                 "IK solution orientation error exceeds the configured limit: "
                 f"{ik_result.rot_error_rad:.4f} rad > {float(self.config.ik_orientation_tol_rad):.4f} rad"
             )
+        if max_joint_delta_rad is not None:
+            max_delta_limit = float(max_joint_delta_rad)
+            if max_delta_limit > 0.0:
+                seed_q_arr = np.asarray(seed_q, dtype=float).reshape(-1)
+                solution_q_arr = np.asarray(ik_result.q_user, dtype=float).reshape(-1)
+                if seed_q_arr.shape == solution_q_arr.shape:
+                    deltas = np.abs(solution_q_arr - seed_q_arr)
+                    worst_idx = int(np.argmax(deltas)) if deltas.shape[0] else 0
+                    worst_delta = float(deltas[worst_idx]) if deltas.shape[0] else 0.0
+                    if worst_delta > max_delta_limit:
+                        joint_name = JOINTS[worst_idx] if worst_idx < len(JOINTS) else f"joint_{worst_idx + 1}"
+                        raise IKError(
+                            "IK solution requires an unexpectedly large joint jump for a relative Cartesian move: "
+                            f"{joint_name} changes {math.degrees(worst_delta):.2f} deg, "
+                            f"limit is {math.degrees(max_delta_limit):.2f} deg. "
+                            "Check that the physical startup pose matches the URDF q=0 pose, or increase "
+                            "ik.max_step_rad only after confirming the URDF/calibration is correct."
+                        )
 
         move_result = self.move_joints(
             ik_result.q_user.tolist(),
@@ -1633,6 +1735,7 @@ class SoArmMoceController:
         timeout: float | None = None,
         trace: bool = False,
         constrain_orientation: bool | None = None,
+        max_joint_delta_rad: float | None = None,
     ) -> dict[str, Any]:
         dx_value = float(dx)
         dy_value = float(dy)
@@ -1660,26 +1763,64 @@ class SoArmMoceController:
         kinematics = self._ensure_kinematics(required=True)
         assert kinematics is not None
         current_pose = self.get_end_effector_pose()
-        target_xyz, target_rpy = kinematics.compose_delta_target(
-            current_xyz=current_pose["xyz"],
-            current_rpy=current_pose["rpy"],
-            delta_xyz=[dx_value, dy_value, dz_value],
-            delta_rpy=[drx_value, dry_value, drz_value],
-            frame=str(frame),
-        )
         if constrain_orientation is None:
             should_constrain_orientation = has_rotation_delta
         else:
             should_constrain_orientation = bool(constrain_orientation)
-        result = self.move_pose(
-            xyz=target_xyz.tolist(),
-            rpy=target_rpy.tolist() if should_constrain_orientation else None,
-            duration=duration,
-            speed_percent=speed_percent,
-            wait=bool(wait),
-            timeout=timeout,
-            trace=trace,
+
+        effective_max_joint_delta_rad = (
+            float(max_joint_delta_rad)
+            if max_joint_delta_rad is not None
+            else float(self.config.ik_max_step_rad)
         )
+        delta_scales = [1.0]
+        if effective_max_joint_delta_rad > 0.0:
+            delta_scales.extend([0.75, 0.5, 0.25])
+
+        target_xyz = np.zeros(3, dtype=float)
+        target_rpy = np.zeros(3, dtype=float)
+        result: dict[str, Any] | None = None
+        last_jump_error: IKError | None = None
+        for delta_scale in delta_scales:
+            target_xyz, target_rpy = kinematics.compose_delta_target(
+                current_xyz=current_pose["xyz"],
+                current_rpy=current_pose["rpy"],
+                delta_xyz=[
+                    dx_value * float(delta_scale),
+                    dy_value * float(delta_scale),
+                    dz_value * float(delta_scale),
+                ],
+                delta_rpy=[
+                    drx_value * float(delta_scale),
+                    dry_value * float(delta_scale),
+                    drz_value * float(delta_scale),
+                ],
+                frame=str(frame),
+            )
+            try:
+                result = self.move_pose(
+                    xyz=target_xyz.tolist(),
+                    rpy=target_rpy.tolist() if should_constrain_orientation else None,
+                    max_joint_delta_rad=effective_max_joint_delta_rad,
+                    duration=duration,
+                    speed_percent=speed_percent,
+                    wait=bool(wait),
+                    timeout=timeout,
+                    trace=trace,
+                )
+                result["delta_scale_applied"] = float(delta_scale)
+                break
+            except IKError as exc:
+                message = str(exc)
+                if "unexpectedly large joint jump" not in message:
+                    raise
+                last_jump_error = exc
+
+        if result is None:
+            if last_jump_error is not None:
+                raise last_jump_error
+            raise IKError("IK failed to produce a bounded relative Cartesian move")
+
         result["action"] = "move_delta"
         result["frame"] = "tool" if str(frame or "").strip().lower() == "tool" else "base"
         result["delta"] = {
@@ -1689,6 +1830,15 @@ class SoArmMoceController:
             "drx": drx_value,
             "dry": dry_value,
             "drz": drz_value,
+        }
+        delta_scale_applied = float(result.get("delta_scale_applied", 1.0))
+        result["applied_delta"] = {
+            "dx": dx_value * delta_scale_applied,
+            "dy": dy_value * delta_scale_applied,
+            "dz": dz_value * delta_scale_applied,
+            "drx": drx_value * delta_scale_applied,
+            "dry": dry_value * delta_scale_applied,
+            "drz": drz_value * delta_scale_applied,
         }
         result["orientation_constraint"] = "constrained" if should_constrain_orientation else "position_only"
         result["target_xyz_m"] = [float(value) for value in target_xyz.tolist()]
@@ -1839,6 +1989,11 @@ class SoArmMoceController:
                 "bounded_single_turn_joints": list(BOUNDED_SINGLE_TURN_JOINTS),
                 "multi_turn_joints": list(MULTI_TURN_JOINTS),
                 "startup_raw_position": startup_raw,
+                "single_turn_zero_raw": {
+                    joint_name: int(spec.zero_raw if spec.zero_raw is not None else SINGLE_TURN_ZERO_RAW)
+                    for joint_name, spec in self._joint_specs.items()
+                    if spec.policy is SINGLE_TURN_POLICY
+                },
                 "gripper": to_jsonable(self._build_gripper_state()),
                 "kinematics": {
                     "available": bool(self._ensure_kinematics(required=False) is not None),

@@ -133,6 +133,7 @@ class CompatibleRuntimeRobot:
         speed_percent: int | float | None = None,
         wait: bool = True,
         timeout: float | None = None,
+        max_joint_delta_rad: float | None = None,
     ) -> dict[str, Any]:
         return self._controller.move_delta(
             dx=dx,
@@ -146,6 +147,7 @@ class CompatibleRuntimeRobot:
             speed_percent=speed_percent,
             wait=wait,
             timeout=timeout,
+            max_joint_delta_rad=max_joint_delta_rad,
         )
 
     def move_pose(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
