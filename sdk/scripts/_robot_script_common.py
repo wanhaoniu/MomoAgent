@@ -139,6 +139,152 @@ def print_json(payload: object) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def make_controller(config_path: str | Path | None = None):
+    from soarmmoce_sdk import SoArmMoceController, resolve_config
+
+    return SoArmMoceController(resolve_config(config_path))
+
+
+def to_plain_json(value: Any) -> Any:
+    from soarmmoce_sdk import to_jsonable
+
+    return to_jsonable(value)
+
+
+def _payload_mapping(payload: Any, key: str) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        value = payload.get(key, {})
+    else:
+        value = getattr(payload, key, {})
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def summarize_state(state: Any) -> dict[str, Any]:
+    from soarmmoce_sdk import JOINTS
+
+    payload = to_plain_json(state)
+    joint_state = _payload_mapping(payload, "joint_state")
+    raw_present = _payload_mapping(payload, "raw_present_position")
+    relative_raw = _payload_mapping(payload, "relative_raw_position")
+    startup_raw = _payload_mapping(payload, "startup_raw_position")
+    motor_deg = _payload_mapping(payload, "motor_position_deg")
+    output_deg = _payload_mapping(payload, "output_position_deg")
+
+    joints: dict[str, dict[str, Any]] = {}
+    for joint_name in JOINTS:
+        joints[joint_name] = {
+            "joint_deg": joint_state.get(joint_name),
+            "motor_deg": motor_deg.get(joint_name),
+            "output_deg": output_deg.get(joint_name),
+            "raw_present": raw_present.get(joint_name),
+            "relative_raw": relative_raw.get(joint_name),
+            "startup_raw": startup_raw.get(joint_name),
+        }
+
+    return {
+        "timestamp": payload.get("timestamp"),
+        "joint_order": list(JOINTS),
+        "joints": joints,
+        "tcp_pose": payload.get("tcp_pose"),
+        "gripper": payload.get("gripper_state"),
+    }
+
+
+def summarize_motion_result(result: Any) -> dict[str, Any]:
+    payload = to_plain_json(result)
+    summary = {
+        key: payload.get(key)
+        for key in (
+            "action",
+            "target_deg",
+            "targets_deg",
+            "goal_raw",
+            "duration_sec",
+            "duration_source",
+            "speed_percent",
+            "wait",
+            "settled",
+        )
+        if key in payload
+    }
+    if "state" in payload:
+        summary["state"] = summarize_state(payload["state"])
+    return summary
+
+
+def summarize_pose_result(result: Any) -> dict[str, Any]:
+    payload = to_plain_json(result)
+    summary = {
+        key: payload.get(key)
+        for key in (
+            "action",
+            "frame",
+            "delta",
+            "target_xyz_m",
+            "target_rpy_rad",
+            "composed_target_rpy_rad",
+            "orientation_mode",
+            "orientation_constraint",
+            "duration_sec",
+            "duration_source",
+            "speed_percent",
+        )
+        if key in payload
+    }
+    if "ik" in payload:
+        summary["ik"] = payload["ik"]
+    if "goal_raw" in payload:
+        summary["goal_raw"] = payload["goal_raw"]
+    if "targets_deg" in payload:
+        summary["targets_deg"] = payload["targets_deg"]
+    if "state" in payload:
+        summary["state"] = summarize_state(payload["state"])
+    return summary
+
+
+def summarize_gripper_state(state: Any) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    payload = to_plain_json(state)
+    if not isinstance(payload, dict):
+        return {"raw": payload}
+    return {
+        key: payload.get(key)
+        for key in (
+            "available",
+            "open_ratio",
+            "present_raw",
+            "present_register_raw",
+            "adjusted_raw",
+            "goal_raw",
+            "range_min",
+            "range_max",
+            "homing_offset",
+        )
+        if key in payload
+    }
+
+
+def require_joint_name(joint_name: str) -> str:
+    from soarmmoce_sdk import JOINTS
+
+    value = str(joint_name).strip()
+    if value not in JOINTS:
+        raise ValueError(f"未知关节名: {value!r}。可用关节: {', '.join(JOINTS)}")
+    return value
+
+
+def clamp_open_ratio(value: float) -> float:
+    return float(min(1.0, max(0.0, float(value))))
+
+
+def coerce_vector3(values: Any, *, name: str) -> list[float]:
+    payload = list(values)
+    if len(payload) != 3:
+        raise ValueError(f"{name} 必须包含 3 个数值，当前长度是 {len(payload)}。")
+    return [float(payload[0]), float(payload[1]), float(payload[2])]
+
+
 def require_lerobot() -> tuple[Any, Any, Any]:
     errors: list[BaseException] = []
     bus_modules = ("lerobot.motors.feetech", "lerobot.motors.feetech.feetech")
