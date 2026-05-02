@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SDK_SRC = REPO_ROOT / "sdk" / "src"
 if str(SDK_SRC) not in sys.path:
     sys.path.insert(0, str(SDK_SRC))
@@ -21,7 +21,7 @@ from soarmmoce_sdk.cli_common import cli_bool, print_error, print_success
 from soarmmoce_sdk import JOINTS, MULTI_TURN_JOINTS, SoArmMoceController, ValidationError, to_jsonable
 
 
-SKILL_ROOT = Path(__file__).resolve().parents[1]
+SKILL_ROOT = REPO_ROOT / "sdk"
 DEFAULT_SAVE_PATH = SKILL_ROOT / "workspace" / "runtime" / "recorded_pose_sequence.json"
 DEFAULT_POSE_COUNT = 2
 AUTO_FLIP_REPLAY_JOINTS = {"elbow_flex"}
