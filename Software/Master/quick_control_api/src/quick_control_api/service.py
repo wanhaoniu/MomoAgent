@@ -232,24 +232,6 @@ class QuickControlService:
         if step_angle_deg is not None:
             self._motion.step_angle_deg = float(max(0.1, min(180.0, step_angle_deg)))
 
-    def _duration_from_speed(
-        self,
-        *,
-        kind: str,
-        speed_percent: int,
-        jog_mode: str = "step",
-    ) -> float:
-        speed_scale = max(0.1, float(speed_percent) / 100.0)
-        if kind == "joint_step":
-            return float(np.clip(0.20 / speed_scale, 0.08, 0.60))
-        if kind == "home":
-            return float(np.clip(1.8 / speed_scale, 0.5, 5.0))
-        if kind == "continuous_joint":
-            return float(np.clip(0.12 / speed_scale, 0.10, 0.35))
-        if jog_mode == "continuous":
-            return float(np.clip(0.15 / speed_scale, 0.08, 0.50))
-        return float(np.clip(0.20 / speed_scale, 0.08, 0.60))
-
     def _read_robot_state_locked(self) -> Optional[Any]:
         robot = self._robot
         if robot is None or not getattr(robot, "connected", False):
@@ -474,8 +456,11 @@ class QuickControlService:
                     float(hi),
                 )
             )
-            duration = self._duration_from_speed(kind="joint_step", speed_percent=speed_percent)
-            robot.move_joints(q_target, duration=duration, wait=False)
+            robot.move_joints(
+                q_target,
+                speed_percent=speed_percent,
+                wait=True,
+            )
             return {
                 "joint_index": int(joint_index),
                 "joint_name": (
@@ -548,18 +533,15 @@ class QuickControlService:
             key, sign = axis_map[axis_norm]
             step_value = trans_step_m if key in {"dx", "dy", "dz"} else rot_step_rad
             delta_kwargs[key] = float(sign) * float(step_value)
-            duration = self._duration_from_speed(
-                kind="cartesian",
-                speed_percent=speed_percent,
-                jog_mode=jog_mode,
-            )
+            wait_motion = str(jog_mode).strip().lower() != "continuous"
             try:
-                robot.move_delta(
-                    frame=str(coord_frame or "base"),
-                    duration=duration,
-                    wait=False,
+                move_kwargs = {
+                    "frame": str(coord_frame or "base"),
+                    "speed_percent": speed_percent,
+                    "wait": wait_motion,
                     **delta_kwargs,
-                )
+                }
+                robot.move_delta(**move_kwargs)
             except Exception as exc:  # noqa: BLE001
                 raise QuickControlError("CARTESIAN_FAILED", str(exc), 500) from exc
 
@@ -583,8 +565,7 @@ class QuickControlService:
             self._stop_for_manual_motion_locked()
             self._update_motion(speed_percent=speed_percent)
             robot = self._require_robot()
-            duration = self._duration_from_speed(kind="home", speed_percent=speed_percent)
-            robot.home(duration=duration, wait=False)
+            robot.home(speed_percent=speed_percent, wait=True)
             return {
                 "source": str(source or "home"),
                 "accepted": True,

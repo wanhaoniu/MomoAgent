@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SDK_SRC = REPO_ROOT / "sdk" / "src"
 FACE_LOC_SRC = REPO_ROOT / "Software" / "Master" / "face_loc" / "src"
 if str(SDK_SRC) not in sys.path:

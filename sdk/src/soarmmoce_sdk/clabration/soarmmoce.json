@@ -2,9 +2,10 @@
   "shoulder_pan": {
     "id": 1,
     "drive_mode": 0,
-    "homing_offset": -2007,
-    "range_min": 830,
-    "range_max": 3239,
+    "homing_offset": -1636,
+    "range_min": 879,
+    "range_max": 3243,
+    "zero_present_raw": 2048,
     "operating_mode": 0
   },
   "shoulder_lift": {
@@ -15,8 +16,8 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 4252,
-    "home_present_wrapped_raw": 156
+    "home_present_raw": 1630,
+    "home_present_wrapped_raw": 1630
   },
   "elbow_flex": {
     "id": 3,
@@ -26,15 +27,16 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 2260,
-    "home_present_wrapped_raw": 2260
+    "home_present_raw": 87,
+    "home_present_wrapped_raw": 87
   },
   "wrist_flex": {
     "id": 4,
     "drive_mode": 0,
-    "homing_offset": -1883,
-    "range_min": 233,
-    "range_max": 2294,
+    "homing_offset": -247,
+    "range_min": 1808,
+    "range_max": 3855,
+    "zero_present_raw": 2048,
     "operating_mode": 0
   },
   "wrist_roll": {
@@ -45,11 +47,11 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 194,
-    "home_present_wrapped_raw": 194
+    "home_present_raw": 3967,
+    "home_present_wrapped_raw": 3967
   },
   "_meta": {
-    "generated_at_unix_s": 1776505882.739752,
+    "generated_at_unix_s": 1777722417.6628091,
     "script": "soarmmoce_calibrate.py",
     "bounded_single_turn_joints": [
       "shoulder_pan",
@@ -61,9 +63,9 @@
       "wrist_roll"
     ],
     "notes": {
-      "bounded_single_turn": "1/4 use half-turn homing plus manually recorded range limits.",
+      "bounded_single_turn": "1/4 calibrate the selected zero pose to raw midpoint 2048, then record range limits around that midpoint.",
       "absolute_raw": "2/3/5 use mode 0 with min/max limit 0 and phase 28; startup pose is the runtime reference.",
-      "home": "home() returns every joint to zero relative angle, which is the startup pose reference."
+      "home": "home() returns 1/4 to calibrated midpoint zero and 2/3/5 to their startup-pose zero."
     }
   },
   "gripper": {

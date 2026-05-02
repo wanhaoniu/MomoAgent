@@ -39,6 +39,11 @@ from .service import QuickControlService
 
 AGENT_STREAM_TEST_PAGE = Path(__file__).resolve().parents[2] / "agent_stream_test.html"
 WEB_ROOT = Path(__file__).resolve().parents[5] / "Software" / "Web"
+WEB_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
 HAIGUITANG_AGENT_MOTION_START_PAYLOAD = {
     "pan_joint": "shoulder_pan",
     "tilt_joint": "elbow_flex",
@@ -54,6 +59,13 @@ HAIGUITANG_AGENT_MOTION_START_PAYLOAD = {
     "auto_center_after_action": True,
     "capture_anchor_on_start": True,
 }
+
+
+class NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope: dict[str, Any]):
+        response = await super().get_response(path, scope)
+        response.headers.update(WEB_NO_CACHE_HEADERS)
+        return response
 
 
 class OpenClawChatStreamBridge:
@@ -574,7 +586,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     if WEB_ROOT.is_dir():
-        app.mount("/web", StaticFiles(directory=str(WEB_ROOT), html=True), name="web")
+        app.mount("/web", NoCacheStaticFiles(directory=str(WEB_ROOT), html=True), name="web")
 
     @app.exception_handler(QuickControlError)
     async def quick_control_error_handler(_request: Request, exc: QuickControlError):
@@ -615,7 +627,9 @@ def create_app() -> FastAPI:
 
     @app.get("/haiguitang")
     async def haiguitang_web_page() -> RedirectResponse:
-        return RedirectResponse(url="/web/", status_code=307)
+        response = RedirectResponse(url="/web/", status_code=307)
+        response.headers.update(WEB_NO_CACHE_HEADERS)
+        return response
 
     @app.get("/api/v1/session/status")
     async def session_status(request: Request) -> dict[str, Any]:
@@ -826,6 +840,7 @@ def create_app() -> FastAPI:
             path=intro_video_file,
             media_type="video/mp4",
             filename=intro_video_file.name,
+            headers=WEB_NO_CACHE_HEADERS,
         )
 
     @app.get("/api/v1/scenes/haiguitang/media/{media_name}")
@@ -842,6 +857,7 @@ def create_app() -> FastAPI:
             path=media_file,
             media_type="video/mp4",
             filename=media_file.name,
+            headers=WEB_NO_CACHE_HEADERS,
         )
 
     @app.post("/api/v1/haiguitang/start")

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SDK_SRC = REPO_ROOT / "sdk" / "src"
 SKILL_SCRIPTS = REPO_ROOT / "skills" / "soarmmoce-real-con" / "scripts"
 if str(SDK_SRC) not in sys.path:

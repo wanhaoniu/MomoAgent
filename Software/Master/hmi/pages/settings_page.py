@@ -152,7 +152,7 @@ class SettingsPage(QWidget):
         self.default_speed_spin.setValue(50)
         self.default_step_dist_spin = QDoubleSpinBox()
         self.default_step_dist_spin.setRange(0.1, 200.0)
-        self.default_step_dist_spin.setValue(20.0)
+        self.default_step_dist_spin.setValue(5.0)
         self.default_step_dist_spin.setSuffix(" mm")
         self.default_step_angle_spin = QDoubleSpinBox()
         self.default_step_angle_spin.setRange(0.1, 180.0)
