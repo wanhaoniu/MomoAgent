@@ -44,7 +44,7 @@ from soarmmoce_sdk.runtime_compat import CompatibleRuntimeRobot as RuntimeRobot
 
 from .agent_service import AgentService
 from .attention_worker import AttentionConfig, AttentionWorker, build_default_attention_payload
-from .errors import QuickControlError
+from .errors import MomoRobotError
 from .face_follow_worker import (
     DEFAULT_PAN_JOINT as DEFAULT_FOLLOW_PAN_JOINT,
     DEFAULT_TILT_JOINT as DEFAULT_FOLLOW_TILT_JOINT,
@@ -69,7 +69,7 @@ class MotionConfig:
     step_angle_deg: float = 5.0
 
 
-class QuickControlService:
+class MomoRobotService:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._robot: Optional[RuntimeRobot] = None
@@ -151,7 +151,7 @@ class QuickControlService:
             self._disconnect_locked()
             config_path = self._primary_config_path
             if not config_path:
-                raise QuickControlError("CONNECT_FAILED", "No SDK config available", 500)
+                raise MomoRobotError("CONNECT_FAILED", "No SDK config available", 500)
 
             try:
                 robot = self._build_robot(config_path)
@@ -165,7 +165,7 @@ class QuickControlService:
                     config_path=config_path,
                     last_connect_error=str(exc),
                 )
-                raise QuickControlError("CONNECT_FAILED", str(exc), 500) from exc
+                raise MomoRobotError("CONNECT_FAILED", str(exc), 500) from exc
 
             self._robot = robot
             self._set_runtime(
@@ -195,7 +195,7 @@ class QuickControlService:
     def _require_robot(self) -> RuntimeRobot:
         robot = self._robot
         if robot is None or not getattr(robot, "connected", False):
-            raise QuickControlError("NOT_CONNECTED", "Robot is not connected", 409)
+            raise MomoRobotError("NOT_CONNECTED", "Robot is not connected", 409)
         return robot
 
     @staticmethod
@@ -250,7 +250,7 @@ class QuickControlService:
         for index, name in enumerate(names):
             if str(name) == str(joint_name):
                 return int(index)
-        raise QuickControlError("INVALID_CONFIGURATION", f"Joint not found: {joint_name}", 500)
+        raise MomoRobotError("INVALID_CONFIGURATION", f"Joint not found: {joint_name}", 500)
 
     def _follow_payload_locked(self) -> dict[str, Any]:
         worker = self._follow_worker
@@ -419,7 +419,7 @@ class QuickControlService:
                 or DEFAULT_JOINT_NAMES
             )
             if joint_index < 0:
-                raise QuickControlError(
+                raise MomoRobotError(
                     "INVALID_ARGUMENT",
                     f"joint_index out of range: {joint_index}",
                 )
@@ -444,7 +444,7 @@ class QuickControlService:
                         "delta_deg": float(delta_deg),
                         "accepted": True,
                     }
-                raise QuickControlError(
+                raise MomoRobotError(
                     "INVALID_ARGUMENT",
                     f"joint_index out of range: {joint_index}",
                 )
@@ -524,7 +524,7 @@ class QuickControlService:
                 "-RZ": ("drz", -1.0),
             }
             if axis_norm not in axis_map:
-                raise QuickControlError(
+                raise MomoRobotError(
                     "INVALID_ARGUMENT",
                     f"Unsupported cartesian axis: {axis}",
                     400,
@@ -543,7 +543,7 @@ class QuickControlService:
                 }
                 robot.move_delta(**move_kwargs)
             except Exception as exc:  # noqa: BLE001
-                raise QuickControlError("CARTESIAN_FAILED", str(exc), 500) from exc
+                raise MomoRobotError("CARTESIAN_FAILED", str(exc), 500) from exc
 
             return {
                 "axis": axis_norm,
@@ -582,7 +582,7 @@ class QuickControlService:
             duration = float(np.clip(float(payload.get("duration", 2.0) or 2.0), 0.2, 20.0))
             wait = bool(payload.get("wait", True))
             if frame not in {"base", "tool"}:
-                raise QuickControlError("INVALID_ARGUMENT", "frame must be 'base' or 'tool'", 400)
+                raise MomoRobotError("INVALID_ARGUMENT", "frame must be 'base' or 'tool'", 400)
 
             if frame == "tool":
                 robot.move_delta(
@@ -674,14 +674,14 @@ class QuickControlService:
             robot = self._require_robot()
             joint_name = str(payload.get("joint_name", "") or "").strip()
             if not joint_name:
-                raise QuickControlError("INVALID_ARGUMENT", "joint_name is required", 400)
+                raise MomoRobotError("INVALID_ARGUMENT", "joint_name is required", 400)
 
             duration = float(np.clip(float(payload.get("duration", 1.0) or 1.0), 0.2, 20.0))
             wait = bool(payload.get("wait", True))
             target_deg = payload.get("target_deg")
             delta_deg = payload.get("delta_deg")
             if target_deg is None and delta_deg is None:
-                raise QuickControlError(
+                raise MomoRobotError(
                     "INVALID_ARGUMENT",
                     "rotate_joint requires target_deg or delta_deg",
                     400,
@@ -722,7 +722,7 @@ class QuickControlService:
         if not isinstance(params, dict):
             params = {}
         if not name:
-            raise QuickControlError("INVALID_ARGUMENT", "run_robot_behavior requires non-empty name", 400)
+            raise MomoRobotError("INVALID_ARGUMENT", "run_robot_behavior requires non-empty name", 400)
 
         if name in {"home", "go_home", "move_home", "startup_pose"}:
             speed_percent = int(np.clip(int(params.get("speed_percent", 50) or 50), 1, 100))
@@ -732,7 +732,7 @@ class QuickControlService:
             return {"ok": True, "skill": name, "result": self._agent_set_gripper({"open_ratio": 1.0, "wait": True})}
         if name in {"close_gripper", "gripper_close"}:
             return {"ok": True, "skill": name, "result": self._agent_set_gripper({"open_ratio": 0.0, "wait": True})}
-        raise QuickControlError(
+        raise MomoRobotError(
             "UNSUPPORTED_SKILL",
             f"unsupported skill: {name}",
             400,
@@ -765,7 +765,7 @@ class QuickControlService:
                 result = {"ok": False, "error": f"unsupported tool: {name}"}
                 return {"ok": False, "request_id": request_id, "result": result}
             return {"ok": True, "request_id": request_id, "result": result}
-        except QuickControlError as exc:
+        except MomoRobotError as exc:
             return {
                 "ok": False,
                 "request_id": request_id,
@@ -777,6 +777,26 @@ class QuickControlService:
                 "request_id": request_id,
                 "result": {"ok": False, "error": str(exc).strip() or "tool request failed"},
             }
+
+    def dispatch_tool(
+        self,
+        *,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        request_id: str = "",
+        timeout_sec: float = 6.0,
+    ) -> dict[str, Any]:
+        tool_name = str(name or "").strip()
+        if not tool_name:
+            raise MomoRobotError("INVALID_ARGUMENT", "tool name is required", 400)
+        args = arguments if isinstance(arguments, dict) else {}
+        resolved_request_id = str(request_id or "").strip() or f"tool-{time.time_ns()}"
+        return self._agent_tool_request(
+            tool_name,
+            dict(args),
+            resolved_request_id,
+            float(timeout_sec),
+        )
 
     def stop(self) -> dict[str, Any]:
         with self._lock:
@@ -1212,51 +1232,6 @@ class QuickControlService:
 
     def agent_warmup(self, *, prompt: str = "请只回复“就绪”。") -> dict[str, Any]:
         return self._agent.warmup(prompt=prompt)
-
-    def agent_build_stream_turn_spec(self, *, kind: str, prompt: str) -> dict[str, Any]:
-        return self._agent.build_stream_turn_spec(kind=kind, prompt=prompt)
-
-    def agent_complete_stream_turn(
-        self,
-        *,
-        kind: str,
-        prompt: str,
-        reply: str,
-        session_id: str,
-        bridge_session_key: str,
-        openclaw_elapsed_sec: float,
-        bridge_timing: Optional[dict[str, Any]] = None,
-    ) -> dict[str, Any]:
-        return self._agent.complete_stream_turn(
-            kind=kind,
-            prompt=prompt,
-            reply=reply,
-            session_id=session_id,
-            bridge_session_key=bridge_session_key,
-            openclaw_elapsed_sec=openclaw_elapsed_sec,
-            bridge_timing=bridge_timing,
-        )
-
-    def agent_fail_stream_turn(
-        self,
-        *,
-        kind: str,
-        prompt: str,
-        error: str,
-        session_id: str = "",
-        bridge_session_key: str = "",
-        openclaw_elapsed_sec: float = 0.0,
-        bridge_timing: Optional[dict[str, Any]] = None,
-    ) -> dict[str, Any]:
-        return self._agent.fail_stream_turn(
-            kind=kind,
-            prompt=prompt,
-            error=error,
-            session_id=session_id,
-            bridge_session_key=bridge_session_key,
-            openclaw_elapsed_sec=openclaw_elapsed_sec,
-            bridge_timing=bridge_timing,
-        )
 
     def agent_reset_session(self) -> dict[str, Any]:
         return self._agent.reset_session()

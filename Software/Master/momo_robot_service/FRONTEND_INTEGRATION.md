@@ -1,10 +1,10 @@
-# Quick Control API Frontend Integration
+# Momo Robot Service Frontend Integration
 
 这份文档给前端 / App 同事使用，重点只讲当前推荐方案：
 
 - 聊天主链路使用 `WS /api/v1/ws/agent-stream`
 - 页面内保持长连接，不要每问一句就断开重连
-- 文本展示优先消费 `agent_delta`
+- 文本展示消费最终 `agent_reply.data.reply`
 - 如需语音播报，继续走同一条 WebSocket，不要再直连另一套 TTS 服务
 
 这份文档适合直接转给前端同事落地。
@@ -22,8 +22,8 @@
 原因很简单：
 
 - `POST /api/v1/agent/ask` 是“等最终结果再返回”
-- `WS /api/v1/ws/agent-stream` 能在生成过程中收到 `agent_delta`
-- 当前后端已经把 OpenClaw 会话对齐到主会话，并且把内部 bridge 改成常驻，连续多轮时延会明显更稳定
+- `WS /api/v1/ws/agent-stream` 会在同一条连接上返回 `turn_started`、最终 `agent_reply`、可选 TTS 状态和 `turn_done`
+- 当前后端会复用配置好的 Nanobot agent 会话，机器人硬件会话只由 `momo_robot_service` 拥有
 
 如果前端继续使用单次 HTTP ask，就算后端已经修好了，会话体验还是会比网页慢。
 
@@ -58,8 +58,8 @@ WebSocket:
 
 当前链路里有两层“热起来之后会更快”的状态：
 
-- OpenClaw 主会话
-- quick_control_api 内部到 OpenClaw gateway 的 bridge 长连接
+- agent 主会话
+- momo_robot_service 内部的 agent client
 
 所以前端要尽量：
 
@@ -243,64 +243,7 @@ REST 主要用来做状态、恢复和调试，不建议承担主聊天流量：
 - 显示“处理中”
 - 记录本轮开始时间
 
-### 6.3 `agent_accepted`
-
-表示 OpenClaw gateway 已经接受这一轮请求。
-
-示例：
-
-```json
-{
-  "type": "agent_accepted",
-  "data": {
-    "run_id": "xxx",
-    "session_key": "agent:main:main",
-    "status": "accepted"
-  }
-}
-```
-
-前端动作：
-
-- 可选更新更细的状态文案，例如“已接单”
-- 通常不必单独渲染成消息
-
-### 6.4 `agent_delta`
-
-这是最重要的实时文本事件。
-
-示例：
-
-```json
-{
-  "type": "agent_delta",
-  "data": {
-    "run_id": "xxx",
-    "session_key": "agent:main:main",
-    "delta": "你好",
-    "reply": "你好，很高兴见到你。",
-    "elapsed_ms": 1820
-  }
-}
-```
-
-前端渲染规则一定要这样做：
-
-- 优先使用 `data.reply`
-- 把 `data.reply` 当作“当前完整文本”覆盖渲染
-- 不要简单把 `data.delta` append 到末尾
-
-原因：
-
-- 当前后端发出来的 `reply` 更适合作为累计全文
-- 部分情况下可能会出现重复 `agent_delta`
-- 如果前端按 append 模式处理，容易出现重复文本
-
-正确做法：
-
-- assistant bubble 的内容始终等于最近一次 `agent_delta.data.reply`
-
-### 6.5 `agent_reply`
+### 6.3 `agent_reply`
 
 表示最终文本结果已经确定。
 
@@ -316,16 +259,8 @@ REST 主要用来做状态、恢复和调试，不建议承担主聊天流量：
     "reply": "你好，很高兴见到你。",
     "error": "",
     "session_id": "...",
-    "bridge_session_key": "agent:main:main",
-    "openclaw_elapsed_sec": 1.93,
-    "bridge_timing": {
-      "accept_ms": 121,
-      "first_delta_ms": 1878,
-      "final_ms": 1893,
-      "history_ms": 42,
-      "wait_ms": 1772,
-      "total_ms": 1936
-    },
+    "agent_session_key": "nanobot:momo-agent:main",
+    "agent_elapsed_sec": 1.93,
     "tts": {
       "requested": false
     },
@@ -337,9 +272,9 @@ REST 主要用来做状态、恢复和调试，不建议承担主聊天流量：
 前端动作：
 
 - 用 `data.reply` 覆盖最终文本
-- 如果不关心细节指标，`bridge_timing` 可以只打日志
+- 记录 `data.agent_elapsed_sec` 作为本轮 agent 耗时指标
 
-### 6.6 `turn_done`
+### 6.4 `turn_done`
 
 表示这一轮彻底结束。
 
@@ -575,7 +510,7 @@ WebSocket 请求级错误。
 - `data.enabled`
 - `data.busy`
 - `data.session_id`
-- `data.bridge_session_key`
+- `data.agent_session_key`
 - `data.last_error`
 - `data.tts.enabled`
 - `data.tts.available`
@@ -666,12 +601,6 @@ ws.onmessage = (event) => {
     return;
   }
 
-  if (payload.type === "agent_delta") {
-    currentAssistantText = payload.data?.reply || payload.data?.delta || "";
-    updateAssistantBubble(currentAssistantText);
-    return;
-  }
-
   if (payload.type === "agent_reply") {
     currentAssistantText = payload.data?.reply || currentAssistantText;
     updateAssistantBubble(currentAssistantText);
@@ -720,7 +649,7 @@ function sendAsk(message: string, withTts = false) {
 - 主聊天：
   - 全部走 WebSocket `ask`
 - 文本渲染：
-  - 用 `agent_delta.data.reply` 做覆盖更新
+  - 用 `agent_reply.data.reply` 做最终文本
 - 语音播放：
   - 收 `audio_chunk`，本地解码 PCM16 播放
 - 新会话：
@@ -731,4 +660,4 @@ function sendAsk(message: string, withTts = false) {
 一句话总结：
 
 - 不要再把 `POST /api/v1/agent/ask` 当聊天主流程
-- 聊天页应该使用一条长连接 WebSocket，边收 `agent_delta` 边渲染
+- 聊天页应该使用一条长连接 WebSocket，等待 `agent_reply` 后完成这一轮

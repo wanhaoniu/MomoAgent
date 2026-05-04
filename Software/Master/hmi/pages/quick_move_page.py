@@ -174,7 +174,6 @@ class QuickMovePage(QWidget):
         top.addWidget(self.right_group, stretch=1)
 
         bottom = QHBoxLayout()
-        self.goto_origin_btn = QPushButton("Origin")
         self.goto_zero_btn = QPushButton("Home")
         self.free_move_btn = QPushButton("Free Move")
         self.status_light = QLabel("●")
@@ -182,7 +181,6 @@ class QuickMovePage(QWidget):
 
         self.goto_zero_btn.clicked.connect(self.home_clicked.emit)
 
-        bottom.addWidget(self.goto_origin_btn)
         bottom.addWidget(self.goto_zero_btn)
         bottom.addWidget(self.free_move_btn)
         bottom.addStretch()
@@ -450,7 +448,6 @@ class QuickMovePage(QWidget):
             minus_btn.setEnabled(motion_enabled)
             plus_btn.setEnabled(motion_enabled)
 
-        self.goto_origin_btn.setEnabled(motion_enabled)
         self.goto_zero_btn.setEnabled(motion_enabled)
         self.step_angle_spin.setEnabled(motion_enabled)
 
@@ -460,7 +457,7 @@ class QuickMovePage(QWidget):
         self.step_dist_spin.setEnabled(cartesian_enabled)
         self.coord_label.setEnabled(cartesian_enabled)
         self.coord_combo.setEnabled(cartesian_enabled)
-        self.free_move_btn.setEnabled(cartesian_enabled)
+        self.free_move_btn.setEnabled(motion_enabled)
 
     def set_status_light(self, level: str):
         color = {
@@ -477,6 +474,5 @@ class QuickMovePage(QWidget):
         self.coord_label.setText(tr("quick_coord"))
         self.speed_label.setText(tr("quick_speed"))
         self.pose_group.setTitle(tr("quick_tcp"))
-        self.goto_origin_btn.setText(tr("quick_origin"))
         self.goto_zero_btn.setText(tr("quick_zero"))
         self.free_move_btn.setText(tr("quick_free"))

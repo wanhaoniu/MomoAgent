@@ -60,7 +60,8 @@ ik:
 
 protocol:
   unit: deg
-  max_retries: 1
+  max_retries: 3
+  retry_delay_s: 0.02
   use_seq: false
   sdk_to_server_map:
     shoulder_pan: shoulder_pan

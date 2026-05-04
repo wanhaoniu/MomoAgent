@@ -31,7 +31,7 @@ insightface = [
 
 [project.scripts]
 face-tracking-service = "face_tracking.main:cli_main"
-face-tracking-skill = "face_tracking.openclaw_skill_cli:main"
+face-tracking-skill = "face_tracking.skill_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

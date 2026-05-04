@@ -24,30 +24,7 @@ class MomoAgentApp:
         self._client.close()
 
     def _backend_label(self) -> str:
-        return str(self._config.agent_backend or "openclaw").strip() or "openclaw"
-
-    def _print_bridge_timing(self, reply: AgentReply) -> None:
-        payload = reply.raw_payload
-        if not isinstance(payload, dict):
-            return
-        bridge = payload.get("bridge")
-        if not isinstance(bridge, dict):
-            return
-        timing = bridge.get("timing")
-        if not isinstance(timing, dict):
-            return
-        accept_ms = float(timing.get("accept_ms", 0.0) or 0.0)
-        wait_ms = float(timing.get("wait_ms", 0.0) or 0.0)
-        history_ms = float(timing.get("history_ms", 0.0) or 0.0)
-        total_ms = float(timing.get("total_ms", 0.0) or 0.0)
-        print(
-            "[timing] agent-bridge "
-            f"accept={accept_ms/1000.0:.2f}s "
-            f"wait={wait_ms/1000.0:.2f}s "
-            f"history={history_ms/1000.0:.2f}s "
-            f"bridge_total={total_ms/1000.0:.2f}s",
-            flush=True,
-        )
+        return str(self._config.agent_backend or "nanobot").strip() or "nanobot"
 
     def _speak_reply(self, text: str) -> None:
         if not self._config.tts.enabled:
@@ -66,7 +43,6 @@ class MomoAgentApp:
         elapsed = time.perf_counter() - started
         print(f"[agent] {reply.text}", flush=True)
         print(f"[timing] {self._backend_label()}={elapsed:.2f}s", flush=True)
-        self._print_bridge_timing(reply)
         if speak:
             self._speak_reply(reply.text)
         return reply
@@ -77,7 +53,6 @@ class MomoAgentApp:
         elapsed = time.perf_counter() - started
         print(f"[warmup] {reply.text}", flush=True)
         print(f"[timing] warmup-{self._backend_label()}={elapsed:.2f}s", flush=True)
-        self._print_bridge_timing(reply)
 
     def reset_session(self) -> None:
         self._client.reset_session()
@@ -131,9 +106,9 @@ class MomoAgentApp:
                 continue
             if command == "/session":
                 session_id = str(self._client.session_id or "").strip()
-                session_key = str(self._client.bridge_session_key or "").strip()
+                session_key = str(self._client.agent_session_key or "").strip()
                 print(
-                    f"[session] current={session_id or '<empty>'} bridge_key={session_key or '<empty>'}",
+                    f"[session] current={session_id or '<empty>'} agent_key={session_key or '<empty>'}",
                     flush=True,
                 )
                 continue
@@ -250,10 +225,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _apply_cli_overrides(config: MomoAgentConfig, args: argparse.Namespace) -> MomoAgentConfig:
-    openclaw = config.openclaw
     nanobot = config.nanobot
     if getattr(args, "force_new_session", False):
-        openclaw = replace(openclaw, force_new_session=True, session_id="")
         nanobot = replace(nanobot, force_new_session=True, session_key="")
     tts = config.tts
     if getattr(args, "no_tts", False):
@@ -266,7 +239,6 @@ def _apply_cli_overrides(config: MomoAgentConfig, args: argparse.Namespace) -> M
         stt=config.stt,
         tts=tts,
         agent_backend=config.agent_backend,
-        openclaw=openclaw,
         nanobot=nanobot,
     )
 

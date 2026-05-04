@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import atexit
 import base64
 import io
 import json
 import os
 import re
-import select
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
-import uuid
 import wave
 import ast
 from pathlib import Path
@@ -85,155 +82,8 @@ COSYVOICE_TTS_SAMPLE_RATE_DEFAULT = 24000
 COSYVOICE_TTS_TIMEOUT_SEC_DEFAULT = 90.0
 COSYVOICE_TTS_MAX_CHARS_DEFAULT = 120
 
-OPENCLAW_BIN_DEFAULT = "openclaw"
-OPENCLAW_AGENT_ID_DEFAULT = "main"
-OPENCLAW_TIMEOUT_SEC_DEFAULT = 90.0
-OPENCLAW_SKILL_NAME_DEFAULT = "soarmmoce-control"
-OPENCLAW_LOCAL_DIR = REPO_ROOT / "Software" / "Master" / "openclaw_local"
-OPENCLAW_GATEWAY_BRIDGE_SCRIPT_DEFAULT = OPENCLAW_LOCAL_DIR / "openclaw_gateway_bridge.js"
-SDK_SRC = REPO_ROOT / "sdk" / "src"
-
-OPENCLAW_THINKING_DEFAULT = "minimal"
-
-
-class _OpenClawGatewayBridgeManager:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._proc: Optional[subprocess.Popen[str]] = None
-
-    def _resolve_node_bin(self) -> str:
-        env_bin = str(os.getenv("OPENCLAW_NODE_BIN", "")).strip()
-        if env_bin:
-            return env_bin
-        return shutil.which("node") or shutil.which("nodejs") or ""
-
-    def _resolve_script_path(self) -> Path:
-        raw = str(
-            os.getenv("OPENCLAW_GATEWAY_BRIDGE_SCRIPT", str(OPENCLAW_GATEWAY_BRIDGE_SCRIPT_DEFAULT))
-        ).strip()
-        return Path(raw).expanduser().resolve()
-
-    def available(self) -> bool:
-        node_bin = self._resolve_node_bin()
-        script_path = self._resolve_script_path()
-        return bool(node_bin) and script_path.exists() and script_path.is_file()
-
-    def _stop_locked(self) -> None:
-        proc = self._proc
-        self._proc = None
-        if proc is None:
-            return
-        try:
-            if proc.stdin is not None:
-                proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            if proc.poll() is None:
-                proc.terminate()
-                proc.wait(timeout=1.5)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-
-    def stop(self) -> None:
-        with self._lock:
-            self._stop_locked()
-
-    def _ensure_proc_locked(self) -> subprocess.Popen[str]:
-        if self._proc is not None and self._proc.poll() is None:
-            return self._proc
-
-        self._stop_locked()
-        node_bin = self._resolve_node_bin()
-        script_path = self._resolve_script_path()
-        if not node_bin:
-            raise RuntimeError("Node.js 不可用，无法启动 OpenClaw Gateway bridge")
-        if not script_path.exists():
-            raise RuntimeError(f"OpenClaw Gateway bridge 不存在: {script_path}")
-
-        env = os.environ.copy()
-        env.setdefault("NODE_NO_WARNINGS", "1")
-        self._proc = subprocess.Popen(
-            [node_bin, str(script_path)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-            cwd=str(REPO_ROOT),
-            env=env,
-        )
-        return self._proc
-
-    def _readline_locked(self, timeout_sec: float) -> str:
-        proc = self._proc
-        if proc is None or proc.stdout is None:
-            raise RuntimeError("OpenClaw Gateway bridge 尚未启动")
-        timeout = max(0.1, float(timeout_sec))
-        ready, _, _ = select.select([proc.stdout], [], [], timeout)
-        if not ready:
-            raise RuntimeError(f"OpenClaw Gateway bridge 超时 ({timeout:.1f}s)")
-        line = proc.stdout.readline()
-        if not line:
-            raise RuntimeError("OpenClaw Gateway bridge 已退出")
-        return line
-
-    def _read_json_message_locked(self, timeout_sec: float) -> Dict[str, Any]:
-        deadline = time.monotonic() + max(1.0, float(timeout_sec))
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise RuntimeError("OpenClaw Gateway bridge 等待 JSON 响应超时")
-            raw = self._readline_locked(remaining)
-            stripped = str(raw or "").strip()
-            if not stripped:
-                continue
-            try:
-                message = json.loads(stripped)
-            except json.JSONDecodeError:
-                print(
-                    f"[Speech][OpenClawBridge] ignored_non_json line={stripped[:200]}",
-                    flush=True,
-                )
-                continue
-            if not isinstance(message, dict):
-                raise RuntimeError("OpenClaw Gateway bridge 返回了非 JSON 对象")
-            return message
-
-    def request(self, payload: Dict[str, Any], timeout_sec: float) -> Dict[str, Any]:
-        with self._lock:
-            last_exc: Optional[Exception] = None
-            for _ in range(2):
-                proc = self._ensure_proc_locked()
-                if proc.stdin is None:
-                    self._stop_locked()
-                    raise RuntimeError("OpenClaw Gateway bridge stdin 不可用")
-                try:
-                    proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                    proc.stdin.flush()
-                    message = self._read_json_message_locked(timeout_sec)
-                    if str(message.get("id", "")) != str(payload.get("id", "")):
-                        raise RuntimeError("OpenClaw Gateway bridge 返回了不匹配的请求 ID")
-                    if not bool(message.get("ok")):
-                        err = str(message.get("error", "")).strip() or "OpenClaw Gateway bridge 请求失败"
-                        raise RuntimeError(err)
-                    body = message.get("payload")
-                    if not isinstance(body, dict):
-                        raise RuntimeError("OpenClaw Gateway bridge payload 格式无效")
-                    return body
-                except Exception as exc:
-                    last_exc = exc
-                    self._stop_locked()
-            if last_exc is not None:
-                raise RuntimeError(f"OpenClaw Gateway bridge 调用失败: {last_exc}") from last_exc
-            raise RuntimeError("OpenClaw Gateway bridge 调用失败")
-
-
-_OPENCLAW_GATEWAY_BRIDGE = _OpenClawGatewayBridgeManager()
-atexit.register(_OPENCLAW_GATEWAY_BRIDGE.stop)
+MOMO_ROBOT_SERVICE_URL_DEFAULT = "http://127.0.0.1:8010"
+MOMO_ROBOT_AGENT_TIMEOUT_SEC_DEFAULT = 90.0
 
 
 def _audio_input_unavailable_message() -> str:
@@ -354,141 +204,6 @@ def _extract_text_from_stt_payload(payload: Any) -> str:
                 if got:
                     return got
     return ""
-
-
-def _parse_json_with_noise(raw: str) -> Optional[Any]:
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-
-    first_obj = text.find("{")
-    last_obj = text.rfind("}")
-    if first_obj >= 0 and last_obj > first_obj:
-        snippet = text[first_obj : last_obj + 1]
-        try:
-            return json.loads(snippet)
-        except Exception:
-            pass
-
-    first_arr = text.find("[")
-    last_arr = text.rfind("]")
-    if first_arr >= 0 and last_arr > first_arr:
-        snippet = text[first_arr : last_arr + 1]
-        try:
-            return json.loads(snippet)
-        except Exception:
-            pass
-    return None
-
-
-def _extract_text_from_openclaw_payload(payload: Any) -> str:
-    if isinstance(payload, str):
-        return payload.strip()
-    if isinstance(payload, list):
-        texts = [_extract_text_from_openclaw_payload(x) for x in payload]
-        texts = [x for x in texts if x]
-        return "\n".join(texts).strip()
-    if isinstance(payload, dict):
-        if isinstance(payload.get("payloads"), list):
-            texts: List[str] = []
-            for item in payload.get("payloads", []):
-                if isinstance(item, dict):
-                    t = str(item.get("text", "")).strip()
-                    if t:
-                        texts.append(t)
-            if texts:
-                # OpenClaw may stream intermediate thoughts as multiple payload items;
-                # prefer the last non-empty item as final assistant reply.
-                return texts[-1].strip()
-        for key in ("text", "message", "content", "reply", "answer"):
-            val = payload.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-        for key in ("data", "result", "output", "choices"):
-            if key in payload:
-                got = _extract_text_from_openclaw_payload(payload[key])
-                if got:
-                    return got
-    return ""
-
-
-def _extract_openclaw_session_id(payload: Any) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    meta = payload.get("meta")
-    if not isinstance(meta, dict):
-        for key in ("result", "data", "payload", "output"):
-            sid = _extract_openclaw_session_id(payload.get(key))
-            if sid:
-                return sid
-        return ""
-    agent_meta = meta.get("agentMeta")
-    if isinstance(agent_meta, dict):
-        sid = agent_meta.get("sessionId")
-        if sid is not None:
-            text = str(sid).strip()
-            if text:
-                return text
-    for key in ("result", "data", "payload", "output"):
-        sid = _extract_openclaw_session_id(payload.get(key))
-        if sid:
-            return sid
-    return ""
-
-
-def _looks_like_node_request(text: str) -> bool:
-    raw = str(text or "").strip().lower()
-    if not raw:
-        return False
-    cn_hits = ("节点", "发布一个节点", "哪个节点", "node agent", "nodes")
-    en_hits = ("which node", "need a node", "specify a node", "publish a node")
-    return any(x in raw for x in cn_hits) or any(x in raw for x in en_hits)
-
-
-def _looks_like_python_missing(text: str) -> bool:
-    raw = str(text or "").strip().lower()
-    if not raw:
-        return False
-    hits = ("python command is not found", "command not found", "`python`", "python: not found")
-    return any(x in raw for x in hits)
-
-
-def _looks_like_dispatch_usage_error(text: str) -> bool:
-    raw = str(text or "").strip().lower()
-    if not raw:
-        return False
-    hits = (
-        "not directly supported by the script",
-        "use the `call` subcommand",
-        "use the call subcommand",
-        "can't be found",
-    )
-    return any(x in raw for x in hits)
-
-
-def _build_robot_control_message(user_text: str, skill_name: str) -> str:
-    text = str(user_text or "").strip()
-    return text
-
-
-def _sanitize_openclaw_reply(text: str) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        return ""
-    if "你在执行机械臂控制模式" not in raw:
-        return raw
-
-    for marker in ("机械臂已", "夹爪已", "执行成功", "执行失败", "SKILL_NOT_AVAILABLE", "失败", "成功"):
-        idx = raw.rfind(marker)
-        if idx >= 0:
-            cleaned = raw[idx:].strip()
-            if cleaned:
-                return cleaned
-    return raw
 
 
 def _parse_tool_arguments(value: Any) -> Dict[str, Any]:
@@ -1604,258 +1319,118 @@ class _CosyVoiceTtsWorker(QThread):
                 self.failed.emit(_format_tts_exception("CosyVoice", self._base_url, exc))
 
 
-class _OpenClawAgentWorker(QThread):
+class MomoRobotAgentWorker(QThread):
     done = pyqtSignal(str, str)
     failed = pyqtSignal(str)
 
     def __init__(
         self,
         message: str,
-        openclaw_bin: str,
-        agent_id: str,
-        session_id: str,
-        local_mode: bool,
+        service_url: str,
         timeout_sec: float,
-        thinking: str,
-        skill_name: str,
-        robot_mode: bool,
-        node_retry_count: int,
     ):
         super().__init__()
         self._message = str(message or "").strip()
-        self._openclaw_bin = str(openclaw_bin or OPENCLAW_BIN_DEFAULT).strip() or OPENCLAW_BIN_DEFAULT
-        self._agent_id = str(agent_id or OPENCLAW_AGENT_ID_DEFAULT).strip() or OPENCLAW_AGENT_ID_DEFAULT
-        self._session_id = str(session_id or "").strip()
-        self._local_mode = bool(local_mode)
+        self._service_url = (
+            str(service_url or "").strip().rstrip("/") or MOMO_ROBOT_SERVICE_URL_DEFAULT
+        )
         self._timeout_sec = max(5.0, float(timeout_sec))
-        self._thinking = str(thinking or OPENCLAW_THINKING_DEFAULT).strip() or OPENCLAW_THINKING_DEFAULT
-        self._skill_name = str(skill_name or OPENCLAW_SKILL_NAME_DEFAULT).strip() or OPENCLAW_SKILL_NAME_DEFAULT
-        self._robot_mode = bool(robot_mode)
-        self._node_retry_count = max(0, int(node_retry_count))
-        self._gateway_bridge_enabled = _env_bool("OPENCLAW_GATEWAY_BRIDGE_ENABLED", True)
+    def _agent_endpoint(self) -> str:
+        return f"{self._service_url}/api/v1/agent/ask"
 
-    def _should_use_gateway_bridge(self) -> bool:
-        if self._local_mode:
-            return False
-        if not self._gateway_bridge_enabled:
-            return False
-        return _OPENCLAW_GATEWAY_BRIDGE.available()
+    @staticmethod
+    def _extract_error(payload: Any, fallback: str) -> str:
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                message = str(err.get("message", "") or "").strip()
+                code = str(err.get("code", "") or "").strip()
+                if message and code:
+                    return f"{code}: {message}"
+                if message:
+                    return message
+            message = str(payload.get("message", "") or "").strip()
+            if message:
+                return message
+        return fallback
 
-    def _build_bridge_payload(self, message: str) -> Dict[str, Any]:
-        return {
-            "id": str(uuid.uuid4()),
-            "op": "agent_turn",
-            "message": str(message or ""),
-            "agent_id": self._agent_id,
-            "thinking": self._thinking,
-            "timeout_sec": self._timeout_sec,
-        }
+    @staticmethod
+    def _extract_turn(payload: Any) -> tuple[str, str]:
+        if not isinstance(payload, dict):
+            return "", ""
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        turn = data.get("turn")
+        if not isinstance(turn, dict):
+            turn = data
+        status = data.get("status")
+        if not isinstance(status, dict):
+            status = {}
+        reply = str(turn.get("reply", "") or data.get("reply", "") or "").strip()
+        agent_session_key = str(
+            turn.get("agent_session_key", "")
+            or data.get("agent_session_key", "")
+            or status.get("agent_session_key", "")
+            or ""
+        ).strip()
+        session_id = str(
+            turn.get("session_id", "")
+            or data.get("session_id", "")
+            or status.get("session_id", "")
+            or ""
+        ).strip()
+        return reply, agent_session_key or session_id
 
-    def _invoke_openclaw_bridge_once(self, message: str) -> Dict[str, Any]:
-        result = _OPENCLAW_GATEWAY_BRIDGE.request(
-            self._build_bridge_payload(message),
-            timeout_sec=self._timeout_sec + 5.0,
-        )
-        reply = str(result.get("reply", "")).strip()
-        session_id = str(result.get("session_id", "")).strip()
-        payload = {
-            "text": reply,
-            "meta": {"agentMeta": {"sessionId": session_id}},
-            "result": {"meta": {"agentMeta": {"sessionId": session_id}}},
-            "bridge": {
-                "runId": str(result.get("run_id", "")).strip(),
-                "sessionKey": str(result.get("session_key", "")).strip(),
-                "timing": result.get("timing", {}),
-            },
-        }
-        return {
-            "payload": payload,
-            "stdout": "",
-            "stderr": "",
-        }
-
-    def _build_subprocess_env(self) -> Dict[str, str]:
-        env = os.environ.copy()
-        if SDK_SRC.exists():
-            existing_pp = str(env.get("PYTHONPATH", "")).strip()
-            sdk_src_str = str(SDK_SRC.resolve())
-            if existing_pp:
-                env["PYTHONPATH"] = f"{sdk_src_str}:{existing_pp}"
-            else:
-                env["PYTHONPATH"] = sdk_src_str
-        return env
-
-    def _build_agent_cmd(self, message: str, session_id: str) -> List[str]:
-        cmd = [
-            self._openclaw_bin,
-            "--no-color",
-            "agent",
-            "--json",
-            "--message",
-            str(message or ""),
-            "--thinking",
-            self._thinking,
-        ]
-        if self._local_mode:
-            cmd.append("--local")
-
-        if session_id:
-            cmd.extend(["--session-id", session_id])
-        else:
-            cmd.extend(["--agent", self._agent_id])
-        return cmd
-
-    def _invoke_openclaw_once(self, message: str, session_id: str) -> Dict[str, Any]:
-        if self._should_use_gateway_bridge():
-            try:
-                return self._invoke_openclaw_bridge_once(message)
-            except Exception as exc:
-                print(
-                    f"[Speech][OpenClawBridge] fallback_to_cli reason={exc}",
-                    flush=True,
-                )
-        cmd = self._build_agent_cmd(message=message, session_id=session_id)
-        cwd = None
-        env = self._build_subprocess_env()
-        start_time = time.time()
-        start_perf = time.perf_counter()
-        proc: Optional[subprocess.CompletedProcess[str]] = None
-        if self._robot_mode:
-            skill_dir = Path.home() / ".openclaw" / "skills" / self._skill_name
-            if skill_dir.exists() and skill_dir.is_dir():
-                cwd = str(skill_dir)
+    def _ask_service(self) -> tuple[str, str]:
+        session = requests.Session()
+        session.trust_env = False
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
+            response = session.post(
+                self._agent_endpoint(),
+                json={"message": self._message},
                 timeout=self._timeout_sec,
-                check=False,
-                cwd=cwd,
-                env=env,
             )
-            stdout_text = str(proc.stdout or "").strip()
-            stderr_text = str(proc.stderr or "").strip()
-            if proc.returncode != 0:
-                err = stderr_text or stdout_text or f"OpenClaw 返回错误码 {proc.returncode}"
-                raise RuntimeError(err)
-
-            payload = _parse_json_with_noise(stdout_text)
-            if payload is None and stderr_text:
-                payload = _parse_json_with_noise(stderr_text)
-            if payload is None:
-                payload = {"text": stdout_text}
-            return {
-                "payload": payload,
-                "stdout": stdout_text,
-                "stderr": stderr_text,
-            }
-        except FileNotFoundError:
-            raise RuntimeError(f"找不到 OpenClaw 可执行文件: {self._openclaw_bin}")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("OpenClaw 调用超时")
-        except Exception as exc:
-            raise RuntimeError(f"OpenClaw 调用失败: {exc}") from exc
         finally:
-            end_time = time.time()
-            elapsed_sec = time.perf_counter() - start_perf
-            self._log_openclaw_invoke_timing(
-                start_time=start_time,
-                end_time=end_time,
-                elapsed_sec=elapsed_sec,
-                returncode=proc.returncode if proc is not None else None,
-                session_id=session_id,
-                message=message,
-            )
+            session.close()
 
-    def _log_openclaw_invoke_timing(
-        self,
-        *,
-        start_time: float,
-        end_time: float,
-        elapsed_sec: float,
-        returncode: Optional[int],
-        session_id: str,
-        message: str,
-    ) -> None:
-        print(
-            "[Speech][OpenClawTiming] "
-            f"start_time={start_time:.3f} "
-            f"end_time={end_time:.3f} "
-            f"elapsed_sec={elapsed_sec:.3f} "
-            f"returncode={returncode if returncode is not None else 'n/a'} "
-            f"session_id={'set' if session_id else 'new'} "
-            f"message_len={len(str(message or ''))}",
-            flush=True,
-        )
+        payload: Any
+        try:
+            payload = response.json()
+        except Exception:
+            payload = None
 
-    def _prepare_message(self, message: str, retry: bool = False) -> str:
-        base = str(message or "").strip()
-        if not self._robot_mode:
-            return base
-        return _build_robot_control_message(base, self._skill_name)
+        if not response.ok:
+            fallback = f"Momo Robot Service HTTP {response.status_code}"
+            raise RuntimeError(self._extract_error(payload, fallback))
+        if not isinstance(payload, dict):
+            raise RuntimeError("Momo Robot Service 返回了非 JSON 响应")
+        if not bool(payload.get("ok", False)):
+            raise RuntimeError(self._extract_error(payload, "Momo Robot Service agent 请求失败"))
+
+        reply, agent_session_key = self._extract_turn(payload)
+        if not reply:
+            raise RuntimeError("Momo Robot Service 未返回可用文本")
+        return reply, agent_session_key
 
     def run(self):
         if not self._message:
-            self.failed.emit("OpenClaw 输入为空")
+            self.failed.emit("Agent 输入为空")
             return
 
         if self.isInterruptionRequested():
-            self.failed.emit("OpenClaw 请求已取消")
+            self.failed.emit("Agent 请求已取消")
             return
 
-        attempts = 1 + self._node_retry_count
-        current_session = self._session_id
-        for idx in range(attempts):
-            retry = idx > 0
-            try:
-                result = self._invoke_openclaw_once(
-                    message=self._prepare_message(self._message, retry=retry),
-                    session_id=current_session,
-                )
-            except Exception as exc:
-                self.failed.emit(str(exc))
-                return
-
-            payload = result.get("payload")
-            stdout_text = str(result.get("stdout", "")).strip()
-            current_session = _extract_openclaw_session_id(payload) or current_session
-
-            reply = _extract_text_from_openclaw_payload(payload)
-            if not reply:
-                reply = stdout_text
-            reply = str(reply or "").strip()
-            if not reply:
-                self.failed.emit("OpenClaw 未返回可用文本")
-                return
-
-            if _looks_like_node_request(reply) and idx + 1 < attempts:
-                continue
-            if _looks_like_dispatch_usage_error(reply) and idx + 1 < attempts:
-                continue
-
-            if _looks_like_node_request(reply):
-                self.failed.emit(
-                    "OpenClaw 仍在请求节点，未进入 soarmmoce-control 技能执行链路。"
-                    "请检查 ~/.openclaw/skills 中技能安装状态。"
-                )
-                return
-            if _looks_like_dispatch_usage_error(reply):
-                self.failed.emit(
-                    "OpenClaw 已进入技能链路，但工具脚本调用格式不正确。"
-                    "应使用：python3 ~/.openclaw/skills/soarmmoce-control/scripts/soarmmoce_tools.py call --name ... --args ..."
-                )
-                return
-
-            if _looks_like_python_missing(reply):
-                self.failed.emit(
-                    "OpenClaw 已进入技能链路，但执行环境缺少 `python` 命令。"
-                    "请在系统中提供 `python` 或让技能脚本固定使用 python3。"
-                )
-                return
-
-            self.done.emit(reply, current_session)
+        try:
+            reply, agent_session_key = self._ask_service()
+        except Exception as exc:
+            self.failed.emit(str(exc))
             return
+        if self.isInterruptionRequested():
+            self.failed.emit("Agent 请求已取消")
+            return
+        self.done.emit(reply, agent_session_key)
 
 
 class SpeechInputWindow(QWidget):
@@ -1904,7 +1479,7 @@ class SpeechInputWindow(QWidget):
         self._audio_stream: Optional[sd.InputStream] = None
         self._audio_chunks: List[np.ndarray] = []
         self._stt_worker: Optional[_SttWorker] = None
-        self._openclaw_worker: Optional[_OpenClawAgentWorker] = None
+        self._agent_worker: Optional[MomoRobotAgentWorker] = None
         self._tts_worker: Optional[QThread] = None
         self._pending_tts_text = ""
 
@@ -2126,34 +1701,29 @@ class SpeechInputWindow(QWidget):
         except Exception:
             self._cosyvoice_tts_max_chars = COSYVOICE_TTS_MAX_CHARS_DEFAULT
 
-        self._openclaw_enabled = _env_bool("OPENCLAW_ENABLED", True)
-        self._openclaw_bin = str(os.getenv("OPENCLAW_BIN", OPENCLAW_BIN_DEFAULT)).strip() or OPENCLAW_BIN_DEFAULT
-        self._openclaw_agent_id = str(
-            os.getenv("OPENCLAW_AGENT_ID", OPENCLAW_AGENT_ID_DEFAULT)
-        ).strip() or OPENCLAW_AGENT_ID_DEFAULT
-        self._openclaw_skill_name = str(
-            os.getenv("OPENCLAW_SKILL_NAME", OPENCLAW_SKILL_NAME_DEFAULT)
-        ).strip() or OPENCLAW_SKILL_NAME_DEFAULT
-        self._openclaw_local_mode = _env_bool("OPENCLAW_LOCAL", False)
-        self._openclaw_robot_mode = _env_bool("OPENCLAW_ROBOT_MODE", True)
-        self._openclaw_force_new_session = _env_bool("OPENCLAW_FORCE_NEW_SESSION", False)
+        self._agent_enabled = _runtime_env_bool("MOMO_ROBOT_AGENT_ENABLED", True, runtime_env)
+        self._agent_service_url = (
+            _runtime_env_get(
+                "MOMO_ROBOT_SERVICE_URL",
+                MOMO_ROBOT_SERVICE_URL_DEFAULT,
+                runtime_env,
+            )
+            or MOMO_ROBOT_SERVICE_URL_DEFAULT
+        ).strip() or MOMO_ROBOT_SERVICE_URL_DEFAULT
         try:
-            self._openclaw_node_retry_count = max(
-                0, int(str(os.getenv("OPENCLAW_NODE_RETRY_COUNT", "2")).strip())
+            self._agent_timeout_sec = float(
+                str(
+                    _runtime_env_get(
+                        "MOMO_ROBOT_AGENT_TIMEOUT_SEC",
+                        str(MOMO_ROBOT_AGENT_TIMEOUT_SEC_DEFAULT),
+                        runtime_env,
+                    )
+                ).strip()
             )
         except Exception:
-            self._openclaw_node_retry_count = 2
-        self._openclaw_thinking = str(
-            os.getenv("OPENCLAW_THINKING", OPENCLAW_THINKING_DEFAULT)
-        ).strip() or OPENCLAW_THINKING_DEFAULT
-        try:
-            self._openclaw_timeout_sec = float(
-                str(os.getenv("OPENCLAW_TIMEOUT_SEC", str(OPENCLAW_TIMEOUT_SEC_DEFAULT))).strip()
-            )
-        except Exception:
-            self._openclaw_timeout_sec = OPENCLAW_TIMEOUT_SEC_DEFAULT
-        self._openclaw_timeout_sec = max(5.0, self._openclaw_timeout_sec)
-        self._openclaw_session_id = str(os.getenv("OPENCLAW_SESSION_ID", "")).strip()
+            self._agent_timeout_sec = MOMO_ROBOT_AGENT_TIMEOUT_SEC_DEFAULT
+        self._agent_timeout_sec = max(5.0, self._agent_timeout_sec)
+        self._agent_session_key = ""
 
         if icon_path is not None:
             self.set_icon(icon_path)
@@ -2327,55 +1897,22 @@ class SpeechInputWindow(QWidget):
             except Exception:
                 pass
 
-    def set_openclaw_config(
+    def set_agent_config(
         self,
         enabled: bool = True,
-        openclaw_bin: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        skill_name: Optional[str] = None,
-        local_mode: Optional[bool] = None,
-        robot_mode: Optional[bool] = None,
-        force_new_session: Optional[bool] = None,
-        node_retry_count: Optional[int] = None,
-        thinking: Optional[str] = None,
+        service_url: Optional[str] = None,
         timeout_sec: Optional[float] = None,
-        session_id: Optional[str] = None,
     ):
-        self._openclaw_enabled = bool(enabled)
-        if openclaw_bin is not None:
-            val = str(openclaw_bin).strip()
+        self._agent_enabled = bool(enabled)
+        if service_url is not None:
+            val = str(service_url).strip().rstrip("/")
             if val:
-                self._openclaw_bin = val
-        if agent_id is not None:
-            val = str(agent_id).strip()
-            if val:
-                self._openclaw_agent_id = val
-        if skill_name is not None:
-            val = str(skill_name).strip()
-            if val:
-                self._openclaw_skill_name = val
-        if local_mode is not None:
-            self._openclaw_local_mode = bool(local_mode)
-        if robot_mode is not None:
-            self._openclaw_robot_mode = bool(robot_mode)
-        if force_new_session is not None:
-            self._openclaw_force_new_session = bool(force_new_session)
-        if node_retry_count is not None:
-            try:
-                self._openclaw_node_retry_count = max(0, int(node_retry_count))
-            except Exception:
-                pass
-        if thinking is not None:
-            val = str(thinking).strip()
-            if val:
-                self._openclaw_thinking = val
+                self._agent_service_url = val
         if timeout_sec is not None:
             try:
-                self._openclaw_timeout_sec = max(5.0, float(timeout_sec))
+                self._agent_timeout_sec = max(5.0, float(timeout_sec))
             except Exception:
                 pass
-        if session_id is not None:
-            self._openclaw_session_id = str(session_id).strip()
 
     # Backward compatibility for old call sites.
     def set_minimax_config(self, api_key: str, stt_url: Optional[str] = None, model: Optional[str] = None):
@@ -2644,68 +2181,57 @@ class SpeechInputWindow(QWidget):
         self._stt_worker.finished.connect(self._on_stt_finished)
         self._stt_worker.start()
 
-    def _start_openclaw(self, prompt_text: str):
+    def _start_agent(self, prompt_text: str):
         text = str(prompt_text or "").strip()
         if not text:
             return
-        if not self._openclaw_enabled:
+        if not self._agent_enabled:
             return
         if self._is_agent_running:
-            self._status_text = "OpenClaw 正在处理中，请稍候..."
+            self._status_text = "Agent 正在处理中，请稍候..."
             self.update()
             return
 
         self._is_agent_running = True
-        self._status_text = f"你说: {text}\nOpenClaw处理中..."
+        self._status_text = f"你说: {text}\nAgent 处理中..."
         self.update()
 
-        session_id = self._openclaw_session_id
-        if self._openclaw_force_new_session:
-            session_id = uuid.uuid4().hex
-
-        self._openclaw_worker = _OpenClawAgentWorker(
+        self._agent_worker = MomoRobotAgentWorker(
             message=text,
-            openclaw_bin=self._openclaw_bin,
-            agent_id=self._openclaw_agent_id,
-            session_id=session_id,
-            local_mode=self._openclaw_local_mode,
-            timeout_sec=self._openclaw_timeout_sec,
-            thinking=self._openclaw_thinking,
-            skill_name=self._openclaw_skill_name,
-            robot_mode=self._openclaw_robot_mode,
-            node_retry_count=self._openclaw_node_retry_count,
+            service_url=self._agent_service_url,
+            timeout_sec=self._agent_timeout_sec,
         )
-        self._openclaw_worker.done.connect(self._on_openclaw_done)
-        self._openclaw_worker.failed.connect(self._on_openclaw_failed)
-        self._openclaw_worker.finished.connect(self._on_openclaw_finished)
-        self._openclaw_worker.start()
+        self._agent_worker.done.connect(self._on_agent_done)
+        self._agent_worker.failed.connect(self._on_agent_failed)
+        self._agent_worker.finished.connect(self._on_agent_finished)
+        self._agent_worker.start()
 
-    def _on_openclaw_done(self, reply: str, session_id: str):
-        reply_text = _sanitize_openclaw_reply(str(reply or "").strip())
+    def _on_agent_done(self, reply: str, agent_session_key: str):
+        reply_text = str(reply or "").strip()
         self._last_agent_reply = reply_text
         if reply_text:
             self._status_text = f"Momo: {reply_text}"
             self.agent_reply_ready.emit(reply_text)
             self._start_tts(reply_text)
         else:
-            self._status_text = "OpenClaw 未返回文本"
+            self._status_text = "Agent 未返回文本"
             self.agent_failed.emit(self._status_text)
 
-        sid = str(session_id or "").strip()
-        if (not self._openclaw_force_new_session) and sid and sid != self._openclaw_session_id:
-            self._openclaw_session_id = sid
-            self.agent_session_changed.emit(sid)
+        key = str(agent_session_key or "").strip()
+        if key and key != self._agent_session_key:
+            self._agent_session_key = key
+            self.agent_session_changed.emit(key)
         self.update()
 
-    def _on_openclaw_failed(self, error_text: str):
-        msg = str(error_text or "").strip() or "OpenClaw 调用失败"
+    def _on_agent_failed(self, error_text: str):
+        msg = str(error_text or "").strip() or "Agent 调用失败"
         self._status_text = msg
         self.agent_failed.emit(msg)
         self.update()
 
-    def _on_openclaw_finished(self):
+    def _on_agent_finished(self):
         self._is_agent_running = False
-        self._openclaw_worker = None
+        self._agent_worker = None
         self.update()
 
     def _on_stt_done(self, text: str):
@@ -2716,8 +2242,8 @@ class SpeechInputWindow(QWidget):
             self.update()
             return
 
-        if self._openclaw_enabled:
-            self._start_openclaw(self._last_text)
+        if self._agent_enabled:
+            self._start_agent(self._last_text)
         else:
             self._status_text = self._last_text
         self.transcript_ready.emit(self._last_text)
@@ -2867,16 +2393,16 @@ class SpeechInputWindow(QWidget):
             except Exception:
                 pass
             self._stt_worker = None
-        if self._openclaw_worker is not None:
+        if self._agent_worker is not None:
             try:
-                self._openclaw_worker.requestInterruption()
-                self._openclaw_worker.wait(1000)
-                if self._openclaw_worker.isRunning():
-                    self._openclaw_worker.terminate()
-                    self._openclaw_worker.wait(500)
+                self._agent_worker.requestInterruption()
+                self._agent_worker.wait(1000)
+                if self._agent_worker.isRunning():
+                    self._agent_worker.terminate()
+                    self._agent_worker.wait(500)
             except Exception:
                 pass
-            self._openclaw_worker = None
+            self._agent_worker = None
         self._stop_tts_playback(wait_ms=1000, clear_pending=True)
         self.closed.emit()
         super().closeEvent(event)

@@ -23,7 +23,7 @@ DEFAULT_REMOTE_TTS_TIMEOUT_SEC = 30.0
 DEFAULT_REMOTE_TTS_MAX_CHARS = 400
 REMOTE_TTS_HEALTH_TIMEOUT_SEC = 1.2
 REMOTE_TTS_HEALTH_CACHE_SEC = 5.0
-REMOTE_TTS_BRIDGE_SCRIPT = REPO_ROOT / "Software" / "Master" / "quick_control_api" / "tts_stream_bridge.js"
+REMOTE_TTS_BRIDGE_SCRIPT = REPO_ROOT / "Software" / "Master" / "momo_robot_service" / "tts_stream_bridge.js"
 
 
 def _read_bool(name: str, default: bool) -> bool:

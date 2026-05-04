@@ -393,7 +393,7 @@ class FaceFollowWorker:
         self._last_seen_monotonic = time.monotonic()
         self._thread = threading.Thread(
             target=self._run,
-            name="QuickControlFaceFollow",
+            name="MomoRobotFaceFollow",
             daemon=True,
         )
 

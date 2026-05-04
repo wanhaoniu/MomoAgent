@@ -114,8 +114,9 @@ source .venv/bin/activate
 
 Notes:
 - `bash scripts/bootstrap.sh` automatically creates a repo-local `.venv`
-- The base install covers robot control, `quick_control_api`, and the camera / `face_loc` headless flow
+- The base install covers robot control, `momo_robot_service`, and the camera / `face_loc` headless flow
 - `--advanced` adds the Qt GUI stack
+- Nanobot is the default agent backend. Its model/API settings use `MOMO_AGENT_NANOBOT_*`, falling back to `AUTOGRASP_VLM_*` from `.env` when present. Robot tools route through `momo_robot_service`, not curl or a second SDK session.
 
 ### 6.3 Start Leader-Follower Control (Real Hardware)
 1. Start slave server on the follower-side device:

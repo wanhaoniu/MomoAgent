@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-class QuickControlError(RuntimeError):
+class MomoRobotError(RuntimeError):
     def __init__(self, code: str, message: str, status_code: int = 400):
         super().__init__(message)
         self.code = str(code or "INTERNAL_ERROR")

@@ -1,6 +1,6 @@
 # Base runtime for:
 # - mechanical arm control
-# - quick_control_api
+# - momo_robot_service
 # - camera / face_loc headless flow
 
 fastapi>=0.111.0

@@ -81,6 +81,8 @@ DEFAULT_GRIPPER_POLL_INTERVAL_S = 0.02
 DEFAULT_GRIPPER_REFERENCE_DURATION_S = 0.50
 DEFAULT_GRIPPER_DURATION_MIN_S = 0.10
 DEFAULT_GRIPPER_DURATION_MAX_S = 3.0
+DEFAULT_BUS_READ_RETRIES = 3
+DEFAULT_BUS_READ_RETRY_DELAY_S = 0.02
 JOINTS = (
     "shoulder_pan",
     "shoulder_lift",
@@ -234,6 +236,8 @@ class SoArmMoceConfig:
     gripper_available: bool = True
     serial_timeout_s: float = DEFAULT_SERIAL_TIMEOUT_S
     motor_model: str = DEFAULT_MOTOR_MODEL
+    bus_read_retries: int = DEFAULT_BUS_READ_RETRIES
+    bus_read_retry_delay_s: float = DEFAULT_BUS_READ_RETRY_DELAY_S
 
     def __post_init__(self) -> None:
         self.calib_dir = Path(self.calib_dir).expanduser().resolve()
@@ -242,6 +246,8 @@ class SoArmMoceConfig:
         self.port = str(self.port or "").strip()
         self.robot_id = str(self.robot_id or "soarmmoce").strip() or "soarmmoce"
         self.target_frame = str(self.target_frame or "wrist_roll").strip() or "wrist_roll"
+        self.bus_read_retries = max(0, int(self.bus_read_retries))
+        self.bus_read_retry_delay_s = max(0.0, float(self.bus_read_retry_delay_s))
         self.joint_scales = {joint: float(self.joint_scales.get(joint, DEFAULT_JOINT_SCALES[joint])) for joint in JOINTS}
         self.model_offsets_deg = {
             joint: float(self.model_offsets_deg.get(joint, DEFAULT_MODEL_OFFSETS_DEG[joint])) for joint in JOINTS
@@ -375,6 +381,7 @@ def resolve_config(path: str | Path | None = None) -> SoArmMoceConfig:
     ik = payload.get("ik", {}) if isinstance(payload.get("ik"), dict) else {}
     calibration = payload.get("calibration", {}) if isinstance(payload.get("calibration"), dict) else {}
     urdf = payload.get("urdf", {}) if isinstance(payload.get("urdf"), dict) else {}
+    protocol = payload.get("protocol", {}) if isinstance(payload.get("protocol"), dict) else {}
 
     robot_id = str(os.environ.get("SOARMMOCE_ROBOT_ID", transport.get("robot_id", "soarmmoce"))).strip() or "soarmmoce"
     calib_dir = os.environ.get("SOARMMOCE_CALIB_DIR")
@@ -419,6 +426,10 @@ def resolve_config(path: str | Path | None = None) -> SoArmMoceConfig:
         gripper_available=bool(transport.get("gripper_available", True)),
         serial_timeout_s=float(transport.get("timeout", DEFAULT_SERIAL_TIMEOUT_S)),
         motor_model=str(transport.get("motor_model", DEFAULT_MOTOR_MODEL)),
+        bus_read_retries=int(os.environ.get("SOARMMOCE_BUS_READ_RETRIES", protocol.get("max_retries", DEFAULT_BUS_READ_RETRIES))),
+        bus_read_retry_delay_s=float(
+            os.environ.get("SOARMMOCE_BUS_READ_RETRY_DELAY", protocol.get("retry_delay_s", DEFAULT_BUS_READ_RETRY_DELAY_S))
+        ),
     )
 
 
@@ -831,24 +842,81 @@ class SoArmMoceController:
     def _prime_multi_turn_state_from_current_pose(self, bus) -> dict[str, int]:
         return self._prime_startup_references_from_current_pose(bus)
 
+    def _bus_read_retries(self) -> int:
+        return max(0, int(self.config.bus_read_retries))
+
+    def _bus_read_retry_delay_s(self) -> float:
+        return max(0.0, float(self.config.bus_read_retry_delay_s))
+
+    def _sleep_before_bus_read_retry(self, attempt_index: int) -> None:
+        if attempt_index <= 0:
+            return
+        delay_s = self._bus_read_retry_delay_s()
+        if delay_s > 0.0:
+            time.sleep(delay_s)
+
+    def _read_bus_register_with_retry(self, bus, register_name: str, joint_name: str) -> int:
+        last_exc: Exception | None = None
+        tries = self._bus_read_retries() + 1
+        for attempt in range(tries):
+            self._sleep_before_bus_read_retry(attempt)
+            try:
+                return int(
+                    bus.read(
+                        register_name,
+                        joint_name,
+                        normalize=False,
+                        num_retry=0,
+                    )
+                )
+            except Exception as exc:
+                last_exc = exc
+        if last_exc is not None:
+            raise HardwareError(
+                f"Failed to read '{register_name}' on {joint_name} after {tries} tries. Last error: {last_exc}"
+            ) from last_exc
+        raise HardwareError(f"Failed to read '{register_name}' for {joint_name}.")
+
     def _read_raw_present_position(self, bus=None) -> dict[str, int]:
         active_bus = bus or self._ensure_bus()
         sync_read = getattr(active_bus, "sync_read", None)
+        last_exc: Exception | None = None
         if callable(sync_read):
-            try:
-                payload = sync_read("Present_Position", normalize=False)
-                if isinstance(payload, Mapping):
-                    return {joint_name: int(payload[joint_name]) for joint_name in JOINTS}
-            except Exception:
-                pass
-        return {
-            joint_name: int(active_bus.read("Present_Position", joint_name, normalize=False))
-            for joint_name in JOINTS
-        }
+            tries = self._bus_read_retries() + 1
+            for attempt in range(tries):
+                self._sleep_before_bus_read_retry(attempt)
+                try:
+                    payload = sync_read(
+                        "Present_Position",
+                        normalize=False,
+                        num_retry=0,
+                    )
+                    if isinstance(payload, Mapping):
+                        return {joint_name: int(payload[joint_name]) for joint_name in JOINTS}
+                except Exception as exc:
+                    last_exc = exc
+            if last_exc is not None:
+                last_exc = HardwareError(
+                    f"Failed to sync read 'Present_Position' after {tries} tries. Last error: {last_exc}"
+                )
+
+        raw_present: dict[str, int] = {}
+        try:
+            for joint_name in JOINTS:
+                raw_present[joint_name] = self._read_bus_register_with_retry(
+                    active_bus,
+                    "Present_Position",
+                    joint_name,
+                )
+            return raw_present
+        except Exception as exc:
+            if last_exc is not None:
+                raise HardwareError(f"{last_exc}; fallback single-joint read also failed: {exc}") from exc
+            raise
 
     def _read_joint_register_raw(self, bus, register_name: str, joint_name: str) -> int | None:
         try:
-            return int(bus.read(register_name, joint_name, normalize=False))
+            return self._read_bus_register_with_retry(bus, register_name, joint_name)
         except Exception:
             return None
 
@@ -980,7 +1048,7 @@ class SoArmMoceController:
         if self._gripper_spec is None or not self._gripper_integrated:
             return None
         active_bus = bus or self._ensure_bus()
-        return int(active_bus.read("Present_Position", self._gripper_spec.name, normalize=False))
+        return self._read_bus_register_with_retry(active_bus, "Present_Position", self._gripper_spec.name)
 
     def _gripper_register_raw_to_adjusted_raw(self, register_raw: int | float) -> int:
         spec = self._require_gripper_spec()
@@ -1241,7 +1309,7 @@ class SoArmMoceController:
             moving_flags: list[int] | None = None
             try:
                 moving_flags = [
-                    int(bus.read("Moving", joint_name, normalize=False))
+                    self._read_bus_register_with_retry(bus, "Moving", joint_name)
                     for joint_name in goal_raw_by_joint
                 ]
             except Exception:
@@ -1875,9 +1943,10 @@ class SoArmMoceController:
                 raise CapabilityError("Optional gripper disappeared while waiting for motion completion.")
             present_adjusted_raw = int(state["adjusted_raw"])
             error_raw = _signed_single_turn_delta(goal_adjusted_raw, present_adjusted_raw)
-            moving = int(self._ensure_bus().read("Moving", spec.name, normalize=False))
-            velocity = float(self._ensure_bus().read("Present_Velocity", spec.name, normalize=False))
-            current = float(self._ensure_bus().read("Present_Current", spec.name, normalize=False))
+            bus = self._ensure_bus()
+            moving = self._read_bus_register_with_retry(bus, "Moving", spec.name)
+            velocity = float(self._read_bus_register_with_retry(bus, "Present_Velocity", spec.name))
+            current = float(self._read_bus_register_with_retry(bus, "Present_Current", spec.name))
             if abs(int(error_raw)) <= int(settle_tolerance_raw):
                 return {
                     "settled": True,

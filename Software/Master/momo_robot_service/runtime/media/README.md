@@ -8,7 +8,7 @@ Recommended HaiGuiTang media filenames:
 
 Put these files in:
 
-`Software/Master/quick_control_api/runtime/media/`
+`Software/Master/momo_robot_service/runtime/media/`
 
 The scene config endpoint will automatically detect these files and expose them to the app. If
 `default.mp4` is missing, the app will temporarily fall back to `begin.mp4` as the default full-screen

@@ -164,7 +164,7 @@ class AttentionWorker:
         self._last_seen_monotonic = time.monotonic()
         self._thread = threading.Thread(
             target=self._run,
-            name="QuickControlAttention",
+            name="MomoRobotAttention",
             daemon=True,
         )
 

@@ -2129,7 +2129,7 @@
     }
 
     setAgentBusy(true);
-    setStatus("OpenClaw 正在思考海龟汤回合...");
+    setStatus("Agent 正在思考海龟汤回合...");
     log(`已发送给 agent：${prompt}`);
 
     try {
@@ -2222,7 +2222,7 @@
     setStatus("正在拉取场景配置...");
     runtime.config = await requestJson("api/v1/scenes/haiguitang/config");
     elements.apiHintText.textContent =
-      "推荐直接从 quick_control_api 打开这个页面。当前素材目录：" +
+      "推荐直接从 momo_robot_service 打开这个页面。当前素材目录：" +
       String(runtime.config.media_directory_path || "未提供");
 
     setStatus("正在读取场景状态...");
@@ -2372,7 +2372,7 @@
         log("API 地址更新完成，场景已重新同步。");
       } catch (error) {
         setSyncBadge("接口离线", false);
-        showFallback("接口未连通", `请确认 quick_control_api 已启动。\n${error.message}`);
+        showFallback("接口未连通", `请确认 momo_robot_service 已启动。\n${error.message}`);
         log(`重新同步失败：${error.message}`);
       }
     });
@@ -2589,7 +2589,7 @@
       log(`页面已就绪，当前接口：${runtime.apiBase}`);
     } catch (error) {
       setSyncBadge("接口离线", false);
-      showFallback("接口未连通", `请确认 quick_control_api 已启动。\n${error.message}`);
+      showFallback("接口未连通", `请确认 momo_robot_service 已启动。\n${error.message}`);
       log(`初始化失败：${error.message}`);
     }
   }
