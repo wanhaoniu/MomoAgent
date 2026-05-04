@@ -234,6 +234,7 @@ class ArmControlGUI(QMainWindow):
         self._sdk_cmd_thread: Optional[threading.Thread] = None
         self._sdk_sync_running = True
         self._sdk_sync_thread: Optional[threading.Thread] = None
+        self._free_move_torque_released = False
         self._sim_motion_active = False
         self._sim_motion_start_q = np.zeros(0, dtype=float)
         self._sim_motion_target_q = np.zeros(0, dtype=float)
@@ -790,7 +791,6 @@ class ArmControlGUI(QMainWindow):
             btn.pressed.connect(partial(self._on_quick_jog_pressed, key))
             btn.released.connect(self._on_quick_jog_released)
 
-        self.quick_page.goto_origin_btn.clicked.connect(self._on_quick_origin)
         self.quick_page.free_move_btn.clicked.connect(self._on_quick_free_move)
 
     def setup_timers(self):
@@ -1045,9 +1045,139 @@ class ArmControlGUI(QMainWindow):
             return self._execute_sdk_cartesian_jog(command)
         if kind == "home":
             return self._execute_sdk_home(command)
+        if kind == "free_move":
+            return self._execute_sdk_free_move()
         if kind == "stop":
             return self._execute_sdk_stop()
         raise ValueError(f"Unknown SDK command: {kind}")
+
+    @staticmethod
+    def _try_torque_call(method: object, call_specs: List[Tuple[Tuple[Any, ...], Dict[str, Any]]]) -> bool:
+        if not callable(method):
+            return False
+        for args, kwargs in call_specs:
+            try:
+                method(*args, **kwargs)
+                return True
+            except TypeError:
+                continue
+        return False
+
+    @staticmethod
+    def _sdk_nested_robot_targets(robot: object) -> List[object]:
+        targets: List[object] = []
+        for candidate in (
+            robot,
+            getattr(robot, "_controller", None),
+            getattr(robot, "_robot", None),
+            getattr(robot, "_inner", None),
+            getattr(robot, "_impl", None),
+        ):
+            if candidate is not None and all(candidate is not existing for existing in targets):
+                targets.append(candidate)
+        return targets
+
+    def _sdk_transport_for_robot(self, robot: object) -> Optional[object]:
+        for target in self._sdk_nested_robot_targets(robot):
+            transport = getattr(target, "_transport", None)
+            if transport is not None:
+                return transport
+        return None
+
+    @staticmethod
+    def _sdk_torque_joint_names(transport: Optional[object], bus: Optional[object]) -> List[str]:
+        names = [str(name) for name in (getattr(transport, "joint_names", []) or [])]
+        if not names and bus is not None:
+            names = [str(name) for name in (getattr(bus, "motors", {}) or {}).keys()]
+        return names
+
+    def _set_bus_torque_enabled(self, bus: object, joint_names: List[str], enabled: bool) -> bool:
+        method = getattr(bus, "enable_torque" if enabled else "disable_torque", None)
+        if callable(method):
+            if enabled:
+                call_specs = [((), {}), ((joint_names,), {})] if joint_names else [((), {})]
+            else:
+                call_specs = []
+                if joint_names:
+                    call_specs.extend(
+                        [
+                            ((joint_names,), {"num_retry": 5}),
+                            ((joint_names,), {}),
+                        ]
+                    )
+                call_specs.append(((), {}))
+            if self._try_torque_call(method, call_specs):
+                return True
+
+        write = getattr(bus, "write", None)
+        if not callable(write) or not joint_names:
+            return False
+
+        value = 1 if enabled else 0
+        for joint_name in joint_names:
+            try:
+                write("Torque_Enable", joint_name, value, normalize=False)
+            except TypeError:
+                write("Torque_Enable", joint_name, value)
+        return True
+
+    def _set_sdk_torque_enabled(self, robot: object, enabled: bool, *, required: bool) -> bool:
+        bool_method_names = ("set_torque_enabled", "set_torque")
+        action_method_names = (
+            ("enable_torque", "lock_torque", "enable_motors")
+            if enabled
+            else ("disable_torque", "release_torque", "free_move", "unlock_torque", "relax", "disable_motors")
+        )
+
+        for target in self._sdk_nested_robot_targets(robot):
+            for method_name in bool_method_names:
+                method = getattr(target, method_name, None)
+                if self._try_torque_call(method, [((bool(enabled),), {})]):
+                    return True
+            for method_name in action_method_names:
+                method = getattr(target, method_name, None)
+                if self._try_torque_call(method, [((), {})]):
+                    return True
+
+        transport = self._sdk_transport_for_robot(robot)
+        if transport is not None:
+            for method_name in bool_method_names:
+                method = getattr(transport, method_name, None)
+                if self._try_torque_call(method, [((bool(enabled),), {})]):
+                    return True
+            for method_name in action_method_names:
+                method = getattr(transport, method_name, None)
+                if self._try_torque_call(method, [((), {})]):
+                    return True
+
+            bus = getattr(transport, "_bus", None)
+            if bus is not None:
+                joint_names = self._sdk_torque_joint_names(transport, bus)
+                io_lock = getattr(transport, "_io_lock", None)
+                if io_lock is not None:
+                    with io_lock:
+                        if self._set_bus_torque_enabled(bus, joint_names, enabled):
+                            return True
+                elif self._set_bus_torque_enabled(bus, joint_names, enabled):
+                    return True
+
+        if required and "mock" not in self._sdk_transport_name(robot).lower():
+            raise RuntimeError("Current SDK transport does not expose torque control.")
+        return False
+
+    def _prepare_sdk_motion_torque(self, robot: object) -> None:
+        if not self._free_move_torque_released:
+            return
+
+        transport = self._sdk_transport_for_robot(robot)
+        stop = getattr(transport, "stop", None) if transport is not None else None
+        if not callable(stop):
+            stop = getattr(robot, "stop", None)
+        if callable(stop):
+            stop()
+
+        self._set_sdk_torque_enabled(robot, True, required=False)
+        self._free_move_torque_released = False
 
     def _execute_sdk_joint_step(self, command: Dict[str, Any]) -> object:
         idx = int(command["joint_index"])
@@ -1058,6 +1188,7 @@ class ArmControlGUI(QMainWindow):
 
         with self._sdk_lock:
             robot = self._sdk_get_robot()
+            self._prepare_sdk_motion_torque(robot)
             state_before = robot.get_state()
             q_target = self._extract_joint_q_from_sdk_state(state_before, prefer_twin=True)
             if q_target is None:
@@ -1123,6 +1254,7 @@ class ArmControlGUI(QMainWindow):
 
         with self._sdk_lock:
             robot = self._sdk_get_robot()
+            self._prepare_sdk_motion_torque(robot)
             move_kwargs = {
                 "frame": frame,
                 "speed_percent": speed_percent,
@@ -1139,6 +1271,7 @@ class ArmControlGUI(QMainWindow):
         speed_percent = int(command.get("speed_percent", self.speed_percent))
         with self._sdk_lock:
             robot = self._sdk_get_robot()
+            self._prepare_sdk_motion_torque(robot)
             home_kwargs = {
                 "speed_percent": speed_percent,
                 "wait": True,
@@ -1147,6 +1280,22 @@ class ArmControlGUI(QMainWindow):
                 home_kwargs["duration"] = float(duration)
             robot.home(**home_kwargs)
             return robot.get_state()
+
+    def _execute_sdk_free_move(self) -> object:
+        with self._sdk_lock:
+            robot = self._sdk_get_robot()
+            stop = getattr(robot, "stop", None)
+            if callable(stop):
+                try:
+                    stop()
+                except Exception:
+                    pass
+            self._set_sdk_torque_enabled(robot, False, required=True)
+            self._free_move_torque_released = True
+            try:
+                return robot.get_state()
+            except Exception:
+                return None
 
     def _execute_sdk_stop(self) -> object:
         with self._sdk_lock:
@@ -1159,6 +1308,8 @@ class ArmControlGUI(QMainWindow):
         src = str(source or "").strip()
         if src.startswith("home:"):
             return f"SDK {src.split(':', 1)[1]}"
+        if src == "free_move":
+            return "Free Move"
         if src.startswith("joint:"):
             return "Quick Joint"
         if src.startswith("jog:"):
@@ -1180,6 +1331,9 @@ class ArmControlGUI(QMainWindow):
         if src.startswith("home:"):
             self.statusBar().showMessage("Robot moved to home")
             self.log(f"[{self._sdk_command_label(src)}] moved to home", "success")
+        elif src == "free_move":
+            self.statusBar().showMessage("Free move enabled: torque released")
+            self.log("[Free Move] torque released; arm can be moved by hand", "success")
         elif src == "stop":
             self.statusBar().showMessage("Robot stopped")
 
@@ -1478,22 +1632,19 @@ class ArmControlGUI(QMainWindow):
             command["duration"] = float(duration)
         self._enqueue_sdk_command(command)
 
-    def _on_quick_origin(self):
-        self._enqueue_sdk_home(source="origin")
-
     def _on_quick_zero(self):
         self._enqueue_sdk_home(source="zero")
 
     def _on_quick_free_move(self):
-        combo = getattr(self.quick_page, "step_mode_combo", None)
-        if combo is None:
+        if not (self.connected or self._sdk_runtime_mode == "simulation"):
             return
-        next_idx = 0 if int(combo.currentIndex()) == 1 else 1
-        combo.setCurrentIndex(next_idx)
-        if next_idx == 1:
-            self.statusBar().showMessage("Jog mode: Continuous")
-        else:
-            self.statusBar().showMessage("Jog mode: Step")
+        self._on_quick_jog_released(enqueue_stop=False)
+        self._clear_pending_sdk_commands()
+        self.statusBar().showMessage("Releasing torque for free move...")
+        self._enqueue_sdk_command(
+            {"kind": "free_move", "source": "free_move"},
+            drop_kinds=("joint_step", "cartesian_jog", "home", "stop"),
+        )
 
     def _sync_quick_joint_panel(self):
         for idx, (name_label, _minus_btn, value_label, _plus_btn) in enumerate(self.quick_page.joint_rows):
@@ -1880,6 +2031,8 @@ class ArmControlGUI(QMainWindow):
             mode_norm = "disconnected"
         self._sdk_runtime_mode = mode_norm
         self._sdk_last_connect_error = str(error_text or "").strip()
+        if mode_norm == "disconnected":
+            self._free_move_torque_released = False
         if config_path is not None:
             self._sdk_runtime_config_path = str(config_path or "").strip()
         if robot is not None:
