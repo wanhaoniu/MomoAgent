@@ -5,8 +5,8 @@
 当前链路已经跑通，整体结构是：
 
 1. App 采集麦克风音频
-2. App 把音频按 `WebSocket` 二进制帧发给 `quick_control_api`
-3. `quick_control_api` 在服务端调用 AWS Transcribe Streaming
+2. App 把音频按 `WebSocket` 二进制帧发给 `momo_robot_service`
+3. `momo_robot_service` 在服务端调用 AWS Transcribe Streaming
 4. 后端把 `partial / final` 转写结果实时回推给 App
 
 这样做的好处是：
@@ -17,7 +17,7 @@
 
 ## 1. 接口概览
 
-服务默认由 `quick_control_api` 提供。
+服务默认由 `momo_robot_service` 提供。
 
 基础地址示例：
 
@@ -35,8 +35,8 @@ ws://<host>:8010/
 
 服务端实现位置：
 
-- `Software/Master/quick_control_api/src/quick_control_api/aws_transcribe_realtime.py`
-- `Software/Master/quick_control_api/src/quick_control_api/app.py`
+- `Software/Master/momo_robot_service/src/momo_robot_service/aws_transcribe_realtime.py`
+- `Software/Master/momo_robot_service/src/momo_robot_service/app.py`
 
 服务端负责：
 
@@ -474,8 +474,8 @@ ws.addEventListener("message", (event) => {
 
 参考实现：
 
-- `Software/Master/quick_control_api/src/quick_control_api/aws_transcribe_realtime.py`
-- `Software/Master/quick_control_api/src/quick_control_api/app.py`
+- `Software/Master/momo_robot_service/src/momo_robot_service/aws_transcribe_realtime.py`
+- `Software/Master/momo_robot_service/src/momo_robot_service/app.py`
 - `Software/Web/app.js`
 
 ## 14. 联调建议

@@ -641,7 +641,7 @@ class IdleScanWorker:
         self._last_error = ""
         self._thread = threading.Thread(
             target=self._run,
-            name="QuickControlIdleScan",
+            name="MomoRobotIdleScan",
             daemon=True,
         )
 

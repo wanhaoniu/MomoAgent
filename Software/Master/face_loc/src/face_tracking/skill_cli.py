@@ -14,8 +14,8 @@ from urllib.request import urlopen
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-STATE_PATH = REPO_ROOT / "runtime" / "openclaw_face_tracking_state.json"
-LOG_PATH = REPO_ROOT / "logs" / "openclaw_face_tracking.log"
+STATE_PATH = REPO_ROOT / "runtime" / "face_tracking_state.json"
+LOG_PATH = REPO_ROOT / "logs" / "face_tracking_skill.log"
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 
 
@@ -83,7 +83,7 @@ def normalize_query_host(host: str) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="OpenClaw skill wrapper for smart mirror face tracking")
+    parser = argparse.ArgumentParser(description="Skill-style CLI wrapper for smart mirror face tracking")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     start_parser = subparsers.add_parser("start_face_tracking")

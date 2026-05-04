@@ -15,7 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 MASTER_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = Path(__file__).resolve().parent
 SDK_SRC = REPO_ROOT / "sdk" / "src"
-OPENCLAW_LOCAL_DIR = REPO_ROOT / "Software" / "Master" / "openclaw_local"
 MOMO_AGENT_RUNTIME_DIR = PACKAGE_ROOT / "runtime"
 
 REPO_DOTENV_PATHS = tuple(
@@ -71,13 +70,7 @@ COSYVOICE_TTS_SAMPLE_RATE_DEFAULT = 24000
 COSYVOICE_TTS_TIMEOUT_SEC_DEFAULT = 90.0
 COSYVOICE_TTS_MAX_CHARS_DEFAULT = 120
 
-OPENCLAW_BIN_DEFAULT = "openclaw"
-OPENCLAW_AGENT_ID_DEFAULT = "main"
-OPENCLAW_TIMEOUT_SEC_DEFAULT = 90.0
-OPENCLAW_SKILL_NAME_DEFAULT = "soarmmoce-control"
-OPENCLAW_GATEWAY_BRIDGE_SCRIPT_DEFAULT = OPENCLAW_LOCAL_DIR / "openclaw_gateway_bridge.js"
-OPENCLAW_THINKING_DEFAULT = "minimal"
-AGENT_BACKEND_DEFAULT = "openclaw"
+AGENT_BACKEND_DEFAULT = "nanobot"
 NANOBOT_RUNTIME_DIR = MOMO_AGENT_RUNTIME_DIR / "nanobot"
 NANOBOT_WORKSPACE_DEFAULT = str(MOMO_AGENT_RUNTIME_DIR / "nanobot_workspace")
 NANOBOT_CONFIG_PATH_DEFAULT = str(NANOBOT_RUNTIME_DIR / "config.json")
@@ -152,13 +145,6 @@ def _normalize_cosyvoice_mode(value: Optional[str]) -> str:
     return COSYVOICE_TTS_MODE_DEFAULT
 
 
-def _normalize_agent_backend(value: Optional[str]) -> str:
-    backend = str(value or "").strip().lower() or AGENT_BACKEND_DEFAULT
-    if backend in {"openclaw", "nanobot"}:
-        return backend
-    return AGENT_BACKEND_DEFAULT
-
-
 def _normalize_provider_retry_mode(value: Optional[str]) -> str:
     mode = str(value or "").strip().lower() or "standard"
     if mode in {"standard", "persistent"}:
@@ -170,9 +156,9 @@ def _normalize_nanobot_tool_mode(value: Optional[str]) -> str:
     mode = str(value or "").strip().lower()
     if mode in {"bridge", "bridge-only", "bridge_only", "robot-only", "robot_only"}:
         return "bridge_only"
-    if mode in {"all", "full", "full-access", "full_access"}:
-        return "all"
-    return "hybrid"
+    if mode in {"hybrid"}:
+        return "hybrid"
+    return "bridge_only"
 
 
 def _split_csv(value: Optional[str]) -> list[str]:
@@ -249,24 +235,6 @@ class TtsConfig:
 
 
 @dataclass
-class OpenClawConfig:
-    enabled: bool = True
-    binary: str = OPENCLAW_BIN_DEFAULT
-    agent_id: str = OPENCLAW_AGENT_ID_DEFAULT
-    skill_name: str = OPENCLAW_SKILL_NAME_DEFAULT
-    local_mode: bool = False
-    robot_mode: bool = True
-    force_new_session: bool = False
-    node_retry_count: int = 2
-    thinking: str = OPENCLAW_THINKING_DEFAULT
-    timeout_sec: float = OPENCLAW_TIMEOUT_SEC_DEFAULT
-    session_id: str = ""
-    gateway_bridge_enabled: bool = True
-    gateway_bridge_script: str = str(OPENCLAW_GATEWAY_BRIDGE_SCRIPT_DEFAULT)
-    node_bin: str = ""
-
-
-@dataclass
 class NanobotConfig:
     enabled: bool = True
     source_dir: str = NANOBOT_SOURCE_DIR_DEFAULT
@@ -287,7 +255,7 @@ class NanobotConfig:
     temperature: float = 0.1
     reasoning_effort: str = ""
     provider_retry_mode: str = "standard"
-    tool_mode: str = "all"
+    tool_mode: str = "bridge_only"
     restrict_to_workspace: bool = True
     enable_exec: bool = False
     enable_web: bool = False
@@ -306,9 +274,8 @@ class MomoAgentConfig:
     audio: AudioConfig
     stt: SttConfig
     tts: TtsConfig
-    agent_backend: str
-    openclaw: OpenClawConfig
     nanobot: NanobotConfig
+    agent_backend: str = AGENT_BACKEND_DEFAULT
 
 
 def load_config() -> MomoAgentConfig:
@@ -525,51 +492,6 @@ def load_config() -> MomoAgentConfig:
         ),
     )
 
-    agent_backend = _normalize_agent_backend(
-        _runtime_env_get("MOMO_AGENT_BACKEND", AGENT_BACKEND_DEFAULT, runtime_env)
-    )
-
-    openclaw = OpenClawConfig(
-        enabled=_runtime_env_bool("OPENCLAW_ENABLED", True, runtime_env),
-        binary=(os.getenv("OPENCLAW_BIN", OPENCLAW_BIN_DEFAULT).strip() or OPENCLAW_BIN_DEFAULT),
-        agent_id=(
-            os.getenv("OPENCLAW_AGENT_ID", OPENCLAW_AGENT_ID_DEFAULT).strip()
-            or OPENCLAW_AGENT_ID_DEFAULT
-        ),
-        skill_name=(
-            os.getenv("OPENCLAW_SKILL_NAME", OPENCLAW_SKILL_NAME_DEFAULT).strip()
-            or OPENCLAW_SKILL_NAME_DEFAULT
-        ),
-        local_mode=_runtime_env_bool("OPENCLAW_LOCAL", False, runtime_env),
-        robot_mode=_runtime_env_bool("OPENCLAW_ROBOT_MODE", True, runtime_env),
-        force_new_session=_runtime_env_bool("OPENCLAW_FORCE_NEW_SESSION", False, runtime_env),
-        node_retry_count=_read_int(
-            _runtime_env_get("OPENCLAW_NODE_RETRY_COUNT", "2", runtime_env),
-            2,
-            minimum=0,
-        ),
-        thinking=(
-            os.getenv("OPENCLAW_THINKING", OPENCLAW_THINKING_DEFAULT).strip()
-            or OPENCLAW_THINKING_DEFAULT
-        ),
-        timeout_sec=_read_float(
-            _runtime_env_get("OPENCLAW_TIMEOUT_SEC", str(OPENCLAW_TIMEOUT_SEC_DEFAULT), runtime_env),
-            OPENCLAW_TIMEOUT_SEC_DEFAULT,
-            minimum=5.0,
-        ),
-        session_id=str(os.getenv("OPENCLAW_SESSION_ID", "")).strip(),
-        gateway_bridge_enabled=_runtime_env_bool("OPENCLAW_GATEWAY_BRIDGE_ENABLED", True, runtime_env),
-        gateway_bridge_script=str(
-            _runtime_env_get(
-                "OPENCLAW_GATEWAY_BRIDGE_SCRIPT",
-                str(OPENCLAW_GATEWAY_BRIDGE_SCRIPT_DEFAULT),
-                runtime_env,
-            )
-            or OPENCLAW_GATEWAY_BRIDGE_SCRIPT_DEFAULT
-        ).strip(),
-        node_bin=str(_runtime_env_get("OPENCLAW_NODE_BIN", "", runtime_env) or "").strip(),
-    )
-
     nanobot = NanobotConfig(
         enabled=_runtime_env_bool("MOMO_AGENT_NANOBOT_ENABLED", True, runtime_env),
         source_dir=str(
@@ -583,13 +505,19 @@ def load_config() -> MomoAgentConfig:
         ).strip()
         or NANOBOT_PROVIDER_DEFAULT,
         model=(
-            _runtime_env_get("MOMO_AGENT_NANOBOT_MODEL", NANOBOT_MODEL_DEFAULT, runtime_env)
+            _runtime_env_get("MOMO_AGENT_NANOBOT_MODEL", None, runtime_env)
+            or _runtime_env_get("AUTOGRASP_VLM_MODEL", None, runtime_env)
             or NANOBOT_MODEL_DEFAULT
         ).strip()
         or NANOBOT_MODEL_DEFAULT,
-        api_key=str(_runtime_env_get("MOMO_AGENT_NANOBOT_API_KEY", "", runtime_env) or "").strip(),
+        api_key=str(
+            _runtime_env_get("MOMO_AGENT_NANOBOT_API_KEY", None, runtime_env)
+            or _runtime_env_get("AUTOGRASP_VLM_API_KEY", None, runtime_env)
+            or ""
+        ).strip(),
         api_base=(
-            _runtime_env_get("MOMO_AGENT_NANOBOT_API_BASE", NANOBOT_API_BASE_DEFAULT, runtime_env)
+            _runtime_env_get("MOMO_AGENT_NANOBOT_API_BASE", None, runtime_env)
+            or _runtime_env_get("AUTOGRASP_VLM_API_BASE", None, runtime_env)
             or NANOBOT_API_BASE_DEFAULT
         ).strip()
         or NANOBOT_API_BASE_DEFAULT,
@@ -641,13 +569,15 @@ def load_config() -> MomoAgentConfig:
             minimum=0.0,
         ),
         reasoning_effort=str(
-            _runtime_env_get("MOMO_AGENT_NANOBOT_REASONING_EFFORT", "", runtime_env) or ""
+            _runtime_env_get("MOMO_AGENT_NANOBOT_REASONING_EFFORT", None, runtime_env)
+            or _runtime_env_get("AUTOGRASP_VLM_REASONING_EFFORT", None, runtime_env)
+            or ""
         ).strip(),
         provider_retry_mode=_normalize_provider_retry_mode(
             _runtime_env_get("MOMO_AGENT_NANOBOT_PROVIDER_RETRY_MODE", "standard", runtime_env)
         ),
         tool_mode=_normalize_nanobot_tool_mode(
-            _runtime_env_get("MOMO_AGENT_NANOBOT_TOOL_MODE", "all", runtime_env)
+            _runtime_env_get("MOMO_AGENT_NANOBOT_TOOL_MODE", "bridge_only", runtime_env)
         ),
         restrict_to_workspace=_runtime_env_bool(
             "MOMO_AGENT_NANOBOT_RESTRICT_TO_WORKSPACE",
@@ -694,7 +624,6 @@ def load_config() -> MomoAgentConfig:
         audio=audio,
         stt=stt,
         tts=tts,
-        agent_backend=agent_backend,
-        openclaw=openclaw,
         nanobot=nanobot,
+        agent_backend=AGENT_BACKEND_DEFAULT,
     )

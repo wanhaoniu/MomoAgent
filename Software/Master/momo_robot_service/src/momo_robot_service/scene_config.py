@@ -8,10 +8,10 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
 DEFAULT_HAIGUITANG_SCENE_CONFIG_PATH = (
-    REPO_ROOT / "Software" / "Master" / "quick_control_api" / "runtime" / "haiguitang_scene.json"
+    REPO_ROOT / "Software" / "Master" / "momo_robot_service" / "runtime" / "haiguitang_scene.json"
 )
 DEFAULT_HAIGUITANG_MEDIA_DIR = (
-    REPO_ROOT / "Software" / "Master" / "quick_control_api" / "runtime" / "media"
+    REPO_ROOT / "Software" / "Master" / "momo_robot_service" / "runtime" / "media"
 )
 DEFAULT_HAIGUITANG_INTRO_VIDEO_ROUTE = "/api/v1/scenes/haiguitang/intro-video"
 DEFAULT_HAIGUITANG_MEDIA_ROUTE_TEMPLATE = "/api/v1/scenes/haiguitang/media/{media_name}"

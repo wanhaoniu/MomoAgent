@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+from hmi.pages.agent_chat_page import AgentSettingsPanel
 from PyQt5.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -34,16 +35,19 @@ class SettingsPage(QWidget):
         self.robot_tab = QWidget()
         self.motion_tab = QWidget()
         self.ui_tab = QWidget()
+        self.agent_tab = QWidget()
 
         self.tabs.addTab(self.hardware_tab, "Hardware")
         self.tabs.addTab(self.robot_tab, "Robot Model / URDF")
         self.tabs.addTab(self.motion_tab, "Motion")
         self.tabs.addTab(self.ui_tab, "UI")
+        self.tabs.addTab(self.agent_tab, "Agent")
 
         self._build_hardware_tab()
         self._build_robot_tab()
         self._build_motion_tab()
         self._build_ui_tab()
+        self._build_agent_tab()
 
     def _build_hardware_tab(self):
         layout = QVBoxLayout(self.hardware_tab)
@@ -189,6 +193,20 @@ class SettingsPage(QWidget):
         layout.addWidget(self.ui_group)
         layout.addStretch()
 
+    def _build_agent_tab(self):
+        layout = QVBoxLayout(self.agent_tab)
+        self.agent_panel = AgentSettingsPanel()
+        layout.addWidget(self.agent_panel)
+
+    def agent_service_url(self) -> str:
+        return self.agent_panel.service_url()
+
+    def agent_timeout_sec(self) -> float:
+        return self.agent_panel.timeout_sec()
+
+    def shutdown_agent(self) -> None:
+        self.agent_panel.shutdown()
+
     def set_runtime_summary(self, *, status_text: str, config_path: str, serial_port: str) -> None:
         self.runtime_status_value.setText(str(status_text or "--"))
         self.sdk_config_path_value.setText(str(config_path or "--"))
@@ -202,10 +220,12 @@ class SettingsPage(QWidget):
         self.tabs.setTabText(1, tr("settings_robot"))
         self.tabs.setTabText(2, tr("settings_motion"))
         self.tabs.setTabText(3, tr("settings_ui"))
+        self.tabs.setTabText(4, tr("settings_agent"))
         self.hardware_group.setTitle(tr("settings_hardware"))
         self.robot_group.setTitle("URDF")
         self.motion_group.setTitle(tr("settings_motion"))
         self.ui_group.setTitle(tr("settings_ui"))
+        self.agent_panel.set_texts(tr)
 
         idx = self.camera_source_combo.findData("virtual")
         if idx >= 0:

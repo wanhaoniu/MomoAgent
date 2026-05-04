@@ -5,7 +5,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .aws_transcribe_realtime import AwsRealtimeSttSession, status_payload as aws_stt_status_payload
-from .errors import QuickControlError
+from .errors import MomoRobotError
 from .haiguitang_agent import (
     build_haiguitang_agent_prompt,
     build_haiguitang_round_start_prompt,
@@ -34,8 +34,9 @@ from .schemas import (
     HomeRequest,
     IdleScanStartRequest,
     JointStepRequest,
+    ToolDispatchRequest,
 )
-from .service import QuickControlService
+from .service import MomoRobotService
 
 AGENT_STREAM_TEST_PAGE = Path(__file__).resolve().parents[2] / "agent_stream_test.html"
 WEB_ROOT = Path(__file__).resolve().parents[5] / "Software" / "Web"
@@ -66,136 +67,6 @@ class NoCacheStaticFiles(StaticFiles):
         response = await super().get_response(path, scope)
         response.headers.update(WEB_NO_CACHE_HEADERS)
         return response
-
-
-class OpenClawChatStreamBridge:
-    def __init__(self) -> None:
-        self._lock = asyncio.Lock()
-        self._proc: Optional[asyncio.subprocess.Process] = None
-        self._command: tuple[str, ...] = ()
-
-    async def close(self) -> None:
-        async with self._lock:
-            await self._stop_locked()
-
-    async def _stop_locked(self) -> None:
-        proc = self._proc
-        self._proc = None
-        self._command = ()
-        if proc is None:
-            return
-        try:
-            if proc.stdin is not None:
-                proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=1.5)
-        except Exception:
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=1.0)
-            except Exception:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                except Exception:
-                    pass
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=1.0)
-                except Exception:
-                    pass
-
-    async def _ensure_proc_locked(self, command: list[str]) -> asyncio.subprocess.Process:
-        normalized_command = tuple(str(part or "").strip() for part in (command or []) if str(part).strip())
-        if not normalized_command:
-            raise RuntimeError("OpenClaw chat stream bridge command is empty")
-
-        proc = self._proc
-        if (
-            proc is not None
-            and proc.returncode is None
-            and normalized_command == self._command
-            and proc.stdin is not None
-            and proc.stdout is not None
-        ):
-            return proc
-
-        await self._stop_locked()
-        proc = await asyncio.create_subprocess_exec(
-            *normalized_command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            cwd=str(Path(__file__).resolve().parents[5]),
-        )
-        self._proc = proc
-        self._command = normalized_command
-        return proc
-
-    async def relay(
-        self,
-        *,
-        command: list[str],
-        stdin_payload: dict[str, Any],
-        on_event: Callable[[dict[str, Any]], Awaitable[None]],
-    ) -> dict[str, Any]:
-        request_id = str(stdin_payload.get("id", "") or "").strip()
-        if not request_id:
-            raise RuntimeError("OpenClaw chat stream bridge request id is missing")
-
-        async with self._lock:
-            proc = await self._ensure_proc_locked(command)
-            if proc.stdin is None or proc.stdout is None:
-                await self._stop_locked()
-                raise RuntimeError("OpenClaw chat stream bridge pipes are unavailable")
-
-            payload_bytes = (json.dumps(stdin_payload, ensure_ascii=False) + "\n").encode("utf-8")
-            try:
-                proc.stdin.write(payload_bytes)
-                await proc.stdin.drain()
-                while True:
-                    raw_line = await proc.stdout.readline()
-                    if not raw_line:
-                        raise RuntimeError("OpenClaw chat stream bridge exited unexpectedly")
-                    text_line = raw_line.decode("utf-8", errors="ignore").strip()
-                    if not text_line:
-                        continue
-                    try:
-                        event = json.loads(text_line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    if str(event.get("id", "") or "").strip() != request_id:
-                        continue
-                    await on_event(event)
-                    event_type = str(event.get("type", "") or "").strip()
-                    if event_type == "done":
-                        final_payload = dict(event)
-                        final_payload["ok"] = True
-                        return final_payload
-                    if event_type == "error":
-                        return {
-                            "ok": False,
-                            "stage": str(event.get("stage", "") or "").strip(),
-                            "error": str(
-                                event.get("error", "") or "OpenClaw chat stream failed"
-                            ).strip(),
-                            "reply": str(event.get("reply", "") or "").strip(),
-                            "session_id": str(event.get("session_id", "") or "").strip(),
-                            "session_key": str(event.get("session_key", "") or "").strip(),
-                            "timing": dict(event.get("timing") or {}),
-                        }
-            except Exception:
-                await self._stop_locked()
-                raise
 
 
 async def _send_ws_error(
@@ -299,59 +170,13 @@ async def _relay_remote_tts_stream(
     return last_summary
 
 
-async def _relay_openclaw_chat_stream(
-    websocket: WebSocket,
-    *,
-    bridge: OpenClawChatStreamBridge,
-    command: list[str],
-    stdin_payload: dict[str, Any],
-) -> dict[str, Any]:
-    async def _forward_event(event: dict[str, Any]) -> None:
-        event_type = str(event.get("type", "")).strip()
-        if event_type == "accepted":
-            await websocket.send_json(
-                {
-                    "type": "agent_accepted",
-                    "data": {
-                        "run_id": str(event.get("run_id", "") or "").strip(),
-                        "session_key": str(event.get("session_key", "") or "").strip(),
-                        "status": str(event.get("status", "") or "").strip(),
-                    },
-                }
-            )
-            return
-
-        if event_type == "delta":
-            await websocket.send_json(
-                {
-                    "type": "agent_delta",
-                    "data": {
-                        "run_id": str(event.get("run_id", "") or "").strip(),
-                        "session_key": str(event.get("session_key", "") or "").strip(),
-                        "delta": str(event.get("delta", "") or "").strip(),
-                        "reply": str(event.get("reply", "") or "").strip(),
-                        "elapsed_ms": float(event.get("elapsed_ms", 0.0) or 0.0),
-                    },
-                }
-            )
-            return
-
-    return await bridge.relay(
-        command=command,
-        stdin_payload=stdin_payload,
-        on_event=_forward_event,
-    )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    service = QuickControlService()
-    app.state.quick_control_service = service
-    app.state.openclaw_chat_stream_bridge = OpenClawChatStreamBridge()
+    service = MomoRobotService()
+    app.state.robot_service = service
     try:
         yield
     finally:
-        await app.state.openclaw_chat_stream_bridge.close()
         service.close()
 
 
@@ -359,88 +184,25 @@ def _ok(data: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "data": data}
 
 
-async def _run_openclaw_turn(
+async def _run_agent_prompt(
     *,
-    service: QuickControlService,
-    bridge: OpenClawChatStreamBridge,
+    service: MomoRobotService,
     kind: str,
     prompt: str,
 ) -> dict[str, Any]:
-    stream_spec = await asyncio.to_thread(
-        service.agent_build_stream_turn_spec,
-        kind=kind,
-        prompt=prompt,
-    )
-    if bool(stream_spec.get("ok")):
-
-        async def _ignore_event(_event: dict[str, Any]) -> None:
-            return
-
-        try:
-            stream_result = await bridge.relay(
-                command=list(stream_spec.get("command") or []),
-                stdin_payload=dict(stream_spec.get("stdin_payload") or {}),
-                on_event=_ignore_event,
-            )
-        except Exception as exc:  # noqa: BLE001
-            await asyncio.to_thread(
-                service.agent_fail_stream_turn,
-                kind=kind,
-                prompt=prompt,
-                error=str(exc),
-                bridge_session_key=str(stream_spec.get("bridge_session_key", "") or "").strip(),
-            )
-            raise QuickControlError("AGENT_FAILED", str(exc), 500) from exc
-
-        stream_timing = dict(stream_result.get("timing") or {})
-        history_error = str(stream_result.get("history_error", "") or "").strip()
-        if history_error:
-            stream_timing["history_error"] = history_error
-
-        if not bool(stream_result.get("ok")):
-            error_message = str(
-                stream_result.get("error", "") or "OpenClaw chat stream failed"
-            ).strip()
-            await asyncio.to_thread(
-                service.agent_fail_stream_turn,
-                kind=kind,
-                prompt=prompt,
-                error=error_message,
-                session_id=str(stream_result.get("session_id", "") or "").strip(),
-                bridge_session_key=str(
-                    stream_result.get("session_key", "")
-                    or stream_spec.get("bridge_session_key", "")
-                    or ""
-                ).strip(),
-                openclaw_elapsed_sec=float(stream_timing.get("total_ms", 0.0) or 0.0) / 1000.0,
-                bridge_timing=stream_timing,
-            )
-            raise QuickControlError("AGENT_FAILED", error_message, 500)
-
-        return {
-            "reply": str(stream_result.get("reply", "") or "").strip(),
-            "session_id": str(stream_result.get("session_id", "") or "").strip(),
-            "bridge_session_key": str(
-                stream_result.get("session_key", "")
-                or stream_spec.get("bridge_session_key", "")
-                or ""
-            ).strip(),
-            "openclaw_elapsed_sec": float(stream_timing.get("total_ms", 0.0) or 0.0) / 1000.0,
-            "bridge_timing": stream_timing,
-        }
-
     result = await asyncio.to_thread(service.agent_ask, message=prompt)
     turn = dict(result.get("turn") or {})
+    turn["kind"] = str(kind or turn.get("kind") or "ask")
     return {
         "reply": str(turn.get("reply", "") or "").strip(),
         "session_id": str(turn.get("session_id", "") or "").strip(),
-        "bridge_session_key": str(turn.get("bridge_session_key", "") or "").strip(),
-        "openclaw_elapsed_sec": float(turn.get("openclaw_elapsed_sec", 0.0) or 0.0),
-        "bridge_timing": dict(turn.get("bridge_timing") or {}),
+        "agent_session_key": str(turn.get("agent_session_key", "") or "").strip(),
+        "agent_elapsed_sec": float(turn.get("agent_elapsed_sec", 0.0) or 0.0),
+        "turn": turn,
     }
 
 
-async def _ensure_haiguitang_motion_ready(service: QuickControlService) -> dict[str, Any]:
+async def _ensure_haiguitang_motion_ready(service: MomoRobotService) -> dict[str, Any]:
     session_status = await asyncio.to_thread(service.session_status)
     if not bool(session_status.get("connected")):
         await asyncio.to_thread(
@@ -462,7 +224,7 @@ async def _ensure_haiguitang_motion_ready(service: QuickControlService) -> dict[
 
 async def _apply_haiguitang_agent_directive(
     *,
-    service: QuickControlService,
+    service: MomoRobotService,
     directive: dict[str, Any],
 ) -> dict[str, Any]:
     scene_subtitle_text = str(
@@ -485,7 +247,7 @@ async def _apply_haiguitang_agent_directive(
         try:
             await _ensure_haiguitang_motion_ready(service)
             hardware_result = await asyncio.to_thread(service.haiguitang_act, action=action)
-        except QuickControlError as exc:
+        except MomoRobotError as exc:
             control_error = exc.message
         except Exception as exc:  # noqa: BLE001
             control_error = str(exc)
@@ -500,36 +262,27 @@ async def _apply_haiguitang_agent_directive(
 
 async def _run_haiguitang_agent_turn(
     *,
-    service: QuickControlService,
-    bridge: OpenClawChatStreamBridge,
+    service: MomoRobotService,
     message: str,
 ) -> dict[str, Any]:
     user_message = str(message or "").strip()
     if not user_message:
-        raise QuickControlError("INVALID_ARGUMENT", "Agent prompt is empty", 400)
+        raise MomoRobotError("INVALID_ARGUMENT", "Agent prompt is empty", 400)
 
-    upstream_turn = await _run_openclaw_turn(
+    upstream_turn = await _run_agent_prompt(
         service=service,
-        bridge=bridge,
         kind="haiguitang",
         prompt=build_haiguitang_agent_prompt(user_message),
     )
     directive = parse_haiguitang_agent_reply(str(upstream_turn.get("reply", "") or ""))
-    turn_result = await asyncio.to_thread(
-        service.agent_complete_stream_turn,
-        kind="haiguitang",
-        prompt=user_message,
-        reply=directive.spoken_text,
-        session_id=str(upstream_turn.get("session_id", "") or "").strip(),
-        bridge_session_key=str(upstream_turn.get("bridge_session_key", "") or "").strip(),
-        openclaw_elapsed_sec=float(upstream_turn.get("openclaw_elapsed_sec", 0.0) or 0.0),
-        bridge_timing=dict(upstream_turn.get("bridge_timing") or {}),
-    )
     scene_result = await _apply_haiguitang_agent_directive(
         service=service,
         directive=directive.payload(),
     )
-    turn = dict(turn_result.get("turn") or {})
+    turn = dict(upstream_turn.get("turn") or {})
+    turn["kind"] = "haiguitang"
+    turn["prompt"] = user_message
+    turn["reply"] = directive.spoken_text
     turn["raw_reply"] = directive.raw_reply
     turn["parse_mode"] = directive.parse_mode
     return {
@@ -540,34 +293,25 @@ async def _run_haiguitang_agent_turn(
 
 async def _run_haiguitang_round_start(
     *,
-    service: QuickControlService,
-    bridge: OpenClawChatStreamBridge,
+    service: MomoRobotService,
     difficulty: str,
 ) -> dict[str, Any]:
     normalized_difficulty = str(difficulty or "").strip().lower() or "medium"
     prompt = build_haiguitang_round_start_prompt(normalized_difficulty)
-    upstream_turn = await _run_openclaw_turn(
+    upstream_turn = await _run_agent_prompt(
         service=service,
-        bridge=bridge,
         kind="haiguitang",
         prompt=prompt,
     )
     directive = parse_haiguitang_agent_reply(str(upstream_turn.get("reply", "") or ""))
-    turn_result = await asyncio.to_thread(
-        service.agent_complete_stream_turn,
-        kind="haiguitang",
-        prompt=f"[start_round] difficulty={normalized_difficulty}",
-        reply=directive.spoken_text,
-        session_id=str(upstream_turn.get("session_id", "") or "").strip(),
-        bridge_session_key=str(upstream_turn.get("bridge_session_key", "") or "").strip(),
-        openclaw_elapsed_sec=float(upstream_turn.get("openclaw_elapsed_sec", 0.0) or 0.0),
-        bridge_timing=dict(upstream_turn.get("bridge_timing") or {}),
-    )
     scene_result = await _apply_haiguitang_agent_directive(
         service=service,
         directive=directive.payload(),
     )
-    turn = dict(turn_result.get("turn") or {})
+    turn = dict(upstream_turn.get("turn") or {})
+    turn["kind"] = "haiguitang"
+    turn["prompt"] = f"[start_round] difficulty={normalized_difficulty}"
+    turn["reply"] = directive.spoken_text
     turn["raw_reply"] = directive.raw_reply
     turn["parse_mode"] = directive.parse_mode
     return {
@@ -578,7 +322,7 @@ async def _run_haiguitang_round_start(
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="MomoAgent Quick Control API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Momo Robot Service", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -588,8 +332,8 @@ def create_app() -> FastAPI:
     if WEB_ROOT.is_dir():
         app.mount("/web", NoCacheStaticFiles(directory=str(WEB_ROOT), html=True), name="web")
 
-    @app.exception_handler(QuickControlError)
-    async def quick_control_error_handler(_request: Request, exc: QuickControlError):
+    @app.exception_handler(MomoRobotError)
+    async def momo_robot_error_handler(_request: Request, exc: MomoRobotError):
         return JSONResponse(
             status_code=exc.status_code,
             content={
@@ -603,7 +347,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/v1/health")
     async def health(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         session_data, agent_data = await asyncio.gather(
             asyncio.to_thread(service.session_status),
             asyncio.to_thread(service.agent_status),
@@ -611,7 +355,7 @@ def create_app() -> FastAPI:
         return _ok(
             {
                 "status": "ok",
-                "service": "momoagent-quick-control-api",
+                "service": "momo-robot-service",
                 "session": session_data,
                 "agent": agent_data,
             }
@@ -633,27 +377,27 @@ def create_app() -> FastAPI:
 
     @app.get("/api/v1/session/status")
     async def session_status(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.session_status())
 
     @app.post("/api/v1/session/connect")
     async def connect(payload: ConnectRequest, request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.connect(prefer_real=payload.prefer_real, allow_sim_fallback=payload.allow_sim_fallback))
 
     @app.post("/api/v1/session/disconnect")
     async def disconnect(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.disconnect())
 
     @app.get("/api/v1/robot/state")
     async def robot_state(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.robot_state_payload())
 
     @app.post("/api/v1/motion/joint-step")
     async def motion_joint_step(payload: JointStepRequest, request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(
             service.joint_step(
                 joint_index=payload.joint_index,
@@ -664,7 +408,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/motion/cartesian-jog")
     async def motion_cartesian_jog(payload: CartesianJogRequest, request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(
             service.cartesian_jog(
                 axis=payload.axis,
@@ -678,22 +422,35 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/motion/home")
     async def motion_home(payload: HomeRequest, request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.home(source=payload.source, speed_percent=payload.speed_percent))
 
     @app.post("/api/v1/motion/stop")
     async def motion_stop(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.stop())
+
+    @app.post("/api/v1/tools/dispatch")
+    async def tool_dispatch(payload: ToolDispatchRequest, request: Request) -> dict[str, Any]:
+        service: MomoRobotService = request.app.state.robot_service
+        return _ok(
+            await asyncio.to_thread(
+                service.dispatch_tool,
+                name=payload.name,
+                arguments=payload.arguments,
+                request_id=payload.request_id,
+                timeout_sec=payload.timeout_sec,
+            )
+        )
 
     @app.get("/api/v1/follow/status")
     async def follow_status(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.follow_status())
 
     @app.post("/api/v1/follow/start")
     async def follow_start(payload: FollowStartRequest, request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(
             service.follow_start(
                 target_kind=payload.target_kind,
@@ -740,17 +497,17 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/follow/stop")
     async def follow_stop(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.follow_stop())
 
     @app.get("/api/v1/idle-scan/status")
     async def idle_scan_status(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.idle_scan_status())
 
     @app.post("/api/v1/idle-scan/start")
     async def idle_scan_start(payload: IdleScanStartRequest, request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(
             service.idle_scan_start(
                 pan_joint=payload.pan_joint,
@@ -767,22 +524,22 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/idle-scan/stop")
     async def idle_scan_stop(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.idle_scan_stop())
 
     @app.get("/api/v1/haiguitang/status")
     async def haiguitang_status(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.haiguitang_status())
 
     @app.get("/api/v1/scenes/haiguitang/config")
     async def haiguitang_scene_config(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.haiguitang_scene_config())
 
     @app.get("/api/v1/scenes/haiguitang/state")
     async def haiguitang_scene_state(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.haiguitang_scene_state())
 
     @app.post("/api/v1/scenes/haiguitang/state")
@@ -790,7 +547,7 @@ def create_app() -> FastAPI:
         payload: HaiGuiTangSceneStateRequest,
         request: Request,
     ) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(
             service.haiguitang_scene_present(
                 clip=payload.clip,
@@ -805,10 +562,9 @@ def create_app() -> FastAPI:
         payload: HaiGuiTangAgentTurnRequest,
         request: Request,
     ) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         result = await _run_haiguitang_agent_turn(
             service=service,
-            bridge=request.app.state.openclaw_chat_stream_bridge,
             message=payload.message,
         )
         return _ok(result)
@@ -818,10 +574,9 @@ def create_app() -> FastAPI:
         payload: HaiGuiTangRoundStartRequest,
         request: Request,
     ) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         result = await _run_haiguitang_round_start(
             service=service,
-            bridge=request.app.state.openclaw_chat_stream_bridge,
             difficulty=payload.difficulty,
         )
         return _ok(result)
@@ -831,7 +586,7 @@ def create_app() -> FastAPI:
         del request
         intro_video_file = haiguitang_intro_video_file()
         if intro_video_file is None or not intro_video_file.is_file():
-            raise QuickControlError(
+            raise MomoRobotError(
                 "HAIGUITANG_INTRO_VIDEO_NOT_FOUND",
                 "HaiGuiTang intro video not found in runtime/media",
                 404,
@@ -848,7 +603,7 @@ def create_app() -> FastAPI:
         del request
         media_file = haiguitang_media_file(media_name)
         if media_file is None or not media_file.is_file():
-            raise QuickControlError(
+            raise MomoRobotError(
                 "HAIGUITANG_MEDIA_NOT_FOUND",
                 f"HaiGuiTang media not found: {media_name}",
                 404,
@@ -862,7 +617,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/haiguitang/start")
     async def haiguitang_start(payload: HaiGuiTangStartRequest, request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(
             service.haiguitang_start(
                 pan_joint=payload.pan_joint,
@@ -883,43 +638,43 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/haiguitang/act")
     async def haiguitang_act(payload: HaiGuiTangActionRequest, request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.haiguitang_act(action=payload.action))
 
     @app.post("/api/v1/haiguitang/stop")
     async def haiguitang_stop(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(service.haiguitang_stop())
 
     @app.get("/api/v1/agent/status")
     async def agent_status(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(await asyncio.to_thread(service.agent_status))
 
     @app.get("/api/v1/agent/last-turn")
     async def agent_last_turn(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(await asyncio.to_thread(service.agent_last_turn))
 
     @app.post("/api/v1/agent/warmup")
     async def agent_warmup(payload: AgentWarmupRequest, request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(await asyncio.to_thread(service.agent_warmup, prompt=payload.prompt))
 
     @app.post("/api/v1/agent/reset-session")
     async def agent_reset_session(request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(await asyncio.to_thread(service.agent_reset_session))
 
     @app.post("/api/v1/agent/ask")
     async def agent_ask(payload: AgentAskRequest, request: Request) -> dict[str, Any]:
-        service: QuickControlService = request.app.state.quick_control_service
+        service: MomoRobotService = request.app.state.robot_service
         return _ok(await asyncio.to_thread(service.agent_ask, message=payload.message))
 
     @app.websocket("/api/v1/ws/state")
     async def ws_state(websocket: WebSocket):
         await websocket.accept()
-        service: QuickControlService = websocket.app.state.quick_control_service
+        service: MomoRobotService = websocket.app.state.robot_service
         try:
             while True:
                 await websocket.send_json({"type": "state", "data": service.robot_state_payload()})
@@ -930,7 +685,7 @@ def create_app() -> FastAPI:
     @app.websocket("/api/v1/ws/agent")
     async def ws_agent(websocket: WebSocket):
         await websocket.accept()
-        service: QuickControlService = websocket.app.state.quick_control_service
+        service: MomoRobotService = websocket.app.state.robot_service
         try:
             while True:
                 await websocket.send_json(
@@ -946,7 +701,7 @@ def create_app() -> FastAPI:
     @app.websocket("/api/v1/ws/agent-stream")
     async def ws_agent_stream(websocket: WebSocket):
         await websocket.accept()
-        service: QuickControlService = websocket.app.state.quick_control_service
+        service: MomoRobotService = websocket.app.state.robot_service
         initial_status = await asyncio.to_thread(service.agent_status)
         await websocket.send_json(
             {
@@ -1010,12 +765,8 @@ def create_app() -> FastAPI:
                 )
 
                 try:
-                    stream_spec = await asyncio.to_thread(
-                        service.agent_build_stream_turn_spec,
-                        kind="ask",
-                        prompt=message,
-                    )
-                except QuickControlError as exc:
+                    result = await asyncio.to_thread(service.agent_ask, message=message)
+                except MomoRobotError as exc:
                     await _send_ws_error(
                         websocket,
                         stage="agent",
@@ -1023,99 +774,14 @@ def create_app() -> FastAPI:
                         message=exc.message,
                     )
                     continue
-
-                if bool(stream_spec.get("ok")):
-                    try:
-                        stream_result = await _relay_openclaw_chat_stream(
-                            websocket,
-                            bridge=websocket.app.state.openclaw_chat_stream_bridge,
-                            command=list(stream_spec.get("command") or []),
-                            stdin_payload=dict(stream_spec.get("stdin_payload") or {}),
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        await asyncio.to_thread(
-                            service.agent_fail_stream_turn,
-                            kind="ask",
-                            prompt=message,
-                            error=str(exc),
-                            bridge_session_key=str(
-                                stream_spec.get("bridge_session_key", "") or ""
-                            ).strip(),
-                        )
-                        await _send_ws_error(
-                            websocket,
-                            stage="agent",
-                            code="AGENT_FAILED",
-                            message=str(exc),
-                        )
-                        continue
-
-                    stream_timing = dict(stream_result.get("timing") or {})
-                    history_error = str(stream_result.get("history_error", "") or "").strip()
-                    if history_error:
-                        stream_timing["history_error"] = history_error
-
-                    if not bool(stream_result.get("ok")):
-                        error_message = str(
-                            stream_result.get("error", "") or "OpenClaw chat stream failed"
-                        ).strip()
-                        await asyncio.to_thread(
-                            service.agent_fail_stream_turn,
-                            kind="ask",
-                            prompt=message,
-                            error=error_message,
-                            session_id=str(stream_result.get("session_id", "") or "").strip(),
-                            bridge_session_key=str(
-                                stream_result.get("session_key", "")
-                                or stream_spec.get("bridge_session_key", "")
-                                or ""
-                            ).strip(),
-                            openclaw_elapsed_sec=float(stream_timing.get("total_ms", 0.0) or 0.0)
-                            / 1000.0,
-                            bridge_timing=stream_timing,
-                        )
-                        await _send_ws_error(
-                            websocket,
-                            stage="agent",
-                            code="AGENT_FAILED",
-                            message=error_message,
-                        )
-                        continue
-
-                    result = await asyncio.to_thread(
-                        service.agent_complete_stream_turn,
-                        kind="ask",
-                        prompt=message,
-                        reply=str(stream_result.get("reply", "") or "").strip(),
-                        session_id=str(stream_result.get("session_id", "") or "").strip(),
-                        bridge_session_key=str(
-                            stream_result.get("session_key", "")
-                            or stream_spec.get("bridge_session_key", "")
-                            or ""
-                        ).strip(),
-                        openclaw_elapsed_sec=float(stream_timing.get("total_ms", 0.0) or 0.0)
-                        / 1000.0,
-                        bridge_timing=stream_timing,
+                except Exception as exc:  # noqa: BLE001
+                    await _send_ws_error(
+                        websocket,
+                        stage="agent",
+                        code="AGENT_FAILED",
+                        message=str(exc),
                     )
-                else:
-                    try:
-                        result = await asyncio.to_thread(service.agent_ask, message=message)
-                    except QuickControlError as exc:
-                        await _send_ws_error(
-                            websocket,
-                            stage="agent",
-                            code=exc.code,
-                            message=exc.message,
-                        )
-                        continue
-                    except Exception as exc:  # noqa: BLE001
-                        await _send_ws_error(
-                            websocket,
-                            stage="agent",
-                            code="AGENT_FAILED",
-                            message=str(exc),
-                        )
-                        continue
+                    continue
 
                 turn = dict(result.get("turn") or {})
                 reply = str(turn.get("reply", "") or "").strip()
@@ -1266,7 +932,7 @@ def create_app() -> FastAPI:
     @app.websocket("/api/v1/ws/tts")
     async def ws_tts(websocket: WebSocket):
         await websocket.accept()
-        service: QuickControlService = websocket.app.state.quick_control_service
+        service: MomoRobotService = websocket.app.state.robot_service
         try:
             while True:
                 message = await websocket.receive()
@@ -1366,7 +1032,7 @@ def create_app() -> FastAPI:
 
 
 def cli_main() -> None:
-    parser = argparse.ArgumentParser(description="MomoAgent Quick Control API")
+    parser = argparse.ArgumentParser(description="Momo Robot Service")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8010)
     parser.add_argument("--reload", action="store_true")
@@ -1375,7 +1041,7 @@ def cli_main() -> None:
     import uvicorn
 
     uvicorn.run(
-        "quick_control_api.app:create_app",
+        "momo_robot_service.app:create_app",
         host=str(args.host),
         port=int(args.port),
         reload=bool(args.reload),

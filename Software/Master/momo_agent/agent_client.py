@@ -20,7 +20,7 @@ class AgentClient(Protocol):
     def session_id(self) -> str: ...
 
     @property
-    def bridge_session_key(self) -> str: ...
+    def agent_session_key(self) -> str: ...
 
     def ask(self, message: str) -> AgentReply: ...
 
@@ -28,7 +28,7 @@ class AgentClient(Protocol):
 
     def reset_session(self) -> None: ...
 
-    def update_session_state(self, *, session_id: str = "", bridge_session_key: str = "") -> None: ...
+    def update_session_state(self, *, session_id: str = "", agent_session_key: str = "") -> None: ...
 
 
 def build_agent_client(
@@ -37,16 +37,10 @@ def build_agent_client(
     tool_requester: ToolRequester | None = None,
     tool_request_timeout_sec: float = 6.0,
 ) -> AgentClient:
-    backend = str(config.agent_backend or "openclaw").strip().lower() or "openclaw"
-    if backend == "nanobot":
-        from .nanobot_client import build_nanobot_client
+    from .nanobot_client import build_nanobot_client
 
-        return build_nanobot_client(
-            config.nanobot,
-            tool_requester=tool_requester,
-            tool_request_timeout_sec=tool_request_timeout_sec,
-        )
-
-    from .openclaw_client import build_openclaw_client
-
-    return build_openclaw_client(config.openclaw)
+    return build_nanobot_client(
+        config.nanobot,
+        tool_requester=tool_requester,
+        tool_request_timeout_sec=tool_request_timeout_sec,
+    )

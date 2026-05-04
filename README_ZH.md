@@ -120,28 +120,25 @@ source .venv/bin/activate
 
 说明：
 - `bash scripts/bootstrap.sh` 会自动在仓库根目录创建 `.venv`
-- 基础版覆盖：机械臂控制、`quick_control_api`、摄像头 / `face_loc` 的 headless 链路
+- 基础版覆盖：机械臂控制、`momo_robot_service`、摄像头 / `face_loc` 的 headless 链路
 - 进阶版 `--advanced` 会额外安装 Qt GUI 相关依赖
 
 ### 6.2.1 搭建轻量级 Nanobot Agent
 
-如果你想直接基于上游 GitHub 仓库运行轻量级 agent，而不是继续走 OpenClaw：
+默认 agent 后端是 Nanobot。如果你使用本地 Nanobot 源码，把它放到 `external/nanobot` 后配置：
 
 ```bash
-bash scripts/bootstrap_nanobot.sh
-
-export MOMO_AGENT_BACKEND=nanobot
 export MOMO_AGENT_NANOBOT_SOURCE_DIR=$PWD/external/nanobot
-export MOMO_AGENT_NANOBOT_API_BASE=http://172.18.29.16:1234/v1
-export MOMO_AGENT_NANOBOT_MODEL=qwen/qwen3.5-35b-a3b
 
-bash scripts/run_momo_nanobot.sh warmup
+# 可选：如果 .env 已经有 AUTOGRASP_VLM_API_BASE / AUTOGRASP_VLM_MODEL，
+# MOMO_AGENT_NANOBOT_* 可以不写，会自动 fallback。
+# export MOMO_AGENT_NANOBOT_API_BASE=http://172.18.29.16:1234/v1
+# export MOMO_AGENT_NANOBOT_MODEL=qwen/qwen3.5-35b-a3b
 ```
 
 这条链路会：
-- 自动把 `HKUDS/nanobot` clone 到 `external/nanobot`
-- 创建独立环境 `.venv-nanobot`
 - 让 `momo_agent` 优先使用这份本地 clone 的 nanobot 源码
+- 默认只注册机器人工具，工具会调用 `momo_robot_service`；不再默认给 Nanobot shell/curl 控制机械臂的路径
 
 ### 6.3 启动主从遥操作（实机）
 1. 在从臂侧设备启动服务端：

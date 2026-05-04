@@ -1,20 +1,12 @@
 from __future__ import annotations
 
 import sys
-import warnings
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1] / "momo_robot_service"
+ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
-
-warnings.warn(
-    "Software/Master/quick_control_api is deprecated; use "
-    "Software/Master/momo_robot_service instead.",
-    DeprecationWarning,
-    stacklevel=2,
-)
 
 from momo_robot_service.app import cli_main
 

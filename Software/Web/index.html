@@ -142,19 +142,19 @@
             <button id="saveApiButton" class="solid-button compact" type="button">保存</button>
           </div>
           <p class="helper-text" id="apiHintText">
-            推荐直接从 quick_control_api 打开这个页面，这样网页和接口天然同域。
+            推荐直接从 momo_robot_service 打开这个页面，这样网页和接口天然同域。
           </p>
         </section>
 
         <section class="panel-section">
           <h3>Agent 互动</h3>
-          <label class="field-label" for="agentPromptInput">发给 OpenClaw</label>
+          <label class="field-label" for="agentPromptInput">发给 Nanobot agent</label>
           <textarea id="agentPromptInput" rows="3" placeholder="例如：我猜这件事和死者自己有关吗？"></textarea>
           <div class="action-row">
             <button id="agentAskButton" class="solid-button" type="button">问 Agent</button>
           </div>
           <p class="helper-text">
-            这会调用 <code>POST /api/v1/haiguitang/agent/turn</code>，由后端统一完成 OpenClaw 对话、字幕切换、表情片段和点头/摇头动作。后面接 STT 时也可以直接复用这条接口。
+            这会调用 <code>POST /api/v1/haiguitang/agent/turn</code>，由后端统一完成 Nanobot agent 对话、字幕切换、表情片段和点头/摇头动作。后面接 STT 时也可以直接复用这条接口。
           </p>
         </section>
 
@@ -233,7 +233,7 @@
             <li>`end.mp4`：结束片段</li>
           </ul>
           <p class="helper-text">
-            素材目录：<code>Software/Master/quick_control_api/runtime/media</code>
+            素材目录：<code>Software/Master/momo_robot_service/runtime/media</code>
           </p>
         </section>
 

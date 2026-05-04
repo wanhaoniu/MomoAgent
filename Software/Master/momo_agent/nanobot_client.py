@@ -36,9 +36,9 @@ def _normalized_tool_mode(config: NanobotConfig) -> str:
     mode = str(getattr(config, "tool_mode", "") or "").strip().lower()
     if mode in {"bridge", "bridge-only", "bridge_only", "robot-only", "robot_only"}:
         return "bridge_only"
-    if mode in {"all", "full", "full-access", "full_access"}:
-        return "all"
-    return "hybrid"
+    if mode in {"hybrid"}:
+        return "hybrid"
+    return "bridge_only"
 
 
 def _tool_mode_keeps_default_tools(config: NanobotConfig) -> bool:
@@ -52,12 +52,12 @@ def _disabled_skill_names_signature(config: NanobotConfig) -> str:
 
 def _effective_tool_runtime(config: NanobotConfig) -> dict[str, bool]:
     mode = _normalized_tool_mode(config)
-    if mode == "all":
+    if mode == "bridge_only":
         return {
-            "enable_exec": True,
-            "enable_web": True,
-            "enable_my_tool": True,
-            "restrict_to_workspace": False,
+            "enable_exec": False,
+            "enable_web": False,
+            "enable_my_tool": False,
+            "restrict_to_workspace": True,
         }
     return {
         "enable_exec": bool(config.enable_exec),
@@ -131,8 +131,8 @@ def _import_nanobot_modules(config: NanobotConfig | None = None):
         source_hint = f" from {source_dir}" if source_dir is not None else ""
         raise RuntimeError(
             "Nanobot backend is unavailable. Install `nanobot-ai` on Python 3.11+ "
-            "or bootstrap the vendored clone with `bash scripts/bootstrap_nanobot.sh`"
-            f"{source_hint}, or switch MOMO_AGENT_BACKEND back to `openclaw`."
+            "or set MOMO_AGENT_NANOBOT_SOURCE_DIR to a valid local nanobot checkout"
+            f"{source_hint}."
         ) from exc
     return Nanobot, AgentHook, AgentHookContext, BUILTIN_SKILLS_DIR, Tool
 
@@ -167,8 +167,8 @@ def _build_disabled_skill_names(config: NanobotConfig) -> list[str]:
     return names
 
 
-def _write_if_missing(path: Path, content: str) -> None:
-    if path.exists():
+def _write_workspace_file(path: Path, content: str, *, overwrite: bool = False) -> None:
+    if path.exists() and not overwrite:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -182,21 +182,22 @@ def _ensure_workspace_files(config: NanobotConfig) -> None:
     memory_dir.mkdir(parents=True, exist_ok=True)
     skill_dir.mkdir(parents=True, exist_ok=True)
 
-    _write_if_missing(
+    _write_workspace_file(
         workspace / "AGENTS.md",
         """# MomoAgent Instructions
 
 You are the local robot interaction layer for MomoAgent.
 
-- Use only the registered robot tools for physical actions.
-- Use nanobot builtin skills by reading their `SKILL.md` instructions or following the skills summary; do not route builtin skills through robot behavior tools.
+- Use only the registered robot tools for physical actions; they call momo_robot_service.
+- Do not use shell, curl, direct SDK imports, or alternate robot service paths for robot control.
 - Do not invent robot state, camera observations, or execution success.
 - If location, object identity, or target joint is ambiguous, ask one concise clarifying question.
 - If a robot tool reports that the arm is not connected or unavailable, explain the issue briefly and ask the user how they want to proceed.
 - After tool calls, summarize the real result in plain language.
 """,
+        overwrite=True,
     )
-    _write_if_missing(
+    _write_workspace_file(
         workspace / "SOUL.md",
         """# Soul
 
@@ -207,14 +208,14 @@ You are Momo, a calm and practical robot assistant.
 - Prefer concrete action over vague promises.
 """,
     )
-    _write_if_missing(
+    _write_workspace_file(
         workspace / "USER.md",
         """# User
 
 Stable user preferences and interaction style will be recorded here over time.
 """,
     )
-    _write_if_missing(
+    _write_workspace_file(
         memory_dir / "MEMORY.md",
         """# Memory
 
@@ -223,22 +224,26 @@ Stable user preferences and interaction style will be recorded here over time.
 - Skill and SDK layers enforce the low-level motion limits.
 """,
     )
-    _write_if_missing(
+    _write_workspace_file(
         workspace / "TOOLS.md",
         """# Tool Guidance
 
-Primary robot tools:
+Robot tools are the only control surface Nanobot should use. The dispatcher sends them to
+`momo_robot_service` on `MOMO_ROBOT_SERVICE_URL` (default `http://127.0.0.1:8010`) or to
+the in-process service requester when Nanobot runs inside the service.
 
 - `get_robot_state` for current joints and TCP state
-- `move_robot_arm` for Cartesian moves
-- `rotate_joint` for joint-level adjustment
+- `rotate_joint` for small joint-level adjustments
+- `move_robot_arm` only for explicit Cartesian targets
 - `set_gripper` for gripper open ratio
 - `stop_robot` for immediate stop
-- `run_robot_behavior` for higher-level curated robot behaviors when available
-- Never use `run_robot_behavior` for nanobot builtin skills such as `weather`, `github`, `tmux`, `summarize`, or `clawhub`
+- `run_robot_behavior` for curated robot behaviors such as `home`, `open_gripper`, and `close_gripper`
+
+Do not use curl, shell commands, direct SDK sessions, or alternate robot tools for robot motion.
 """,
+        overwrite=True,
     )
-    _write_if_missing(
+    _write_workspace_file(
         skill_dir / "SKILL.md",
         f"""---
 description: Use the robot control bridge tools to inspect and move the Momo robot arm.
@@ -249,18 +254,20 @@ metadata:
 
 # {config.skill_name}
 
-Use these tools when the user asks about the robot arm:
+Use only the registered robot tools when the user asks about the robot arm. These tools call
+`momo_robot_service`, which is the single owner of the hardware session.
 
 - Start with `get_robot_state` when you need current pose, joints, or gripper status.
-- Use `move_robot_arm` only when the user clearly specifies a Cartesian target.
 - Use `rotate_joint` when the user names a joint or asks for a simple incremental adjustment.
+- Use `move_robot_arm` only when the user clearly specifies a Cartesian target.
 - Use `set_gripper` for open and close style requests.
 - Use `stop_robot` immediately if the user asks to stop.
-- Use `run_robot_behavior` only for explicitly named, higher-level robot behaviors that are implemented.
-- Do not use `run_robot_behavior` for nanobot builtin skills like `weather`, `github`, `tmux`, or `summarize`.
+- Use `run_robot_behavior` for `home`, `open_gripper`, or `close_gripper`.
 
-If the request is ambiguous, ask a short clarification question instead of guessing.
+Do not use curl, shell commands, direct SDK imports, or alternate robot service paths for robot motion.
+If the request is ambiguous, ask one short clarification question instead of guessing.
 """,
+        overwrite=True,
     )
 
 
@@ -333,7 +340,7 @@ class NanobotBridgeClient:
         _ensure_workspace_files(config)
         self._config_path = _write_runtime_config(config)
         self._session_id = self._resolve_initial_session_id()
-        self._bridge_session_key = f"nanobot:{self._session_id}"
+        self._agent_session_key = f"nanobot:{self._session_id}"
         self._bot = self._build_bot()
 
     def _build_bot(self):
@@ -458,8 +465,8 @@ class NanobotBridgeClient:
         return self._session_id
 
     @property
-    def bridge_session_key(self) -> str:
-        return self._bridge_session_key
+    def agent_session_key(self) -> str:
+        return self._agent_session_key
 
     def close(self) -> None:
         return
@@ -469,19 +476,19 @@ class NanobotBridgeClient:
             sessions = self._bot._loop.sessions
             sessions.delete_session(self._session_id)
             self._session_id = self._make_session_id()
-            self._bridge_session_key = f"nanobot:{self._session_id}"
+            self._agent_session_key = f"nanobot:{self._session_id}"
             if not self._config.force_new_session:
                 self._persist_state()
 
-    def update_session_state(self, *, session_id: str = "", bridge_session_key: str = "") -> None:
+    def update_session_state(self, *, session_id: str = "", agent_session_key: str = "") -> None:
         next_session_id = str(session_id or "").strip()
-        next_bridge_key = str(bridge_session_key or "").strip()
+        next_agent_key = str(agent_session_key or "").strip()
         if next_session_id:
             self._session_id = next_session_id
-        if next_bridge_key:
-            self._bridge_session_key = next_bridge_key
+        if next_agent_key:
+            self._agent_session_key = next_agent_key
         else:
-            self._bridge_session_key = f"nanobot:{self._session_id}"
+            self._agent_session_key = f"nanobot:{self._session_id}"
         if not self._config.force_new_session:
             self._persist_state()
 

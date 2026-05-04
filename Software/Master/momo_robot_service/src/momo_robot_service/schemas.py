@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -49,6 +49,13 @@ class AgentAskRequest(BaseModel):
 
 class AgentWarmupRequest(BaseModel):
     prompt: str = Field("请只回复“就绪”。", min_length=1, max_length=200)
+
+
+class ToolDispatchRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    request_id: str = Field("", max_length=120)
+    timeout_sec: float = Field(6.0, ge=1.0, le=60.0)
 
 
 class FollowStartRequest(BaseModel):

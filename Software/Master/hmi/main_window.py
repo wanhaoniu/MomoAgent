@@ -38,7 +38,7 @@ from PyQt5.QtWidgets import (
 )
 
 from hmi.camera_window import CameraWindow
-from hmi.pages import QuickMovePage, SettingsPage
+from hmi.pages import AgentChatPanel, QuickMovePage, SettingsPage
 from hmi.speech_window import SpeechInputWindow
 from hmi.theme import apply_soft_effects, get_stylesheet
 from hmi.widgets import GlobalStatusBar
@@ -283,6 +283,7 @@ class ArmControlGUI(QMainWindow):
                 "nav_home": "Home",
                 "nav_quick": "Quick Move",
                 "nav_settings": "Settings",
+                "nav_agent": "Agent",
                 "btn_back_home": "⌂",
                 "btn_connecting": "连接中...",
                 "btn_camera": "📷 相机",
@@ -293,6 +294,14 @@ class ArmControlGUI(QMainWindow):
                 "lang_label": "语言",
                 "camera_window_title": "独立摄像头窗口",
                 "speech_window_title": "语音输入",
+                "agent_dock_title": "Agent 对话",
+                "agent_chat_title": "MomoAgent 对话",
+                "agent_settings_title": "MomoAgent 配置测试",
+                "agent_status_btn": "状态",
+                "agent_warmup_btn": "预热",
+                "agent_clear_btn": "清空",
+                "agent_send_btn": "发送",
+                "agent_prompt_placeholder": "输入要发给 MomoAgent 的测试问题",
                 "status_ready": "就绪",
                 "status_connecting": "连接中...",
                 "status_connected": "已连接",
@@ -339,6 +348,7 @@ class ArmControlGUI(QMainWindow):
                 "settings_robot": "Robot Model / URDF",
                 "settings_motion": "Motion",
                 "settings_ui": "UI",
+                "settings_agent": "Agent",
                 "settings_jog_style": "Jog 风格",
                 "settings_jog_minimal": "极简线条（推荐）",
                 "settings_jog_soft": "柔和键帽",
@@ -414,6 +424,7 @@ class ArmControlGUI(QMainWindow):
                 "nav_home": "Home",
                 "nav_quick": "Quick Move",
                 "nav_settings": "Settings",
+                "nav_agent": "Agent",
                 "btn_back_home": "⌂",
                 "btn_connecting": "Connecting...",
                 "btn_camera": "📷 Camera",
@@ -424,6 +435,14 @@ class ArmControlGUI(QMainWindow):
                 "lang_label": "Language",
                 "camera_window_title": "Camera Window",
                 "speech_window_title": "Voice Input",
+                "agent_dock_title": "Agent Chat",
+                "agent_chat_title": "MomoAgent Chat",
+                "agent_settings_title": "MomoAgent Test",
+                "agent_status_btn": "Status",
+                "agent_warmup_btn": "Warmup",
+                "agent_clear_btn": "Clear",
+                "agent_send_btn": "Send",
+                "agent_prompt_placeholder": "Type a test prompt for MomoAgent",
                 "status_ready": "Ready",
                 "status_connecting": "Connecting...",
                 "status_connected": "Connected",
@@ -470,6 +489,7 @@ class ArmControlGUI(QMainWindow):
                 "settings_robot": "Robot Model / URDF",
                 "settings_motion": "Motion",
                 "settings_ui": "UI",
+                "settings_agent": "Agent",
                 "settings_jog_style": "Jog Style",
                 "settings_jog_minimal": "Minimal Line (Recommended)",
                 "settings_jog_soft": "Soft Keycap",
@@ -599,6 +619,14 @@ class ArmControlGUI(QMainWindow):
         self.log_dock.hide()
         self.log_dock.visibilityChanged.connect(self._on_log_dock_visibility_changed)
 
+        self.agent_chat_panel = AgentChatPanel(config_provider=self._agent_request_config)
+        self.agent_dock = QDockWidget(self._tr("agent_dock_title"), self)
+        self.agent_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.agent_dock.setWidget(self.agent_chat_panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.agent_dock)
+        self.agent_dock.hide()
+        self.agent_dock.visibilityChanged.connect(self._on_agent_dock_visibility_changed)
+
         sim_widget = self._build_sim_widget()
         self.quick_page.set_sim_widget(sim_widget)
 
@@ -627,6 +655,7 @@ class ArmControlGUI(QMainWindow):
         self.top_settings_btn.setCheckable(True)
         self.top_settings_btn.clicked.connect(lambda: self._set_page(self.PAGE_SETTINGS))
         layout.addWidget(self.top_settings_btn)
+
         self.nav_buttons = [self.back_home_btn, self.top_settings_btn]
 
         layout.addStretch()
@@ -650,6 +679,13 @@ class ArmControlGUI(QMainWindow):
         self.log_btn.setCheckable(True)
         self.log_btn.clicked.connect(self.on_toggle_log_panel)
         layout.addWidget(self.log_btn)
+
+        self.top_agent_btn = QPushButton(self._tr("nav_agent"))
+        self.top_agent_btn.setObjectName("primaryBtn")
+        self.top_agent_btn.setFixedWidth(68)
+        self.top_agent_btn.setCheckable(True)
+        self.top_agent_btn.clicked.connect(self.on_toggle_agent_panel)
+        layout.addWidget(self.top_agent_btn)
 
         self.lang_label = QLabel(self._tr("lang_label"))
         self.lang_combo = QComboBox()
@@ -702,6 +738,7 @@ class ArmControlGUI(QMainWindow):
     def _apply_header_icons(self):
         self._back_home_has_icon = self._set_button_icon(self.back_home_btn, "home", size=18)
         self._top_settings_has_icon = self._set_button_icon(self.top_settings_btn, "settings", size=18)
+        self.top_agent_btn.setIcon(QIcon())
         self.connect_toggle_btn.setIcon(QIcon())
         self.camera_btn.setIcon(QIcon())
         self.speech_btn.setIcon(QIcon())
@@ -784,6 +821,7 @@ class ArmControlGUI(QMainWindow):
         self.settings_page.camera_source_combo.currentIndexChanged.connect(self.on_camera_source_changed)
         self.settings_page.camera_rotation_combo.currentIndexChanged.connect(self.on_camera_source_changed)
         self.settings_page.camera_device_input.editingFinished.connect(self.on_camera_source_changed)
+        self.settings_page.agent_panel.line_ready.connect(self._append_agent_line)
         self.settings_page.apply_view_btn.clicked.connect(self._apply_vtk_visual_settings)
         self.settings_page.aa_mode_combo.currentIndexChanged.connect(self._apply_vtk_visual_settings)
         self.settings_page.material_preset_combo.currentIndexChanged.connect(self._apply_vtk_visual_settings)
@@ -827,6 +865,24 @@ class ArmControlGUI(QMainWindow):
             self.log_dock.hide()
         else:
             self.log_dock.show()
+
+    def _agent_request_config(self) -> tuple[str, float]:
+        return self.settings_page.agent_service_url(), self.settings_page.agent_timeout_sec()
+
+    def _on_agent_dock_visibility_changed(self, visible: bool):
+        self.top_agent_btn.blockSignals(True)
+        self.top_agent_btn.setChecked(bool(visible))
+        self.top_agent_btn.blockSignals(False)
+
+    def on_toggle_agent_panel(self):
+        if self.agent_dock.isVisible():
+            self.agent_dock.hide()
+        else:
+            self.agent_dock.show()
+
+    def _append_agent_line(self, speaker: str, message: str):
+        if hasattr(self, "agent_chat_panel"):
+            self.agent_chat_panel.append_line(speaker, message)
 
     def on_language_changed(self):
         if self._lang_syncing:
@@ -881,6 +937,8 @@ class ArmControlGUI(QMainWindow):
         else:
             self.top_settings_btn.setText(self._tr("nav_settings"))
         self.top_settings_btn.setToolTip(self._tr("nav_settings"))
+        self.top_agent_btn.setText(self._tr("nav_agent"))
+        self.top_agent_btn.setToolTip(self._tr("nav_agent"))
         self._set_connect_btn_text()
         self._set_camera_btn_text(self._is_camera_window_visible())
         self._set_speech_btn_text(self._is_speech_window_visible())
@@ -889,6 +947,8 @@ class ArmControlGUI(QMainWindow):
 
         self.quick_page.set_texts(self._tr)
         self.settings_page.set_texts(self._tr)
+        self.agent_dock.setWindowTitle(self._tr("agent_dock_title"))
+        self.agent_chat_panel.set_texts(self._tr)
 
         self.mode_text = self._tr("mode_manual")
         self.control_owner_text = self._tr("owner_local")
@@ -938,6 +998,8 @@ class ArmControlGUI(QMainWindow):
             apply_soft_effects(self.camera_window, theme_norm)
         if self.speech_window is not None:
             self.speech_window.set_theme(theme_norm)
+        if hasattr(self, "agent_chat_panel"):
+            self.agent_chat_panel.set_theme(theme_norm)
         self._sync_theme_combo()
 
         if theme_norm == "dark" and self.settings_page.background_theme_combo.currentData() != "dark":
@@ -1946,6 +2008,7 @@ class ArmControlGUI(QMainWindow):
         text = str(text or "").strip()
         if text:
             self.log(f"[Speech] {text}", "info")
+            self._append_agent_line("You", text)
             self.statusBar().showMessage(f"Speech: {text[:80]}")
 
     def _on_speech_transcript_failed(self, message: str):
@@ -1959,18 +2022,21 @@ class ArmControlGUI(QMainWindow):
         msg = str(text or "").strip()
         if not msg:
             return
-        self.log(f"[OpenClaw] {msg}", "success")
-        self.statusBar().showMessage(f"OpenClaw: {msg[:80]}")
+        self.log(f"[Agent] {msg}", "success")
+        self._append_agent_line("Momo", msg)
+        self.statusBar().showMessage(f"Agent: {msg[:80]}")
 
     def _on_speech_agent_failed(self, message: str):
-        msg = str(message or "").strip() or "OpenClaw invocation failed"
-        self.log(f"[OpenClaw] {msg}", "error")
+        msg = str(message or "").strip() or "Agent invocation failed"
+        self.log(f"[Agent] {msg}", "error")
+        self._append_agent_line("Error", msg)
         self.statusBar().showMessage(msg)
 
     def _on_speech_agent_session_changed(self, session_id: str):
         sid = str(session_id or "").strip()
         if sid:
-            self.log(f"[OpenClaw] Session: {sid}", "info")
+            self.log(f"[Agent] Session: {sid}", "info")
+            self._append_agent_line("Status", f"Session: {sid}")
 
     def _on_speech_tts_failed(self, message: str):
         msg = str(message or "").strip() or "TTS playback failed"
@@ -2589,7 +2655,7 @@ class ArmControlGUI(QMainWindow):
             "timestamp": float(time.time()),
         }
         if mode == "path":
-            out_dir = Path("/tmp/mocearm_openclaw_frames")
+            out_dir = Path("/tmp/momo_robot_frames")
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / f"frame_{int(time.time() * 1000)}{ext}"
             out_path.write_bytes(blob)
@@ -3768,6 +3834,10 @@ class ArmControlGUI(QMainWindow):
             self.camera_window.close()
         if self.speech_window is not None:
             self.speech_window.close()
+        if hasattr(self, "agent_chat_panel"):
+            self.agent_chat_panel.shutdown()
+        if hasattr(self, "settings_page"):
+            self.settings_page.shutdown_agent()
 
         self._on_quick_jog_released(enqueue_stop=False)
         self._stop_sdk_command_worker()

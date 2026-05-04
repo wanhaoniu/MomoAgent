@@ -7,7 +7,7 @@
 - 默认检测后端：`opencv_yunet`
 - 默认权重：`weights/face_detection_yunet_2023mar.onnx`
 - 本地直接启动入口：`python main.py`
-- OpenClaw 识别入口：仓库根目录 `SKILL.md`
+- Skill-style CLI 入口：`scripts/face_tracking_skill.py`
 
 项目仍保留 `insightface_onnx` 和 `insightface_faceanalysis` 两种可选后端，但默认不依赖它们。
 
@@ -148,9 +148,7 @@ curl "http://127.0.0.1:8000/frame.jpg?max_width=960&quality=70" -o frame.jpg
 - `combined_hint`
 - `fps`
 
-## OpenClaw Skill
-
-根目录 skill 文件：[SKILL.md](/Users/niuwanhao/Desktop/Intern/pp_skills/face_loc/SKILL.md)
+## Skill CLI
 
 支持动作：
 
@@ -200,7 +198,7 @@ pytest tests -q
 已完成：
 
 - 根目录 `main.py` 本地启动入口
-- 根目录 `SKILL.md` OpenClaw skill 入口
+- `scripts/face_tracking_skill.py` skill-style CLI 入口
 - 默认可用 YuNet 权重下载到 `weights/face_detection_yunet_2023mar.onnx`
 - `.venv` 基础依赖安装完成
 - 默认配置切换到 Mac CPU 友好模式

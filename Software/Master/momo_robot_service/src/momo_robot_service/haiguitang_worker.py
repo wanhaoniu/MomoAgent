@@ -122,7 +122,7 @@ class HaiGuiTangWorker:
         self._status["started_at"] = time.time()
         self._thread = threading.Thread(
             target=self._run,
-            name="QuickControlHaiGuiTang",
+            name="MomoRobotHaiGuiTang",
             daemon=True,
         )
 
