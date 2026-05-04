@@ -225,6 +225,14 @@ class ArmControlGUI(QMainWindow):
             self._sdk_gui_sync_interval_sec = 0.04
         self._sdk_last_gui_sync_ts = 0.0
         self._sdk_last_gui_sync_err_ts = 0.0
+        self._sdk_gui_sync_failure_count = 0
+        try:
+            self._sdk_gui_sync_error_threshold = max(
+                1,
+                int(str(os.getenv("SOARMMOCE_GUI_SYNC_ERROR_THRESHOLD", "5")).strip()),
+            )
+        except Exception:
+            self._sdk_gui_sync_error_threshold = 5
         self._sdk_visual_prefer_twin_until_ts = 0.0
         self._sdk_visual_twin_tol_rad = math.radians(0.8)
         self._sdk_visual_twin_slack_sec = 2.5
@@ -2033,6 +2041,7 @@ class ArmControlGUI(QMainWindow):
         self._sdk_last_connect_error = str(error_text or "").strip()
         if mode_norm == "disconnected":
             self._free_move_torque_released = False
+            self._sdk_gui_sync_failure_count = 0
         if config_path is not None:
             self._sdk_runtime_config_path = str(config_path or "").strip()
         if robot is not None:
@@ -2323,6 +2332,28 @@ class ArmControlGUI(QMainWindow):
             return
         self._apply_sim_joint_q(q_src, update_plot=True)
 
+    def _mark_sdk_sync_success(self):
+        self._sdk_gui_sync_failure_count = 0
+
+    def _handle_sdk_sync_error(self, exc: Exception, *, from_worker_thread: bool):
+        self._sdk_gui_sync_failure_count += 1
+        if int(self._sdk_gui_sync_failure_count) < int(self._sdk_gui_sync_error_threshold):
+            return
+
+        now = time.time()
+        if now - float(self._sdk_last_gui_sync_err_ts) < 5.0:
+            return
+
+        self._sdk_last_gui_sync_err_ts = now
+        message = (
+            f"[SDK sync] {self._sdk_gui_sync_failure_count} consecutive read failures; "
+            f"latest: {exc}"
+        )
+        if from_worker_thread:
+            self.log_signal.emit(message, "warning")
+        else:
+            self.log(message, "warning")
+
     def _sync_gui_from_sdk(self, force: bool = False) -> bool:
         if self.connecting or (not self._sim_ready) or (not self._sdk_gui_sync_enabled):
             return False
@@ -2339,13 +2370,12 @@ class ArmControlGUI(QMainWindow):
                 return False
             state = robot.get_state()
         except Exception as exc:
-            if now - float(self._sdk_last_gui_sync_err_ts) >= 5.0:
-                self._sdk_last_gui_sync_err_ts = now
-                self.log(f"[SDK sync] {exc}", "warning")
+            self._handle_sdk_sync_error(exc, from_worker_thread=False)
             return False
         finally:
             self._sdk_lock.release()
 
+        self._mark_sdk_sync_success()
         self._sync_sim_from_sdk_state(state)
         self._sdk_last_gui_sync_ts = now
         return True
@@ -2366,15 +2396,13 @@ class ArmControlGUI(QMainWindow):
                     continue
                 state = robot.get_state()
             except Exception as exc:
-                now = time.time()
-                if now - float(self._sdk_last_gui_sync_err_ts) >= 5.0:
-                    self._sdk_last_gui_sync_err_ts = now
-                    self.log_signal.emit(f"[SDK sync] {exc}", "warning")
+                self._handle_sdk_sync_error(exc, from_worker_thread=True)
             finally:
                 self._sdk_lock.release()
             if state is None:
                 time.sleep(self._sdk_gui_sync_interval_sec)
                 continue
+            self._mark_sdk_sync_success()
             self.sdk_sync_state_ready.emit(state)
             time.sleep(self._sdk_gui_sync_interval_sec)
 
