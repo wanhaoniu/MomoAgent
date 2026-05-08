@@ -52,7 +52,7 @@
     <parent link="base" />
     <child link="shoulder" />
     <axis xyz="0 0 -1" />
-    <limit lower="-1.96196143" upper="1.68124294" effort="0" velocity="0" />
+    <limit lower="-1.79322354" upper="1.83310704" effort="0" velocity="0" />
   </joint>
 
   <link name="shoulder_lift">
@@ -136,7 +136,7 @@
     <parent link="elbow" />
     <child link="wrist" />
     <axis xyz="0 0 1" />
-    <limit lower="-0.00613592" upper="2.27796147" effort="0" velocity="0" />
+    <limit lower="-2.77190328" upper="0.36815539" effort="0" velocity="0" />
   </joint>
 
   <link name="wrist_roll">

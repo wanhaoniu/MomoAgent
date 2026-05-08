@@ -345,6 +345,20 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.exception_handler(Exception)
+    async def generic_error_handler(_request: Request, exc: Exception):
+        message = str(exc).strip() or exc.__class__.__name__
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": message,
+                },
+            },
+        )
+
     @app.get("/api/v1/health")
     async def health(request: Request) -> dict[str, Any]:
         service: MomoRobotService = request.app.state.robot_service
@@ -429,6 +443,11 @@ def create_app() -> FastAPI:
     async def motion_stop(request: Request) -> dict[str, Any]:
         service: MomoRobotService = request.app.state.robot_service
         return _ok(service.stop())
+
+    @app.post("/api/v1/motion/free-move")
+    async def motion_free_move(request: Request) -> dict[str, Any]:
+        service: MomoRobotService = request.app.state.robot_service
+        return _ok(service.free_move())
 
     @app.post("/api/v1/tools/dispatch")
     async def tool_dispatch(payload: ToolDispatchRequest, request: Request) -> dict[str, Any]:

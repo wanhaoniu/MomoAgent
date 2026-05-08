@@ -1,7 +1,7 @@
 """Reusable UI widgets for the HMI."""
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
+from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 
 class StatusCard(QFrame):
@@ -67,6 +67,9 @@ class GlobalStatusBar(QFrame):
             layout.addWidget(label)
 
         layout.addStretch()
+        self.action_layout = QHBoxLayout()
+        self.action_layout.setSpacing(8)
+        layout.addLayout(self.action_layout)
 
     def set_connection(self, text: str):
         self.connection_label.setText(text)
@@ -85,3 +88,6 @@ class GlobalStatusBar(QFrame):
 
     def set_owner(self, text: str):
         self.owner_label.setText(text)
+
+    def add_action_widget(self, widget: QWidget):
+        self.action_layout.addWidget(widget)

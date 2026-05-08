@@ -8,13 +8,16 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFrame,
+    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QPushButton,
     QSlider,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -63,6 +66,13 @@ class QuickMovePage(QWidget):
 
     speed_changed = pyqtSignal(int)
     home_clicked = pyqtSignal()
+    pose_move_requested = pyqtSignal(dict)
+    calibration_clicked = pyqtSignal()
+    record_sequence_clicked = pyqtSignal()
+    replay_sequence_clicked = pyqtSignal()
+    stop_sequence_clicked = pyqtSignal()
+    open_sequence_file_clicked = pyqtSignal()
+    pose_target_changed = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
@@ -70,25 +80,19 @@ class QuickMovePage(QWidget):
         self._jog_style = self.JOG_STYLE_LINE
         self._jog_icon_color = "#FFFFFF"
         self._jog_icon_cache = {}
+        self._target_pose_initialized = False
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(10)
 
-        top = QHBoxLayout()
-        root.addLayout(top, stretch=1)
-
-        self.left_group = QGroupBox("Cartesian Jog")
-        left_layout = QVBoxLayout(self.left_group)
-        left_layout.setSpacing(12)
+        main = QHBoxLayout()
+        main.setSpacing(10)
+        root.addLayout(main, stretch=1)
 
         self.jog_buttons = {}
-        trans_widget = self._build_translation_pad()
-        rot_widget = self._build_rotation_pad()
+        self.joint_rows = []
+        self.pose_labels = {}
 
-        left_layout.addWidget(trans_widget)
-        left_layout.addWidget(rot_widget)
-
-        step_row = QHBoxLayout()
         self.step_mode_combo = QComboBox()
         self.step_mode_combo.addItems(["Step", "Continuous"])
         self.step_mode_combo.setCurrentIndex(0)
@@ -101,22 +105,40 @@ class QuickMovePage(QWidget):
         self.step_angle_spin.setValue(5.0)
         self.step_angle_spin.setSuffix(" deg")
 
-        step_row.addWidget(self.step_mode_combo)
-        step_row.addWidget(self.step_dist_spin)
-        step_row.addWidget(self.step_angle_spin)
-        left_layout.addLayout(step_row)
+        self.left_group = QGroupBox("Control")
+        left_layout = QVBoxLayout(self.left_group)
+        left_layout.setContentsMargins(8, 10, 8, 8)
+        left_layout.setSpacing(8)
+        self.control_tabs = QTabWidget()
+        self.control_tabs.setObjectName("controlTabs")
+        left_layout.addWidget(self.control_tabs)
+        self.left_group.setMinimumWidth(390)
+        self.left_group.setMaximumWidth(470)
 
-        top.addWidget(self.left_group, stretch=1)
+        self.joint_tab = self._build_joint_tab()
+        self.sequence_tab = self._build_sequence_tab()
+        self.inverse_tab = self._build_inverse_tab()
+        self.tools_tab = self._build_tools_tab()
+        self.control_tabs.addTab(self.joint_tab, "Joint")
+        self.control_tabs.addTab(self.sequence_tab, "Sequence")
+        self.control_tabs.addTab(self.inverse_tab, "IK")
+        self.control_tabs.addTab(self.tools_tab, "Tools")
+
+        main.addWidget(self.left_group, stretch=0)
 
         self.center_group = QGroupBox("3D View")
         center_layout = QVBoxLayout(self.center_group)
+        center_layout.setSpacing(10)
         axis_row = QHBoxLayout()
+        self.tcp_summary_label = QLabel("TCP: --")
+        self.tcp_summary_label.setObjectName("tcpSummaryLabel")
         self.coord_label = QLabel("Coordinate")
         self.coord_combo = QComboBox()
         self.coord_combo.addItems(["Base", "Tool", "User"])
+        axis_row.addWidget(self.tcp_summary_label)
+        axis_row.addStretch()
         axis_row.addWidget(self.coord_label)
         axis_row.addWidget(self.coord_combo)
-        axis_row.addStretch()
 
         # Keep speed controls for existing logic, but remove from this top row layout.
         self.speed_label = QLabel("Speed")
@@ -136,44 +158,9 @@ class QuickMovePage(QWidget):
         self.sim_host_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.addWidget(self.sim_host, stretch=1)
 
-        top.addWidget(self.center_group, stretch=2)
+        main.addWidget(self.center_group, stretch=1)
 
-        self.right_group = QGroupBox("Joint Control")
-        right_layout = QVBoxLayout(self.right_group)
-
-        self.joint_rows = []
-        for idx in range(6):
-            row = QHBoxLayout()
-            minus_btn = QPushButton("-")
-            plus_btn = QPushButton("+")
-            minus_btn.setAutoRepeat(False)
-            plus_btn.setAutoRepeat(False)
-            minus_btn.setEnabled(False)
-            plus_btn.setEnabled(False)
-            value_label = QLabel("0.00")
-            joint_label = QLabel(f"J{idx + 1}")
-            row.addWidget(joint_label)
-            row.addWidget(minus_btn)
-            row.addWidget(value_label)
-            row.addWidget(plus_btn)
-            right_layout.addLayout(row)
-            self.joint_rows.append((joint_label, minus_btn, value_label, plus_btn))
-
-        self.pose_group = QGroupBox("TCP")
-        pose_grid = QGridLayout(self.pose_group)
-        self.pose_labels = {}
-        keys = ["X", "Y", "Z", "Rx", "Ry", "Rz"]
-        for i, key in enumerate(keys):
-            name = QLabel(key)
-            value = QLabel("--")
-            pose_grid.addWidget(name, i, 0)
-            pose_grid.addWidget(value, i, 1)
-            self.pose_labels[key] = value
-        right_layout.addWidget(self.pose_group)
-
-        top.addWidget(self.right_group, stretch=1)
-
-        bottom = QHBoxLayout()
+        quick_action_row = QHBoxLayout()
         self.goto_zero_btn = QPushButton("Home")
         self.free_move_btn = QPushButton("Free Move")
         self.status_light = QLabel("●")
@@ -181,16 +168,254 @@ class QuickMovePage(QWidget):
 
         self.goto_zero_btn.clicked.connect(self.home_clicked.emit)
 
-        bottom.addWidget(self.goto_zero_btn)
-        bottom.addWidget(self.free_move_btn)
-        bottom.addStretch()
-        bottom.addWidget(self.status_light)
+        quick_action_row.addWidget(self.goto_zero_btn)
+        quick_action_row.addWidget(self.free_move_btn)
+        quick_action_row.addStretch()
+        quick_action_row.addWidget(self.status_light)
 
-        root.addLayout(bottom)
+        root.addLayout(quick_action_row)
 
         self._motion_enabled = False
         self._cartesian_motion_enabled = False
         self._refresh_motion_controls()
+
+    def _build_joint_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        self.joint_group = QGroupBox("Joint Control")
+        joint_layout = QVBoxLayout(self.joint_group)
+        joint_layout.setSpacing(8)
+        for idx in range(6):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            minus_btn = QPushButton("-")
+            plus_btn = QPushButton("+")
+            minus_btn.setAutoRepeat(False)
+            plus_btn.setAutoRepeat(False)
+            minus_btn.setEnabled(False)
+            plus_btn.setEnabled(False)
+            value_label = QLabel("0.000")
+            value_label.setObjectName("jointValueLabel")
+            value_label.setAlignment(Qt.AlignCenter)
+            joint_label = QLabel(f"J{idx + 1}")
+            joint_label.setMinimumWidth(28)
+            row.addWidget(joint_label)
+            row.addWidget(minus_btn)
+            row.addWidget(value_label, stretch=1)
+            row.addWidget(plus_btn)
+            joint_layout.addLayout(row)
+            self.joint_rows.append((joint_label, minus_btn, value_label, plus_btn))
+
+        step_form = QFormLayout()
+        step_form.addRow("Step Angle", self.step_angle_spin)
+        joint_layout.addLayout(step_form)
+
+        layout.addWidget(self.joint_group)
+
+        self.pose_group = QGroupBox("TCP")
+        pose_grid = QGridLayout(self.pose_group)
+        pose_grid.setHorizontalSpacing(10)
+        pose_grid.setVerticalSpacing(8)
+        for i, key in enumerate(["X", "Y", "Z", "Rx", "Ry", "Rz"]):
+            name = QLabel(key)
+            value = QLabel("--")
+            value.setObjectName("poseValueLabel")
+            value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            pose_grid.addWidget(name, i // 2, (i % 2) * 2)
+            pose_grid.addWidget(value, i // 2, (i % 2) * 2 + 1)
+            self.pose_labels[key] = value
+        layout.addWidget(self.pose_group)
+        layout.addStretch()
+        return tab
+
+    def _build_sequence_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        form = QFormLayout()
+        self.sequence_pose_count_spin = QSpinBox()
+        self.sequence_pose_count_spin.setRange(1, 20)
+        self.sequence_pose_count_spin.setValue(3)
+        self.sequence_move_duration_spin = QDoubleSpinBox()
+        self.sequence_move_duration_spin.setRange(0.2, 20.0)
+        self.sequence_move_duration_spin.setValue(1.5)
+        self.sequence_move_duration_spin.setSuffix(" s")
+        form.addRow("Poses", self.sequence_pose_count_spin)
+        form.addRow("Move", self.sequence_move_duration_spin)
+        layout.addLayout(form)
+
+        self.sequence_list = QListWidget()
+        layout.addWidget(self.sequence_list, stretch=1)
+
+        grid = QGridLayout()
+        self.record_sequence_btn = QPushButton("Record")
+        self.replay_sequence_btn = QPushButton("Replay")
+        self.stop_sequence_btn = QPushButton("Stop")
+        self.open_sequence_file_btn = QPushButton("Open JSON")
+        grid.addWidget(self.record_sequence_btn, 0, 0)
+        grid.addWidget(self.replay_sequence_btn, 0, 1)
+        grid.addWidget(self.stop_sequence_btn, 1, 0)
+        grid.addWidget(self.open_sequence_file_btn, 1, 1)
+        layout.addLayout(grid)
+
+        self.sequence_status_label = QLabel("sdk/workspace/runtime/recorded_pose_sequence.json")
+        self.sequence_status_label.setObjectName("hintLabel")
+        self.sequence_status_label.setWordWrap(True)
+        layout.addWidget(self.sequence_status_label)
+
+        self.record_sequence_btn.clicked.connect(self.record_sequence_clicked.emit)
+        self.replay_sequence_btn.clicked.connect(self.replay_sequence_clicked.emit)
+        self.stop_sequence_btn.clicked.connect(self.stop_sequence_clicked.emit)
+        self.open_sequence_file_btn.clicked.connect(self.open_sequence_file_clicked.emit)
+        return tab
+
+    def _build_inverse_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        self.pose_target_group = QGroupBox("Target TCP")
+        grid = QGridLayout(self.pose_target_group)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        self.pose_target_spins = {}
+        specs = [
+            ("X", -1.0, 1.0, 4, " m"),
+            ("Y", -1.0, 1.0, 4, " m"),
+            ("Z", -1.0, 1.0, 4, " m"),
+            ("Rx", -3.142, 3.142, 3, " rad"),
+            ("Ry", -3.142, 3.142, 3, " rad"),
+            ("Rz", -3.142, 3.142, 3, " rad"),
+        ]
+        for idx, (key, minimum, maximum, decimals, suffix) in enumerate(specs):
+            label = QLabel(key)
+            spin = QDoubleSpinBox()
+            spin.setRange(float(minimum), float(maximum))
+            spin.setDecimals(int(decimals))
+            spin.setSingleStep(0.001 if decimals >= 4 else 0.01)
+            spin.setSuffix(suffix)
+            grid.addWidget(label, idx, 0)
+            grid.addWidget(spin, idx, 1)
+            self.pose_target_spins[key] = spin
+        layout.addWidget(self.pose_target_group)
+
+        options = QFormLayout()
+        self.pose_duration_spin = QDoubleSpinBox()
+        self.pose_duration_spin.setRange(0.2, 20.0)
+        self.pose_duration_spin.setValue(1.2)
+        self.pose_duration_spin.setSuffix(" s")
+        options.addRow("Duration", self.pose_duration_spin)
+        layout.addLayout(options)
+
+        self.pose_fill_current_btn = QPushButton("Use Current")
+        self.pose_send_btn = QPushButton("Send")
+        self.pose_send_btn.setObjectName("primaryBtn")
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.pose_fill_current_btn)
+        button_row.addWidget(self.pose_send_btn)
+        layout.addLayout(button_row)
+
+        self.pose_fill_current_btn.clicked.connect(self.fill_pose_target_from_current)
+        self.pose_send_btn.clicked.connect(self._on_pose_send_clicked)
+        for spin in self.pose_target_spins.values():
+            spin.valueChanged.connect(self._emit_pose_target_changed)
+        layout.addStretch()
+        return tab
+
+    def _build_tools_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        self.calibration_btn = QPushButton("URDF Calibration")
+        self.calibration_btn.setObjectName("primaryBtn")
+        self.record_script_btn = QPushButton("Record Script")
+        self.replay_script_btn = QPushButton("Replay Script")
+        layout.addWidget(self.calibration_btn)
+        layout.addWidget(self.record_script_btn)
+        layout.addWidget(self.replay_script_btn)
+        layout.addStretch()
+
+        self.calibration_btn.clicked.connect(self.calibration_clicked.emit)
+        self.record_script_btn.clicked.connect(self.record_sequence_clicked.emit)
+        self.replay_script_btn.clicked.connect(self.replay_sequence_clicked.emit)
+        return tab
+
+    def fill_pose_target_from_current(self):
+        for key, spin in self.pose_target_spins.items():
+            raw = str(self.pose_labels.get(key).text() if key in self.pose_labels else "").strip()
+            try:
+                spin.setValue(float(raw))
+            except Exception:
+                continue
+        self._target_pose_initialized = True
+        self._emit_pose_target_changed()
+
+    def ensure_pose_target_initialized(self, xyz, rpy):
+        if self._target_pose_initialized:
+            return
+        try:
+            vals = {
+                "X": float(xyz[0]),
+                "Y": float(xyz[1]),
+                "Z": float(xyz[2]),
+                "Rx": float(rpy[0]),
+                "Ry": float(rpy[1]),
+                "Rz": float(rpy[2]),
+            }
+        except Exception:
+            return
+        for key, value in vals.items():
+            spin = self.pose_target_spins.get(key)
+            if spin is None:
+                continue
+            spin.blockSignals(True)
+            spin.setValue(float(value))
+            spin.blockSignals(False)
+        self._target_pose_initialized = True
+        self._emit_pose_target_changed()
+
+    def _pose_target_payload(self) -> dict:
+        return {
+            "xyz": [
+                float(self.pose_target_spins["X"].value()),
+                float(self.pose_target_spins["Y"].value()),
+                float(self.pose_target_spins["Z"].value()),
+            ],
+            "rpy": [
+                float(self.pose_target_spins["Rx"].value()),
+                float(self.pose_target_spins["Ry"].value()),
+                float(self.pose_target_spins["Rz"].value()),
+            ],
+            "duration": float(self.pose_duration_spin.value()),
+        }
+
+    def _emit_pose_target_changed(self):
+        self.pose_target_changed.emit(self._pose_target_payload())
+
+    def _on_pose_send_clicked(self):
+        payload = self._pose_target_payload()
+        self.pose_target_changed.emit(payload)
+        self.pose_move_requested.emit(payload)
+
+    def set_tcp_summary(self, xyz, rpy):
+        try:
+            values = [float(xyz[0]), float(xyz[1]), float(xyz[2]), float(rpy[0]), float(rpy[1]), float(rpy[2])]
+        except Exception:
+            self.tcp_summary_label.setText("TCP: --")
+            return
+        self.tcp_summary_label.setText(
+            "TCP: X {0:.3f}  Y {1:.3f}  Z {2:.3f} m  |  Rx {3:.3f}  Ry {4:.3f}  Rz {5:.3f} rad".format(
+                *values
+            )
+        )
 
     def _make_jog_key(
         self,
@@ -468,11 +693,25 @@ class QuickMovePage(QWidget):
         self.status_light.setStyleSheet(f"color:{color}; font-size:16px;")
 
     def set_texts(self, tr):
-        self.left_group.setTitle(tr("quick_left_title"))
+        self.left_group.setTitle(tr("quick_control_title"))
         self.center_group.setTitle(tr("quick_center_title"))
-        self.right_group.setTitle(tr("quick_right_title"))
+        self.joint_group.setTitle(tr("quick_right_title"))
+        self.control_tabs.setTabText(0, tr("quick_tab_joint"))
+        self.control_tabs.setTabText(1, tr("quick_tab_sequence"))
+        self.control_tabs.setTabText(2, tr("quick_tab_inverse"))
+        self.control_tabs.setTabText(3, tr("quick_tab_tools"))
         self.coord_label.setText(tr("quick_coord"))
         self.speed_label.setText(tr("quick_speed"))
         self.pose_group.setTitle(tr("quick_tcp"))
+        self.pose_target_group.setTitle(tr("quick_pose_target"))
+        self.pose_fill_current_btn.setText(tr("quick_pose_fill_current"))
+        self.pose_send_btn.setText(tr("quick_pose_send"))
+        self.record_sequence_btn.setText(tr("quick_record_sequence"))
+        self.replay_sequence_btn.setText(tr("quick_replay_sequence"))
+        self.stop_sequence_btn.setText(tr("quick_stop_sequence"))
+        self.open_sequence_file_btn.setText(tr("quick_sequence_file"))
+        self.calibration_btn.setText(tr("quick_calibration"))
+        self.record_script_btn.setText(tr("quick_record_script"))
+        self.replay_script_btn.setText(tr("quick_replay_script"))
         self.goto_zero_btn.setText(tr("quick_zero"))
         self.free_move_btn.setText(tr("quick_free"))

@@ -6,10 +6,15 @@ from __future__ import annotations
 
 import math
 import os
+import shlex
 import sys
+import subprocess
 import threading
 import time
 import base64
+import json
+import urllib.error
+import urllib.request
 from collections import deque
 from functools import partial
 from pathlib import Path
@@ -33,6 +38,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSlider,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -100,6 +106,7 @@ HEADER_ICON_FILES = {
 }
 
 SIM_RENDER_SUPERSAMPLE = 1.4
+MOMO_ROBOT_SERVICE_URL_DEFAULT = "http://127.0.0.1:8010"
 
 SDK_SRC = REPO_ROOT / "sdk" / "src"
 DEFAULT_SDK_REAL_CONFIG_PATH = SDK_SRC / "soarmmoce_sdk" / "resources" / "configs" / "soarm_moce_serial.yaml"
@@ -196,7 +203,10 @@ class ArmControlGUI(QMainWindow):
         self._sim_pb_joint_indices = []
         self._sim_pb_ee_link_index = None
         self._sim_pb_renderer = None
+        self._sim_pb_target_marker_id = None
+        self._sim_pb_target_visual_id = None
         self._sim_pb_renderer_fallback_done = False
+        self._sim_target_xyz: Optional[np.ndarray] = None
         self.sim_vtk_view = None
         self.sim_robot = None
         self.sim_joint_names = []
@@ -211,6 +221,25 @@ class ArmControlGUI(QMainWindow):
         self._sdk_lock = threading.RLock()
         env_sdk_config = str(os.getenv("SOARMMOCE_CONFIG", "")).strip()
         self._sdk_config_path = env_sdk_config or (str(DEFAULT_SDK_REAL_CONFIG_PATH) if DEFAULT_SDK_REAL_CONFIG_PATH.exists() else None)
+        self._robot_control_backend = (
+            str(os.getenv("MOMO_ROBOT_HMI_BACKEND", "service")).strip().lower() or "service"
+        )
+        if self._robot_control_backend not in {"service", "momo", "momo_robot_service", "sdk", "local"}:
+            self._robot_control_backend = "service"
+        self.control_owner_text = (
+            "Momo" if self._robot_control_backend in {"service", "momo", "momo_robot_service"} else "Local"
+        )
+        self._momo_service_url = (
+            str(os.getenv("MOMO_ROBOT_SERVICE_URL", MOMO_ROBOT_SERVICE_URL_DEFAULT)).strip().rstrip("/")
+            or MOMO_ROBOT_SERVICE_URL_DEFAULT
+        )
+        try:
+            self._momo_service_timeout_sec = max(
+                2.0,
+                float(str(os.getenv("MOMO_ROBOT_HMI_TIMEOUT_SEC", "30.0")).strip()),
+            )
+        except Exception:
+            self._momo_service_timeout_sec = 30.0
         self._sdk_runtime_mode = "disconnected"
         self._sdk_runtime_transport = ""
         self._sdk_runtime_config_path = self._sdk_config_path or ""
@@ -332,15 +361,31 @@ class ArmControlGUI(QMainWindow):
                 "home_tile_job": "作业",
                 "home_tile_settings": "设置",
                 "home_tile_program": "程序\n敬请期待",
+                "quick_control_title": "控制台",
+                "quick_tab_joint": "关节控制",
+                "quick_tab_sequence": "动作序列",
+                "quick_tab_inverse": "逆向控制",
+                "quick_tab_tools": "工具",
                 "quick_left_title": "笛卡尔 Jog",
                 "quick_center_title": "3D 视图",
                 "quick_right_title": "关节控制",
                 "quick_coord": "坐标系",
                 "quick_speed": "速度",
                 "quick_tcp": "末端位姿",
+                "quick_pose_target": "目标末端位姿",
+                "quick_pose_fill_current": "读取当前",
+                "quick_pose_send": "发送目标",
+                "quick_record_sequence": "录制序列",
+                "quick_replay_sequence": "回放序列",
+                "quick_stop_sequence": "停止回放",
+                "quick_sequence_file": "序列文件",
+                "quick_calibration": "URDF 标定",
+                "quick_record_script": "录制脚本",
+                "quick_replay_script": "回放脚本",
                 "quick_origin": "回原点",
                 "quick_zero": "回 Home",
                 "quick_free": "自由移动",
+                "quick_stop": "停止",
                 "job_recordings": "录制",
                 "job_positions": "点位",
                 "job_logs": "日志",
@@ -473,15 +518,31 @@ class ArmControlGUI(QMainWindow):
                 "home_tile_job": "Job",
                 "home_tile_settings": "Settings",
                 "home_tile_program": "Program\nComing soon",
+                "quick_control_title": "Console",
+                "quick_tab_joint": "Joint",
+                "quick_tab_sequence": "Sequence",
+                "quick_tab_inverse": "IK",
+                "quick_tab_tools": "Tools",
                 "quick_left_title": "Cartesian Jog",
                 "quick_center_title": "3D View",
                 "quick_right_title": "Joint Control",
                 "quick_coord": "Coordinate",
                 "quick_speed": "Speed",
                 "quick_tcp": "TCP",
+                "quick_pose_target": "Target TCP",
+                "quick_pose_fill_current": "Use Current",
+                "quick_pose_send": "Send Target",
+                "quick_record_sequence": "Record Sequence",
+                "quick_replay_sequence": "Replay Sequence",
+                "quick_stop_sequence": "Stop Replay",
+                "quick_sequence_file": "Sequence File",
+                "quick_calibration": "URDF Calibration",
+                "quick_record_script": "Record Script",
+                "quick_replay_script": "Replay Script",
                 "quick_origin": "Origin",
                 "quick_zero": "Home",
                 "quick_free": "Free Move",
+                "quick_stop": "Stop",
                 "job_recordings": "Recordings",
                 "job_positions": "Positions",
                 "job_logs": "Logs",
@@ -602,30 +663,10 @@ class ArmControlGUI(QMainWindow):
         self.stack.addWidget(self.settings_page)
 
         self.global_status = GlobalStatusBar()
+        self._build_global_actions()
         root.addWidget(self.global_status)
 
-        self.log_dock = QDockWidget("Logs", self)
-        self.log_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        self.log_dock_text = QLabel()
-        self.log_dock_text.setText("")
-        self.log_dock_text.setWordWrap(True)
-        self.log_dock_text.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        dock_widget = QWidget()
-        dock_layout = QVBoxLayout(dock_widget)
-        self.log_dock_view = self._make_log_text_widget()
-        dock_layout.addWidget(self.log_dock_view)
-        self.log_dock.setWidget(dock_widget)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.log_dock)
-        self.log_dock.hide()
-        self.log_dock.visibilityChanged.connect(self._on_log_dock_visibility_changed)
-
-        self.agent_chat_panel = AgentChatPanel(config_provider=self._agent_request_config)
-        self.agent_dock = QDockWidget(self._tr("agent_dock_title"), self)
-        self.agent_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        self.agent_dock.setWidget(self.agent_chat_panel)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.agent_dock)
-        self.agent_dock.hide()
-        self.agent_dock.visibilityChanged.connect(self._on_agent_dock_visibility_changed)
+        self._build_right_sidebar()
 
         sim_widget = self._build_sim_widget()
         self.quick_page.set_sim_widget(sim_widget)
@@ -635,12 +676,20 @@ class ArmControlGUI(QMainWindow):
         self._apply_theme(self.current_theme)
         self.statusBar().showMessage(self._tr("status_ready"))
         self._set_page(self.PAGE_QUICK_MOVE)
+        QTimer.singleShot(0, self._lock_right_sidebar_layout)
 
     def _build_header(self) -> QWidget:
         header = QFrame()
         layout = QHBoxLayout(header)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
+
+        self.header_title_label = QLabel("Momo Control")
+        self.header_title_label.setObjectName("appTitleLabel")
+        self.header_state_label = QLabel(self._tr("state_disconnected"))
+        self.header_state_label.setObjectName("headerStateLabel")
+        layout.addWidget(self.header_title_label)
+        layout.addWidget(self.header_state_label)
 
         self.back_home_btn = QPushButton(self._tr("btn_back_home"))
         self.back_home_btn.setObjectName("primaryBtn")
@@ -660,33 +709,6 @@ class ArmControlGUI(QMainWindow):
 
         layout.addStretch()
 
-        self.connect_toggle_btn = QPushButton(self._tr("btn_connect"))
-        self.connect_toggle_btn.setObjectName("primaryBtn")
-        layout.addWidget(self.connect_toggle_btn)
-
-        self.camera_btn = QPushButton(self._tr("btn_camera"))
-        self.camera_btn.setObjectName("primaryBtn")
-        self.camera_btn.clicked.connect(self.on_toggle_camera_window)
-        layout.addWidget(self.camera_btn)
-
-        self.speech_btn = QPushButton(self._tr("btn_speech"))
-        self.speech_btn.setObjectName("primaryBtn")
-        self.speech_btn.clicked.connect(self.on_toggle_speech_window)
-        layout.addWidget(self.speech_btn)
-
-        self.log_btn = QPushButton(self._tr("btn_log"))
-        self.log_btn.setObjectName("primaryBtn")
-        self.log_btn.setCheckable(True)
-        self.log_btn.clicked.connect(self.on_toggle_log_panel)
-        layout.addWidget(self.log_btn)
-
-        self.top_agent_btn = QPushButton(self._tr("nav_agent"))
-        self.top_agent_btn.setObjectName("primaryBtn")
-        self.top_agent_btn.setFixedWidth(68)
-        self.top_agent_btn.setCheckable(True)
-        self.top_agent_btn.clicked.connect(self.on_toggle_agent_panel)
-        layout.addWidget(self.top_agent_btn)
-
         self.lang_label = QLabel(self._tr("lang_label"))
         self.lang_combo = QComboBox()
         self.lang_combo.addItem("中文", "zh")
@@ -702,6 +724,71 @@ class ArmControlGUI(QMainWindow):
         self._update_header_brand()
 
         return header
+
+    def _build_global_actions(self):
+        self.connect_toggle_btn = QPushButton(self._tr("btn_connect"))
+        self.connect_toggle_btn.setObjectName("primaryBtn")
+        self.connect_toggle_btn.setMinimumWidth(92)
+
+        self.top_free_move_btn = QPushButton(self._tr("quick_free"))
+        self.top_free_move_btn.setObjectName("statusActionBtn")
+
+        self.top_home_btn = QPushButton(self._tr("quick_zero"))
+        self.top_home_btn.setObjectName("statusActionBtn")
+
+        self.top_stop_btn = QPushButton("Stop")
+        self.top_stop_btn.setObjectName("statusActionBtn")
+
+        self.camera_btn = QPushButton(self._tr("btn_camera"))
+        self.camera_btn.setObjectName("statusActionBtn")
+
+        self.speech_btn = QPushButton(self._tr("btn_speech"))
+        self.speech_btn.setObjectName("statusActionBtn")
+
+        for button in (
+            self.connect_toggle_btn,
+            self.top_free_move_btn,
+            self.top_home_btn,
+            self.top_stop_btn,
+            self.camera_btn,
+            self.speech_btn,
+        ):
+            button.setFixedHeight(32)
+            self.global_status.add_action_widget(button)
+
+    def _build_right_sidebar(self):
+        self.right_dock = QDockWidget("SDK / 指令日志", self)
+        self.right_dock.setObjectName("rightDock")
+        self.right_dock.setAllowedAreas(Qt.RightDockWidgetArea)
+        self.right_dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
+        self.right_dock.setMinimumWidth(320)
+        self.right_dock.setMaximumWidth(380)
+
+        self.right_tabs = QTabWidget()
+        self.right_tabs.setObjectName("rightTabs")
+
+        log_widget = QWidget()
+        dock_layout = QVBoxLayout(log_widget)
+        dock_layout.setContentsMargins(8, 8, 8, 8)
+        dock_layout.setSpacing(8)
+        self.log_dock_view = self._make_log_text_widget()
+        self.clear_log_btn = QPushButton(self._tr("agent_clear_btn"))
+        self.clear_log_btn.clicked.connect(self.log_dock_view.clear)
+        dock_layout.addWidget(self.log_dock_view, stretch=1)
+        dock_layout.addWidget(self.clear_log_btn)
+        self.right_tabs.addTab(log_widget, self._tr("job_logs"))
+
+        self.agent_chat_panel = AgentChatPanel(config_provider=self._agent_request_config)
+        self.right_tabs.addTab(self.agent_chat_panel, self._tr("agent_dock_title"))
+
+        self.right_dock.setWidget(self.right_tabs)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.right_dock)
+
+    def _lock_right_sidebar_layout(self):
+        if not hasattr(self, "right_dock"):
+            return
+        self.right_dock.show()
+        self.resizeDocks([self.right_dock], [340], Qt.Horizontal)
 
     def _picture_path_by_theme(self, light_name: str, dark_name: str) -> Optional[Path]:
         primary = dark_name if self.current_theme == "dark" else light_name
@@ -738,11 +825,16 @@ class ArmControlGUI(QMainWindow):
     def _apply_header_icons(self):
         self._back_home_has_icon = self._set_button_icon(self.back_home_btn, "home", size=18)
         self._top_settings_has_icon = self._set_button_icon(self.top_settings_btn, "settings", size=18)
-        self.top_agent_btn.setIcon(QIcon())
-        self.connect_toggle_btn.setIcon(QIcon())
-        self.camera_btn.setIcon(QIcon())
-        self.speech_btn.setIcon(QIcon())
-        self.log_btn.setIcon(QIcon())
+        for name in (
+            "connect_toggle_btn",
+            "top_free_move_btn",
+            "top_home_btn",
+            "top_stop_btn",
+            "camera_btn",
+            "speech_btn",
+        ):
+            if hasattr(self, name):
+                getattr(self, name).setIcon(QIcon())
 
     def _update_header_brand(self):
         if not hasattr(self, "brand_label"):
@@ -782,10 +874,14 @@ class ArmControlGUI(QMainWindow):
         return text if text else self._tr(key)
 
     def _set_camera_btn_text(self, opened: bool):
+        if not hasattr(self, "camera_btn"):
+            return
         key = "btn_camera_close" if opened else "btn_camera"
         self.camera_btn.setText(self._plain_header_text(key))
 
     def _set_connect_btn_text(self):
+        if not hasattr(self, "connect_toggle_btn"):
+            return
         if self.connecting:
             key = "btn_connecting"
         elif self.connected or self._sdk_runtime_mode == "simulation":
@@ -797,6 +893,8 @@ class ArmControlGUI(QMainWindow):
         self.connect_toggle_btn.setEnabled(not self.connecting)
 
     def _set_speech_btn_text(self, opened: bool):
+        if not hasattr(self, "speech_btn"):
+            return
         key = "btn_speech_close" if opened else "btn_speech"
         self.speech_btn.setText(self._plain_header_text(key))
 
@@ -804,14 +902,27 @@ class ArmControlGUI(QMainWindow):
         from PyQt5.QtWidgets import QTextEdit
 
         log_widget = QTextEdit()
+        log_widget.setObjectName("logView")
         log_widget.setReadOnly(True)
         return log_widget
 
     def _bind_signals(self):
         self.quick_page.speed_changed.connect(self.on_speed_changed)
         self.quick_page.home_clicked.connect(self._on_quick_zero)
+        self.quick_page.pose_move_requested.connect(self._on_quick_pose_move)
+        self.quick_page.pose_target_changed.connect(self._on_quick_pose_target_changed)
+        self.quick_page.calibration_clicked.connect(self._on_launch_calibration)
+        self.quick_page.record_sequence_clicked.connect(self._on_launch_record_sequence)
+        self.quick_page.replay_sequence_clicked.connect(self._on_launch_replay_sequence)
+        self.quick_page.stop_sequence_clicked.connect(self._on_quick_stop)
+        self.quick_page.open_sequence_file_clicked.connect(self._on_open_sequence_file)
 
         self.connect_toggle_btn.clicked.connect(self.on_toggle_connection)
+        self.top_free_move_btn.clicked.connect(self._on_quick_free_move)
+        self.top_home_btn.clicked.connect(self._on_quick_zero)
+        self.top_stop_btn.clicked.connect(self._on_quick_stop)
+        self.camera_btn.clicked.connect(self.on_toggle_camera_window)
+        self.speech_btn.clicked.connect(self.on_toggle_speech_window)
         self.settings_page.default_speed_spin.valueChanged.connect(self.on_speed_changed)
         self.settings_page.default_step_dist_spin.valueChanged.connect(self.on_default_step_distance_changed)
         self.settings_page.default_step_angle_spin.valueChanged.connect(self.on_default_step_angle_changed)
@@ -855,30 +966,20 @@ class ArmControlGUI(QMainWindow):
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
 
-    def _on_log_dock_visibility_changed(self, visible: bool):
-        self.log_btn.blockSignals(True)
-        self.log_btn.setChecked(bool(visible))
-        self.log_btn.blockSignals(False)
-
     def on_toggle_log_panel(self):
-        if self.log_dock.isVisible():
-            self.log_dock.hide()
-        else:
-            self.log_dock.show()
+        if hasattr(self, "right_tabs"):
+            self.right_tabs.setCurrentIndex(0)
+        self.right_dock.show()
+        self._lock_right_sidebar_layout()
 
     def _agent_request_config(self) -> tuple[str, float]:
         return self.settings_page.agent_service_url(), self.settings_page.agent_timeout_sec()
 
-    def _on_agent_dock_visibility_changed(self, visible: bool):
-        self.top_agent_btn.blockSignals(True)
-        self.top_agent_btn.setChecked(bool(visible))
-        self.top_agent_btn.blockSignals(False)
-
     def on_toggle_agent_panel(self):
-        if self.agent_dock.isVisible():
-            self.agent_dock.hide()
-        else:
-            self.agent_dock.show()
+        if hasattr(self, "right_tabs"):
+            self.right_tabs.setCurrentIndex(1)
+        self.right_dock.show()
+        self._lock_right_sidebar_layout()
 
     def _append_agent_line(self, speaker: str, message: str):
         if hasattr(self, "agent_chat_panel"):
@@ -937,17 +1038,20 @@ class ArmControlGUI(QMainWindow):
         else:
             self.top_settings_btn.setText(self._tr("nav_settings"))
         self.top_settings_btn.setToolTip(self._tr("nav_settings"))
-        self.top_agent_btn.setText(self._tr("nav_agent"))
-        self.top_agent_btn.setToolTip(self._tr("nav_agent"))
         self._set_connect_btn_text()
+        self.top_free_move_btn.setText(self._tr("quick_free"))
+        self.top_home_btn.setText(self._tr("quick_zero"))
+        self.top_stop_btn.setText(self._tr("quick_stop"))
         self._set_camera_btn_text(self._is_camera_window_visible())
         self._set_speech_btn_text(self._is_speech_window_visible())
-        self.log_btn.setText(self._plain_header_text("btn_log"))
         self.lang_label.setText(self._tr("lang_label"))
 
         self.quick_page.set_texts(self._tr)
         self.settings_page.set_texts(self._tr)
-        self.agent_dock.setWindowTitle(self._tr("agent_dock_title"))
+        self.right_dock.setWindowTitle("SDK / 指令日志")
+        self.right_tabs.setTabText(0, self._tr("job_logs"))
+        self.right_tabs.setTabText(1, self._tr("agent_dock_title"))
+        self.clear_log_btn.setText(self._tr("agent_clear_btn"))
         self.agent_chat_panel.set_texts(self._tr)
 
         self.mode_text = self._tr("mode_manual")
@@ -1108,11 +1212,16 @@ class ArmControlGUI(QMainWindow):
             self.sdk_command_state_ready.emit({"state": state, "command": command}, source)
 
     def _execute_sdk_command(self, command: Dict[str, Any]) -> object:
+        if self._use_momo_service_backend():
+            return self._execute_service_command(command)
+
         kind = str(command.get("kind", "")).strip()
         if kind == "joint_step":
             return self._execute_sdk_joint_step(command)
         if kind == "cartesian_jog":
             return self._execute_sdk_cartesian_jog(command)
+        if kind == "pose_move":
+            return self._execute_sdk_pose_move(command)
         if kind == "home":
             return self._execute_sdk_home(command)
         if kind == "free_move":
@@ -1336,6 +1445,31 @@ class ArmControlGUI(QMainWindow):
             robot.move_delta(**move_kwargs)
             return robot.get_state()
 
+    def _execute_sdk_pose_move(self, command: Dict[str, Any]) -> object:
+        target_xyz = np.asarray(command.get("xyz", []), dtype=float).reshape(3)
+        target_rpy_raw = command.get("rpy")
+        target_rpy = None
+        if target_rpy_raw is not None:
+            target_rpy = np.asarray(target_rpy_raw, dtype=float).reshape(3)
+        duration = command.get("duration")
+        speed_percent = int(command.get("speed_percent", self.speed_percent))
+
+        with self._sdk_lock:
+            robot = self._sdk_get_robot()
+            self._prepare_sdk_motion_torque(robot)
+            move_kwargs = {
+                "xyz": target_xyz.tolist(),
+                "rpy": None if target_rpy is None else target_rpy.tolist(),
+                "seed_policy": "current",
+                "speed_percent": speed_percent,
+                "wait": True,
+                "timeout": max(6.0, float(duration or 1.2) + 4.0),
+            }
+            if duration is not None:
+                move_kwargs["duration"] = float(duration)
+            robot.move_pose(**move_kwargs)
+            return robot.get_state()
+
     def _execute_sdk_home(self, command: Dict[str, Any]) -> object:
         duration = command.get("duration")
         speed_percent = int(command.get("speed_percent", self.speed_percent))
@@ -1384,6 +1518,8 @@ class ArmControlGUI(QMainWindow):
             return "Quick Joint"
         if src.startswith("jog:"):
             return "Quick Jog"
+        if src.startswith("pose:"):
+            return "IK Target"
         if src == "stop":
             return "SDK stop"
         return f"SDK {src}" if src else "SDK"
@@ -1395,6 +1531,8 @@ class ArmControlGUI(QMainWindow):
         else:
             state = payload
             command = None
+        if self._use_momo_service_backend() and isinstance(state, dict):
+            self._service_apply_robot_state_payload(state, update_connected=True)
         self._handle_sim_motion_from_command(state, command, source)
         self._sdk_last_gui_sync_ts = time.time()
         src = str(source or "").strip()
@@ -1404,6 +1542,9 @@ class ArmControlGUI(QMainWindow):
         elif src == "free_move":
             self.statusBar().showMessage("Free move enabled: torque released")
             self.log("[Free Move] torque released; arm can be moved by hand", "success")
+        elif src.startswith("pose:"):
+            self.statusBar().showMessage("IK target sent")
+            self.log("[IK Target] move complete", "success")
         elif src == "stop":
             self.statusBar().showMessage("Robot stopped")
 
@@ -1414,6 +1555,8 @@ class ArmControlGUI(QMainWindow):
         self.log(f"[{label}] {msg}", "warning")
 
     def _on_sdk_sync_state_ready(self, state: object):
+        if self._use_momo_service_backend() and isinstance(state, dict):
+            self._service_apply_robot_state_payload(state, update_connected=True)
         if self._sim_motion_active:
             # Let the local preview animation finish; otherwise periodic state sync
             # snaps the 3D view back toward the lagging actual joints mid-motion.
@@ -1705,6 +1848,44 @@ class ArmControlGUI(QMainWindow):
     def _on_quick_zero(self):
         self._enqueue_sdk_home(source="zero")
 
+    def _on_quick_stop(self):
+        self._on_quick_jog_released(enqueue_stop=False)
+        self._clear_pending_sdk_commands("joint_step", "cartesian_jog", "home", "pose_move")
+        self._enqueue_sdk_command({"kind": "stop", "source": "stop"}, drop_kinds=("stop",))
+
+    def _on_quick_pose_target_changed(self, payload: object):
+        if not isinstance(payload, dict):
+            return
+        try:
+            xyz = np.asarray(payload.get("xyz", []), dtype=float).reshape(3)
+        except Exception:
+            return
+        self._set_sim_target_marker(xyz)
+
+    def _on_quick_pose_move(self, payload: object):
+        if not isinstance(payload, dict):
+            return
+        try:
+            xyz = np.asarray(payload.get("xyz", []), dtype=float).reshape(3)
+            rpy = np.asarray(payload.get("rpy", []), dtype=float).reshape(3)
+            duration = max(0.2, min(20.0, float(payload.get("duration", 1.2) or 1.2)))
+        except Exception as exc:
+            self.log(f"[IK Target] invalid target: {exc}", "warning")
+            return
+        self._set_sim_target_marker(xyz)
+        self._on_quick_jog_released(enqueue_stop=False)
+        self._enqueue_sdk_command(
+            {
+                "kind": "pose_move",
+                "source": "pose:target",
+                "xyz": xyz.tolist(),
+                "rpy": rpy.tolist(),
+                "duration": float(duration),
+                "speed_percent": int(self.speed_percent),
+            },
+            drop_kinds=("pose_move", "cartesian_jog", "stop"),
+        )
+
     def _on_quick_free_move(self):
         if not (self.connected or self._sdk_runtime_mode == "simulation"):
             return
@@ -1775,10 +1956,16 @@ class ArmControlGUI(QMainWindow):
         return status
 
     def _refresh_settings_runtime_summary(self):
+        config_text = self._sdk_runtime_config_path or self._sdk_config_path or ""
+        serial_port = self._resolved_serial_port_text()
+        if self._use_momo_service_backend():
+            config_text = self._sdk_runtime_config_path or self._momo_service_url
+            if not self._sdk_runtime_config_path:
+                serial_port = "--"
         self.settings_page.set_runtime_summary(
             status_text=self._runtime_summary_text(),
-            config_path=self._sdk_runtime_config_path or self._sdk_config_path or "",
-            serial_port=self._resolved_serial_port_text(),
+            config_path=config_text,
+            serial_port=serial_port,
         )
 
     def _update_connection_widgets(self):
@@ -1787,6 +1974,9 @@ class ArmControlGUI(QMainWindow):
         self.quick_page.set_motion_enabled(runtime_connected)
         self.quick_page.set_cartesian_enabled(runtime_connected)
         self._set_connect_btn_text()
+        for name in ("top_free_move_btn", "top_home_btn", "top_stop_btn"):
+            if hasattr(self, name):
+                getattr(self, name).setEnabled(runtime_connected)
         self._refresh_settings_runtime_summary()
 
     def _state_connection_text(self) -> str:
@@ -1812,6 +2002,8 @@ class ArmControlGUI(QMainWindow):
         conn = self._state_connection_text()
         robot = self._state_robot_text()
 
+        if hasattr(self, "header_state_label"):
+            self.header_state_label.setText(conn)
         self.global_status.set_connection(f"{self._tr('global_connection')}: {conn}")
         self.global_status.set_robot(f"{self._tr('global_robot')}: {robot}")
         self.global_status.set_mode(f"{self._tr('global_mode')}: {self.mode_text}")
@@ -1840,6 +2032,62 @@ class ArmControlGUI(QMainWindow):
         # auto-connect the real arm on GUI startup. Hardware connection is now
         # lazy: it happens on the first explicit control action or manual connect.
         return
+
+    # ==================== Operator scripts ====================
+
+    def _launch_terminal_command(self, command: str, label: str):
+        shell_command = f"cd {shlex.quote(str(REPO_ROOT))} && {command}"
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(
+                    [
+                        "osascript",
+                        "-e",
+                        f'tell application "Terminal" to do script {json.dumps(shell_command, ensure_ascii=False)}',
+                        "-e",
+                        'tell application "Terminal" to activate',
+                    ],
+                    cwd=str(REPO_ROOT),
+                )
+            else:
+                subprocess.Popen(shell_command, shell=True, cwd=str(REPO_ROOT))
+        except Exception as exc:
+            self.log(f"[{label}] launch failed: {exc}", "error")
+            return
+        self.log(f"[{label}] {shell_command}", "info")
+
+    def _script_python(self) -> str:
+        return shlex.quote(sys.executable or "python3")
+
+    def _on_launch_calibration(self):
+        script = REPO_ROOT / "sdk" / "src" / "soarmmoce_sdk" / "clabration" / "urdf_calibrate.py"
+        self._launch_terminal_command(f"{self._script_python()} {shlex.quote(str(script))}", "URDF Calibration")
+
+    def _on_launch_record_sequence(self):
+        script = REPO_ROOT / "sdk" / "scripts" / "3_record_pose_sequence.py"
+        pose_count = int(getattr(self.quick_page, "sequence_pose_count_spin").value())
+        duration = float(getattr(self.quick_page, "sequence_move_duration_spin").value())
+        command = (
+            f"{self._script_python()} {shlex.quote(str(script))} "
+            f"--pose-count {pose_count} --move-duration-sec {duration:.3f}"
+        )
+        self._launch_terminal_command(command, "Record Sequence")
+
+    def _on_launch_replay_sequence(self):
+        script = REPO_ROOT / "sdk" / "scripts" / "3_replay_pose_sequence.py"
+        duration = float(getattr(self.quick_page, "sequence_move_duration_spin").value())
+        command = f"{self._script_python()} {shlex.quote(str(script))} --move-duration-sec {duration:.3f}"
+        self._launch_terminal_command(command, "Replay Sequence")
+
+    def _on_open_sequence_file(self):
+        path = REPO_ROOT / "sdk" / "workspace" / "runtime" / "recorded_pose_sequence.json"
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(path)], cwd=str(REPO_ROOT))
+            else:
+                subprocess.Popen(["xdg-open", str(path.parent)], cwd=str(REPO_ROOT))
+        except Exception as exc:
+            self.log(f"[Sequence File] open failed: {exc}", "warning")
 
     # ==================== Camera window ====================
 
@@ -2092,6 +2340,243 @@ class ArmControlGUI(QMainWindow):
         msg = str(exc).strip() or exc.__class__.__name__
         return {"ok": False, "error": msg, "error_type": exc.__class__.__name__, "backend": "sdk"}
 
+    def _use_momo_service_backend(self) -> bool:
+        return self._robot_control_backend in {"service", "momo", "momo_robot_service"}
+
+    def _momo_service_endpoint(self, path: str) -> str:
+        path_text = str(path or "").strip()
+        if not path_text.startswith("/"):
+            path_text = f"/{path_text}"
+        return f"{self._momo_service_url}{path_text}"
+
+    @staticmethod
+    def _service_extract_error(payload: object, fallback: str) -> str:
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                code = str(err.get("code", "") or "").strip()
+                message = str(err.get("message", "") or "").strip()
+                if code and message:
+                    return f"{code}: {message}"
+                if message:
+                    return message
+            message = str(payload.get("message", "") or "").strip()
+            if message:
+                return message
+            detail = payload.get("detail")
+            if isinstance(detail, list) and detail:
+                return str(detail[0])
+            detail_text = str(detail or "").strip()
+            if detail_text:
+                return detail_text
+        return fallback
+
+    def _service_request_json(
+        self,
+        *,
+        method: str,
+        path: str,
+        payload: Optional[Dict[str, Any]] = None,
+        timeout_sec: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        method_norm = str(method or "GET").strip().upper()
+        body = None
+        headers: Dict[str, str] = {}
+        if method_norm != "GET":
+            body = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+
+        endpoint = self._momo_service_endpoint(path)
+        request = urllib.request.Request(endpoint, data=body, headers=headers, method=method_norm)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        timeout = float(timeout_sec if timeout_sec is not None else self._momo_service_timeout_sec)
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            raw = exc.read()
+            try:
+                parsed = json.loads(raw.decode("utf-8", errors="replace"))
+            except Exception:
+                parsed = {}
+            raise RuntimeError(self._service_extract_error(parsed, f"HTTP {exc.code}: {exc.reason}")) from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            raise RuntimeError(f"momo_robot_service unavailable at {self._momo_service_url}: {reason}") from exc
+        except TimeoutError as exc:
+            raise RuntimeError("momo_robot_service timed out") from exc
+
+        try:
+            parsed = json.loads(raw.decode("utf-8", errors="replace"))
+        except Exception as exc:
+            raise RuntimeError("momo_robot_service returned non-JSON") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError("momo_robot_service returned invalid JSON")
+        if not bool(parsed.get("ok", False)):
+            raise RuntimeError(self._service_extract_error(parsed, "momo_robot_service request failed"))
+        data = parsed.get("data", {})
+        return data if isinstance(data, dict) else {"value": data}
+
+    def _service_apply_session_payload(self, payload: Dict[str, Any], *, update_connected: bool = True) -> None:
+        session = payload.get("session") if isinstance(payload, dict) else None
+        if not isinstance(session, dict):
+            session = payload if isinstance(payload, dict) else {}
+
+        mode = str(session.get("mode", "") or "").strip().lower()
+        connected = bool(session.get("connected", mode in {"connected", "simulation"}))
+        if connected:
+            mode_norm = "simulation" if mode == "simulation" else "connected"
+        else:
+            mode_norm = "disconnected"
+
+        self._sdk_runtime_mode = mode_norm
+        self._sdk_runtime_transport = str(session.get("transport", "") or "").strip()
+        config_path = str(session.get("config_path", "") or "").strip()
+        if config_path:
+            self._sdk_runtime_config_path = config_path
+        self._sdk_last_connect_error = str(session.get("last_connect_error", "") or "").strip()
+        if update_connected:
+            self.connected = bool(mode_norm == "connected")
+            if mode_norm == "disconnected":
+                self._free_move_torque_released = False
+
+    def _service_apply_robot_state_payload(self, payload: Dict[str, Any], *, update_connected: bool = True) -> None:
+        if not isinstance(payload, dict):
+            return
+        session = payload.get("session")
+        if isinstance(session, dict):
+            self._service_apply_session_payload(session, update_connected=update_connected)
+        robot = payload.get("robot")
+        if isinstance(robot, dict):
+            state_text = str(robot.get("state_text", "") or "").strip()
+            if state_text:
+                self.robot_state_text = state_text
+        rtt_text = str(payload.get("rtt_text", "") or "").strip()
+        if rtt_text:
+            self.last_rtt_text = rtt_text
+
+    def _service_connect_robot(self) -> Dict[str, Any]:
+        data = self._service_request_json(
+            method="POST",
+            path="/api/v1/session/connect",
+            payload={"prefer_real": True, "allow_sim_fallback": False},
+            timeout_sec=self._momo_service_timeout_sec,
+        )
+        self._service_apply_session_payload(data, update_connected=False)
+        return data
+
+    def _service_disconnect_robot(self) -> Dict[str, Any]:
+        data = self._service_request_json(
+            method="POST",
+            path="/api/v1/session/disconnect",
+            payload={},
+            timeout_sec=self._momo_service_timeout_sec,
+        )
+        self._service_apply_session_payload(data, update_connected=True)
+        self._sdk_robot = None
+        return data
+
+    def _service_get_robot_state(self, *, timeout_sec: Optional[float] = None) -> Dict[str, Any]:
+        data = self._service_request_json(
+            method="GET",
+            path="/api/v1/robot/state",
+            timeout_sec=timeout_sec if timeout_sec is not None else max(2.0, self._momo_service_timeout_sec),
+        )
+        self._service_apply_robot_state_payload(data, update_connected=True)
+        return data
+
+    @staticmethod
+    def _service_home_source_from_command(command: Dict[str, Any]) -> str:
+        source = str(command.get("source", "home") or "home").strip()
+        if ":" in source:
+            source = source.split(":", 1)[1]
+        source = source.strip().lower()
+        if source == "legacy-home":
+            source = "home"
+        return source if source in {"home", "origin", "zero", "startup"} else "home"
+
+    def _execute_service_command(self, command: Dict[str, Any]) -> object:
+        kind = str(command.get("kind", "")).strip()
+        timeout = float(self._momo_service_timeout_sec)
+        if kind == "joint_step":
+            self._service_request_json(
+                method="POST",
+                path="/api/v1/motion/joint-step",
+                payload={
+                    "joint_index": int(command["joint_index"]),
+                    "delta_deg": float(math.degrees(float(command["delta"]))),
+                    "speed_percent": int(command.get("speed_percent", self.speed_percent)),
+                },
+                timeout_sec=timeout,
+            )
+            return self._service_get_robot_state(timeout_sec=max(2.0, timeout))
+        if kind == "cartesian_jog":
+            wait_motion = bool(command.get("wait_motion", False))
+            self._service_request_json(
+                method="POST",
+                path="/api/v1/motion/cartesian-jog",
+                payload={
+                    "axis": self._normalize_jog_key(str(command["key"])),
+                    "coord_frame": "tool" if bool(command.get("use_tool", False)) else "base",
+                    "jog_mode": "step" if wait_motion else "continuous",
+                    "step_dist_mm": float(command.get("step_mm", 1.0)),
+                    "step_angle_deg": float(math.degrees(float(command.get("step_rad", math.radians(1.0))))),
+                    "speed_percent": int(command.get("speed_percent", self.speed_percent)),
+                },
+                timeout_sec=timeout,
+            )
+            return self._service_get_robot_state(timeout_sec=max(2.0, timeout))
+        if kind == "pose_move":
+            xyz = np.asarray(command.get("xyz", []), dtype=float).reshape(3).tolist()
+            duration = float(command.get("duration", 1.2) or 1.2)
+            self._service_request_json(
+                method="POST",
+                path="/api/v1/tools/dispatch",
+                payload={
+                    "name": "move_robot_arm",
+                    "arguments": {
+                        "x": float(xyz[0]),
+                        "y": float(xyz[1]),
+                        "z": float(xyz[2]),
+                        "frame": "base",
+                        "duration": duration,
+                        "wait": True,
+                    },
+                    "request_id": f"hmi-pose-{int(time.time() * 1000)}",
+                    "timeout_sec": max(3.0, min(60.0, duration + 8.0)),
+                },
+                timeout_sec=max(timeout, duration + 8.0),
+            )
+            return self._service_get_robot_state(timeout_sec=max(2.0, timeout))
+        if kind == "home":
+            self._service_request_json(
+                method="POST",
+                path="/api/v1/motion/home",
+                payload={
+                    "source": self._service_home_source_from_command(command),
+                    "speed_percent": int(command.get("speed_percent", self.speed_percent)),
+                },
+                timeout_sec=timeout,
+            )
+            return self._service_get_robot_state(timeout_sec=max(2.0, timeout))
+        if kind == "free_move":
+            self._service_request_json(
+                method="POST",
+                path="/api/v1/motion/free-move",
+                payload={},
+                timeout_sec=timeout,
+            )
+            return self._service_get_robot_state(timeout_sec=max(2.0, timeout))
+        if kind == "stop":
+            self._service_request_json(
+                method="POST",
+                path="/api/v1/motion/stop",
+                payload={},
+                timeout_sec=max(2.0, min(timeout, 6.0)),
+            )
+            return self._service_get_robot_state(timeout_sec=max(2.0, timeout))
+        raise ValueError(f"Unknown SDK command: {kind}")
+
     def _sdk_set_runtime_state(
         self,
         mode: str,
@@ -2252,6 +2737,17 @@ class ArmControlGUI(QMainWindow):
         for candidate in candidates:
             if candidate is None:
                 continue
+            if isinstance(candidate, dict):
+                joint_state = candidate.get("joint_state")
+                if isinstance(joint_state, dict):
+                    values = joint_state.get("values_rad", joint_state.get("q"))
+                    try:
+                        q = np.asarray(values, dtype=float).reshape(-1)
+                    except Exception:
+                        q = np.zeros(0, dtype=float)
+                    if q.shape[0] > 0:
+                        return q
+                continue
             try:
                 q = np.asarray(getattr(getattr(candidate, "joint_state"), "q"), dtype=float).reshape(-1)
             except Exception:
@@ -2272,6 +2768,16 @@ class ArmControlGUI(QMainWindow):
         for candidate in candidates:
             if candidate is None:
                 continue
+            if isinstance(candidate, dict):
+                pose = candidate.get("tcp_pose")
+                if not isinstance(pose, dict):
+                    continue
+                try:
+                    xyz = np.asarray(pose.get("xyz_m", pose.get("xyz")), dtype=float).reshape(3)
+                    rpy = np.asarray(pose.get("rpy_rad", pose.get("rpy")), dtype=float).reshape(3)
+                except Exception:
+                    continue
+                return xyz, rpy
             pose = getattr(candidate, "tcp_pose", None)
             if pose is None:
                 continue
@@ -2411,8 +2917,9 @@ class ArmControlGUI(QMainWindow):
             return
 
         self._sdk_last_gui_sync_err_ts = now
+        sync_label = "Momo Service sync" if self._use_momo_service_backend() else "SDK sync"
         message = (
-            f"[SDK sync] {self._sdk_gui_sync_failure_count} consecutive read failures; "
+            f"[{sync_label}] {self._sdk_gui_sync_failure_count} consecutive read failures; "
             f"latest: {exc}"
         )
         if from_worker_thread:
@@ -2427,6 +2934,19 @@ class ArmControlGUI(QMainWindow):
         now = time.time()
         if (not force) and (now - float(self._sdk_last_gui_sync_ts) < float(self._sdk_gui_sync_interval_sec)):
             return False
+
+        if self._use_momo_service_backend():
+            if not self.connected and self._sdk_runtime_mode != "simulation":
+                return False
+            try:
+                state = self._service_get_robot_state(timeout_sec=max(2.0, self._sdk_gui_sync_interval_sec * 8.0))
+            except Exception as exc:
+                self._handle_sdk_sync_error(exc, from_worker_thread=False)
+                return False
+            self._mark_sdk_sync_success()
+            self._sync_sim_from_sdk_state(state)
+            self._sdk_last_gui_sync_ts = now
+            return True
 
         if not self._sdk_lock.acquire(blocking=False):
             return False
@@ -2451,6 +2971,20 @@ class ArmControlGUI(QMainWindow):
         while self._sdk_sync_running:
             if self.connecting or (not self._sdk_gui_sync_enabled) or (not self._sim_ready) or self._sim_motion_active:
                 time.sleep(idle_sleep)
+                continue
+            if self._use_momo_service_backend():
+                if not self.connected and self._sdk_runtime_mode != "simulation":
+                    time.sleep(idle_sleep)
+                    continue
+                try:
+                    state = self._service_get_robot_state(timeout_sec=max(2.0, self._sdk_gui_sync_interval_sec * 8.0))
+                except Exception as exc:
+                    self._handle_sdk_sync_error(exc, from_worker_thread=True)
+                    time.sleep(min(idle_sleep, self._sdk_gui_sync_interval_sec))
+                    continue
+                self._mark_sdk_sync_success()
+                self.sdk_sync_state_ready.emit(state)
+                time.sleep(self._sdk_gui_sync_interval_sec)
                 continue
             if not self._sdk_lock.acquire(blocking=False):
                 time.sleep(min(idle_sleep, self._sdk_gui_sync_interval_sec))
@@ -3015,14 +3549,26 @@ class ArmControlGUI(QMainWindow):
         self._update_connection_widgets()
         self._update_global_status_bar()
         self.statusBar().showMessage(self._tr("status_connecting"))
-        self.log(self._tr("log_connecting"))
+        if self._use_momo_service_backend():
+            if self.current_lang == "en":
+                self.log(f"Connecting to Momo service: {self._momo_service_url}")
+            else:
+                self.log(f"正在连接 Momo 统一控制端: {self._momo_service_url}")
+        else:
+            self.log(self._tr("log_connecting"))
 
         def connect_task():
             try:
-                self._sdk_connect_robot()
+                if self._use_momo_service_backend():
+                    self._service_connect_robot()
+                else:
+                    self._sdk_connect_robot()
                 self.sdk_connection_finished.emit(True, "")
             except Exception as exc:
-                self._sdk_disconnect_robot()
+                if self._use_momo_service_backend():
+                    self._sdk_set_runtime_state("disconnected", error_text=str(exc))
+                else:
+                    self._sdk_disconnect_robot()
                 self.sdk_connection_finished.emit(False, str(exc))
 
         threading.Thread(target=connect_task, daemon=True).start()
@@ -3056,7 +3602,14 @@ class ArmControlGUI(QMainWindow):
         self._clear_pending_sdk_commands()
         self.log(self._tr("log_disconnecting"))
 
-        self._sdk_disconnect_robot()
+        if self._use_momo_service_backend():
+            try:
+                self._service_disconnect_robot()
+            except Exception as exc:
+                self._sdk_set_runtime_state("disconnected", error_text=str(exc))
+                self.log(f"[Momo Service] disconnect failed: {exc}", "warning")
+        else:
+            self._sdk_disconnect_robot()
 
         self.connected = False
         self.connecting = False
@@ -3182,6 +3735,56 @@ class ArmControlGUI(QMainWindow):
         vals = [float(xyz[0]), float(xyz[1]), float(xyz[2]), float(rpy[0]), float(rpy[1]), float(rpy[2])]
         for key, value in zip(("X", "Y", "Z", "Rx", "Ry", "Rz"), vals):
             self.quick_page.pose_labels[key].setText(f"{value:.3f}")
+        if hasattr(self.quick_page, "set_tcp_summary"):
+            self.quick_page.set_tcp_summary(xyz, rpy)
+        if hasattr(self.quick_page, "ensure_pose_target_initialized"):
+            self.quick_page.ensure_pose_target_initialized(xyz, rpy)
+
+    def _set_sim_target_marker(self, xyz: np.ndarray):
+        try:
+            target = np.asarray(xyz, dtype=float).reshape(3)
+        except Exception:
+            return
+        self._sim_target_xyz = target.copy()
+
+        if self._sim_backend == "vtk" and self.sim_vtk_view is not None:
+            setter = getattr(self.sim_vtk_view, "set_target_marker_position", None)
+            if callable(setter):
+                setter(target.tolist(), visible=True)
+            return
+
+        if self._sim_backend == "pybullet" and PYBULLET_AVAILABLE and self._sim_pb_client is not None:
+            try:
+                if self._sim_pb_target_visual_id is None:
+                    self._sim_pb_target_visual_id = _pb.createVisualShape(
+                        _pb.GEOM_SPHERE,
+                        radius=0.018,
+                        rgbaColor=[0.02, 0.27, 0.95, 1.0],
+                        physicsClientId=self._sim_pb_client,
+                    )
+                if self._sim_pb_target_marker_id is None:
+                    self._sim_pb_target_marker_id = _pb.createMultiBody(
+                        baseMass=0.0,
+                        baseCollisionShapeIndex=-1,
+                        baseVisualShapeIndex=int(self._sim_pb_target_visual_id),
+                        basePosition=target.tolist(),
+                        baseOrientation=[0.0, 0.0, 0.0, 1.0],
+                        physicsClientId=self._sim_pb_client,
+                    )
+                else:
+                    _pb.resetBasePositionAndOrientation(
+                        int(self._sim_pb_target_marker_id),
+                        target.tolist(),
+                        [0.0, 0.0, 0.0, 1.0],
+                        physicsClientId=self._sim_pb_client,
+                    )
+                self._update_sim_plot()
+            except Exception:
+                pass
+            return
+
+        if self._sim_backend == "kinematics" and self.sim_ax is not None:
+            self._update_sim_plot()
 
     def _detect_pybullet_ee_link(self, client_id: int, robot_id: int):
         if not PYBULLET_AVAILABLE:
@@ -3444,6 +4047,8 @@ class ArmControlGUI(QMainWindow):
                 self.settings_page.reset_view_btn.clicked.connect(self._on_sim_reset_view)
                 self._apply_vtk_visual_settings()
                 self._apply_vtk_camera_preset()
+                if self._sim_target_xyz is not None:
+                    self._set_sim_target_marker(self._sim_target_xyz)
                 if not self.connected:
                     self._update_quick_pose_from_sim()
                 return sim_tab
@@ -3758,7 +4363,10 @@ class ArmControlGUI(QMainWindow):
         self._sim_pb_joint_indices = []
         self._sim_pb_ee_link_index = None
         self._sim_pb_renderer = None
+        self._sim_pb_target_marker_id = None
+        self._sim_pb_target_visual_id = None
         self._sim_pb_renderer_fallback_done = False
+        self._sim_target_xyz = None
         self._sim_joint_offsets = np.zeros(0, dtype=float)
         self._sim_model_limits = []
         self._sim_fk = None
@@ -3786,10 +4394,22 @@ class ArmControlGUI(QMainWindow):
             pts = self._sim_chain_positions(self.sim_q)
             self.sim_ax.clear()
             self.sim_ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], "-o", color="#2563EB", linewidth=2)
+            axis_pts = pts
+            if self._sim_target_xyz is not None:
+                target = np.asarray(self._sim_target_xyz, dtype=float).reshape(1, 3)
+                self.sim_ax.scatter(
+                    target[:, 0],
+                    target[:, 1],
+                    target[:, 2],
+                    color="#064BFF",
+                    s=80,
+                    depthshade=True,
+                )
+                axis_pts = np.vstack([pts, target])
             self.sim_ax.set_xlabel("X")
             self.sim_ax.set_ylabel("Y")
             self.sim_ax.set_zlabel("Z")
-            self._sim_set_axes_equal(pts)
+            self._sim_set_axes_equal(axis_pts)
             self.sim_canvas.draw_idle()
             self._sync_quick_joint_panel()
             if not self.connected:

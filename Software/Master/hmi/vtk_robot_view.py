@@ -99,6 +99,7 @@ class VtkRobotView(QWidget):
         self._scene_axes_actor: vtk.vtkAxesActor | None = None
         self._apple_actor: vtk.vtkActor | None = None
         self._apple_eye_actor: vtk.vtkActor | None = None
+        self._target_marker_actor: vtk.vtkActor | None = None
         self._eye_renderer: vtk.vtkRenderer | None = None
         self._eye_render_window: vtk.vtkRenderWindow | None = None
         self._eye_camera: vtk.vtkCamera | None = None
@@ -122,6 +123,7 @@ class VtkRobotView(QWidget):
         self._add_mesh_actors(visuals)
         self._add_apple_model()
         self._add_orientation_axes()
+        self._add_target_marker()
 
         self.set_background("studio")
         self.set_mesh_smoothing(enabled=True, feature_angle=55.0)
@@ -818,6 +820,39 @@ class VtkRobotView(QWidget):
         self._scene_axes_actor = axes
 
         self._update_ground_style()
+
+    def _add_target_marker(self):
+        sphere = vtk.vtkSphereSource()
+        sphere.SetRadius(0.018)
+        sphere.SetThetaResolution(32)
+        sphere.SetPhiResolution(16)
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(sphere.GetOutputPort())
+
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.SetVisibility(False)
+        prop = actor.GetProperty()
+        prop.SetColor(0.02, 0.27, 0.95)
+        prop.SetAmbient(0.38)
+        prop.SetDiffuse(0.72)
+        prop.SetSpecular(0.44)
+        prop.SetSpecularPower(32.0)
+        self.renderer.AddActor(actor)
+        self._target_marker_actor = actor
+
+    def set_target_marker_position(self, xyz: Sequence[float] | None, *, visible: bool = True):
+        if self._target_marker_actor is None:
+            return
+        if xyz is None:
+            self._target_marker_actor.SetVisibility(False)
+            self.render_window.Render()
+            return
+        values = np.asarray(xyz, dtype=float).reshape(3)
+        self._target_marker_actor.SetPosition(float(values[0]), float(values[1]), float(values[2]))
+        self._target_marker_actor.SetVisibility(bool(visible))
+        self.render_window.Render()
 
     def _add_lights(self):
         self.renderer.AutomaticLightCreationOff()
