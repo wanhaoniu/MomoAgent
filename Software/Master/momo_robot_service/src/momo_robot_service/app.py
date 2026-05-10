@@ -34,6 +34,7 @@ from .schemas import (
     HomeRequest,
     IdleScanStartRequest,
     JointStepRequest,
+    JointTargetRequest,
     ToolDispatchRequest,
 )
 from .service import MomoRobotService
@@ -416,6 +417,18 @@ def create_app() -> FastAPI:
             service.joint_step(
                 joint_index=payload.joint_index,
                 delta_deg=payload.delta_deg,
+                speed_percent=payload.speed_percent,
+            )
+        )
+
+    @app.post("/api/v1/motion/joints-target")
+    async def motion_joints_target(payload: JointTargetRequest, request: Request) -> dict[str, Any]:
+        service: MomoRobotService = request.app.state.robot_service
+        return _ok(
+            service.joints_target(
+                targets_deg=payload.targets_deg,
+                multi_turn_targets_continuous_raw=payload.multi_turn_targets_continuous_raw,
+                duration=payload.duration,
                 speed_percent=payload.speed_percent,
             )
         )

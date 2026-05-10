@@ -16,7 +16,6 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QPushButton,
     QSlider,
-    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -239,15 +238,20 @@ class QuickMovePage(QWidget):
         layout.setSpacing(10)
 
         form = QFormLayout()
-        self.sequence_pose_count_spin = QSpinBox()
-        self.sequence_pose_count_spin.setRange(1, 20)
-        self.sequence_pose_count_spin.setValue(3)
-        self.sequence_move_duration_spin = QDoubleSpinBox()
-        self.sequence_move_duration_spin.setRange(0.2, 20.0)
-        self.sequence_move_duration_spin.setValue(1.5)
-        self.sequence_move_duration_spin.setSuffix(" s")
-        form.addRow("Poses", self.sequence_pose_count_spin)
-        form.addRow("Move", self.sequence_move_duration_spin)
+        self.sequence_sample_rate_label = QLabel("Sample")
+        self.sequence_sample_rate_spin = QDoubleSpinBox()
+        self.sequence_sample_rate_spin.setRange(1.0, 50.0)
+        self.sequence_sample_rate_spin.setValue(10.0)
+        self.sequence_sample_rate_spin.setSingleStep(1.0)
+        self.sequence_sample_rate_spin.setSuffix(" Hz")
+        self.sequence_replay_speed_label = QLabel("Speed")
+        self.sequence_replay_speed_spin = QDoubleSpinBox()
+        self.sequence_replay_speed_spin.setRange(0.1, 3.0)
+        self.sequence_replay_speed_spin.setValue(1.0)
+        self.sequence_replay_speed_spin.setSingleStep(0.1)
+        self.sequence_replay_speed_spin.setSuffix(" x")
+        form.addRow(self.sequence_sample_rate_label, self.sequence_sample_rate_spin)
+        form.addRow(self.sequence_replay_speed_label, self.sequence_replay_speed_spin)
         layout.addLayout(form)
 
         self.sequence_list = QListWidget()
@@ -264,7 +268,7 @@ class QuickMovePage(QWidget):
         grid.addWidget(self.open_sequence_file_btn, 1, 1)
         layout.addLayout(grid)
 
-        self.sequence_status_label = QLabel("sdk/workspace/runtime/recorded_pose_sequence.json")
+        self.sequence_status_label = QLabel("sdk/workspace/runtime/recorded_motion_sequence.json")
         self.sequence_status_label.setObjectName("hintLabel")
         self.sequence_status_label.setWordWrap(True)
         layout.addWidget(self.sequence_status_label)
@@ -274,6 +278,32 @@ class QuickMovePage(QWidget):
         self.stop_sequence_btn.clicked.connect(self.stop_sequence_clicked.emit)
         self.open_sequence_file_btn.clicked.connect(self.open_sequence_file_clicked.emit)
         return tab
+
+    def sequence_sample_rate_hz(self) -> float:
+        return max(1.0, float(self.sequence_sample_rate_spin.value()))
+
+    def sequence_replay_speed(self) -> float:
+        return max(0.1, float(self.sequence_replay_speed_spin.value()))
+
+    def set_sequence_recording(self, recording: bool, *, record_text: str = "Record", stop_text: str = "Stop Rec"):
+        self.record_sequence_btn.setText(str(stop_text if bool(recording) else record_text))
+        self.record_sequence_btn.setObjectName("dangerBtn" if bool(recording) else "primaryBtn")
+        self.record_sequence_btn.style().unpolish(self.record_sequence_btn)
+        self.record_sequence_btn.style().polish(self.record_sequence_btn)
+        self.replay_sequence_btn.setEnabled(not bool(recording))
+
+    def set_sequence_replaying(self, replaying: bool, *, replay_text: str = "Replay", active_text: str = "Replaying"):
+        self.replay_sequence_btn.setText(str(active_text if bool(replaying) else replay_text))
+        self.replay_sequence_btn.setEnabled(not bool(replaying))
+        self.record_sequence_btn.setEnabled(not bool(replaying))
+
+    def set_sequence_status(self, text: str):
+        self.sequence_status_label.setText(str(text or ""))
+
+    def set_sequence_items(self, items):
+        self.sequence_list.clear()
+        for item in list(items or []):
+            self.sequence_list.addItem(str(item))
 
     def _build_inverse_tab(self) -> QWidget:
         tab = QWidget()
@@ -719,6 +749,8 @@ class QuickMovePage(QWidget):
         self.pose_fill_current_btn.setText(tr("quick_pose_fill_current"))
         self.pose_preview_btn.setText(tr("quick_pose_preview"))
         self.pose_send_btn.setText(tr("quick_pose_send"))
+        self.sequence_sample_rate_label.setText(tr("quick_sequence_sample_rate"))
+        self.sequence_replay_speed_label.setText(tr("quick_sequence_replay_speed"))
         self.record_sequence_btn.setText(tr("quick_record_sequence"))
         self.replay_sequence_btn.setText(tr("quick_replay_sequence"))
         self.stop_sequence_btn.setText(tr("quick_stop_sequence"))

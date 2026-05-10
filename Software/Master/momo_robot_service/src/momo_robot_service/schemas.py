@@ -16,6 +16,13 @@ class JointStepRequest(BaseModel):
     speed_percent: int = Field(50, ge=1, le=100)
 
 
+class JointTargetRequest(BaseModel):
+    targets_deg: dict[str, float] = Field(default_factory=dict)
+    multi_turn_targets_continuous_raw: dict[str, float] = Field(default_factory=dict)
+    duration: float = Field(0.1, ge=0.03, le=20.0)
+    speed_percent: int = Field(50, ge=1, le=100)
+
+
 class CartesianJogRequest(BaseModel):
     axis: Literal[
         "+X",

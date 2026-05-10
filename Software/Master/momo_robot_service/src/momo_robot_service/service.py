@@ -523,6 +523,55 @@ class MomoRobotService:
                 "accepted": True,
             }
 
+    def joints_target(
+        self,
+        *,
+        targets_deg: dict[str, float],
+        multi_turn_targets_continuous_raw: dict[str, float] | None,
+        duration: float,
+        speed_percent: int,
+    ) -> dict[str, Any]:
+        targets = {
+            str(joint_name): float(value)
+            for joint_name, value in dict(targets_deg or {}).items()
+        }
+        if not targets:
+            raise MomoRobotError("INVALID_ARGUMENT", "targets_deg is required", 400)
+        multi_turn_targets = {
+            str(joint_name): float(value)
+            for joint_name, value in dict(multi_turn_targets_continuous_raw or {}).items()
+            if str(joint_name) in targets
+        }
+        move_duration = float(np.clip(float(duration or 0.1), 0.03, 20.0))
+        with self._lock:
+            self._stop_for_manual_motion_locked()
+            self._update_motion(speed_percent=speed_percent)
+            robot = self._require_robot()
+            self._prepare_motion_torque_locked(robot)
+            move_kwargs: dict[str, Any] = {
+                "duration": move_duration,
+                "speed_percent": int(speed_percent),
+                "wait": True,
+                "timeout": max(2.0, move_duration + 2.0),
+            }
+            if multi_turn_targets:
+                move_kwargs["multi_turn_targets_continuous_raw"] = multi_turn_targets
+            try:
+                robot.move_joints(targets, **move_kwargs)
+            except TypeError:
+                move_kwargs.pop("multi_turn_targets_continuous_raw", None)
+                robot.move_joints(targets, **move_kwargs)
+            except MomoRobotError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise MomoRobotError("JOINT_TARGET_FAILED", str(exc), 500) from exc
+            return {
+                "targets_deg": targets,
+                "multi_turn_targets_continuous_raw": multi_turn_targets,
+                "duration": move_duration,
+                "accepted": True,
+            }
+
     def cartesian_jog(
         self,
         *,
