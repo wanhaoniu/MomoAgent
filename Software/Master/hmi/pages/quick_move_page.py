@@ -73,6 +73,7 @@ class QuickMovePage(QWidget):
     stop_sequence_clicked = pyqtSignal()
     open_sequence_file_clicked = pyqtSignal()
     pose_target_changed = pyqtSignal(dict)
+    pose_preview_requested = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
@@ -300,6 +301,7 @@ class QuickMovePage(QWidget):
             spin.setDecimals(int(decimals))
             spin.setSingleStep(0.001 if decimals >= 4 else 0.01)
             spin.setSuffix(suffix)
+            spin.setKeyboardTracking(True)
             grid.addWidget(label, idx, 0)
             grid.addWidget(spin, idx, 1)
             self.pose_target_spins[key] = spin
@@ -314,17 +316,21 @@ class QuickMovePage(QWidget):
         layout.addLayout(options)
 
         self.pose_fill_current_btn = QPushButton("Use Current")
+        self.pose_preview_btn = QPushButton("Preview")
         self.pose_send_btn = QPushButton("Send")
         self.pose_send_btn.setObjectName("primaryBtn")
         button_row = QHBoxLayout()
         button_row.addWidget(self.pose_fill_current_btn)
+        button_row.addWidget(self.pose_preview_btn)
         button_row.addWidget(self.pose_send_btn)
         layout.addLayout(button_row)
 
         self.pose_fill_current_btn.clicked.connect(self.fill_pose_target_from_current)
+        self.pose_preview_btn.clicked.connect(self._on_pose_preview_clicked)
         self.pose_send_btn.clicked.connect(self._on_pose_send_clicked)
         for spin in self.pose_target_spins.values():
-            spin.valueChanged.connect(self._emit_pose_target_changed)
+            spin.valueChanged.connect(lambda _value: self._emit_pose_target_changed())
+            spin.editingFinished.connect(self._emit_pose_target_changed)
         layout.addStretch()
         return tab
 
@@ -398,12 +404,18 @@ class QuickMovePage(QWidget):
         }
 
     def _emit_pose_target_changed(self):
+        self._target_pose_initialized = True
         self.pose_target_changed.emit(self._pose_target_payload())
 
     def _on_pose_send_clicked(self):
         payload = self._pose_target_payload()
         self.pose_target_changed.emit(payload)
         self.pose_move_requested.emit(payload)
+
+    def _on_pose_preview_clicked(self):
+        payload = self._pose_target_payload()
+        self.pose_target_changed.emit(payload)
+        self.pose_preview_requested.emit(payload)
 
     def set_tcp_summary(self, xyz, rpy):
         try:
@@ -705,6 +717,7 @@ class QuickMovePage(QWidget):
         self.pose_group.setTitle(tr("quick_tcp"))
         self.pose_target_group.setTitle(tr("quick_pose_target"))
         self.pose_fill_current_btn.setText(tr("quick_pose_fill_current"))
+        self.pose_preview_btn.setText(tr("quick_pose_preview"))
         self.pose_send_btn.setText(tr("quick_pose_send"))
         self.record_sequence_btn.setText(tr("quick_record_sequence"))
         self.replay_sequence_btn.setText(tr("quick_replay_sequence"))

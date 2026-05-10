@@ -280,6 +280,11 @@ class ArmControlGUI(QMainWindow):
         self._sim_motion_timer = QTimer(self)
         self._sim_motion_timer.setInterval(16)
         self._sim_motion_timer.timeout.connect(self._on_sim_motion_tick)
+        self._pending_pose_preview_payload: Optional[Dict[str, Any]] = None
+        self._pose_preview_timer = QTimer(self)
+        self._pose_preview_timer.setSingleShot(True)
+        self._pose_preview_timer.setInterval(220)
+        self._pose_preview_timer.timeout.connect(self._on_quick_pose_preview_timer)
         self._jog_hold_timer = QTimer(self)
         self._jog_hold_timer.setInterval(100)
         self._jog_hold_timer.timeout.connect(self._on_quick_jog_hold_tick)
@@ -374,6 +379,7 @@ class ArmControlGUI(QMainWindow):
                 "quick_tcp": "末端位姿",
                 "quick_pose_target": "目标末端位姿",
                 "quick_pose_fill_current": "读取当前",
+                "quick_pose_preview": "计算并更新",
                 "quick_pose_send": "发送目标",
                 "quick_record_sequence": "录制序列",
                 "quick_replay_sequence": "回放序列",
@@ -531,6 +537,7 @@ class ArmControlGUI(QMainWindow):
                 "quick_tcp": "TCP",
                 "quick_pose_target": "Target TCP",
                 "quick_pose_fill_current": "Use Current",
+                "quick_pose_preview": "Preview IK",
                 "quick_pose_send": "Send Target",
                 "quick_record_sequence": "Record Sequence",
                 "quick_replay_sequence": "Replay Sequence",
@@ -911,6 +918,7 @@ class ArmControlGUI(QMainWindow):
         self.quick_page.home_clicked.connect(self._on_quick_zero)
         self.quick_page.pose_move_requested.connect(self._on_quick_pose_move)
         self.quick_page.pose_target_changed.connect(self._on_quick_pose_target_changed)
+        self.quick_page.pose_preview_requested.connect(self._on_quick_pose_preview)
         self.quick_page.calibration_clicked.connect(self._on_launch_calibration)
         self.quick_page.record_sequence_clicked.connect(self._on_launch_record_sequence)
         self.quick_page.replay_sequence_clicked.connect(self._on_launch_replay_sequence)
@@ -1861,17 +1869,61 @@ class ArmControlGUI(QMainWindow):
         except Exception:
             return
         self._set_sim_target_marker(xyz)
+        self._pending_pose_preview_payload = dict(payload)
+        if self._sim_ready:
+            self._pose_preview_timer.start()
 
-    def _on_quick_pose_move(self, payload: object):
+    def _pose_target_from_payload(self, payload: object) -> Optional[Tuple[np.ndarray, np.ndarray, float]]:
         if not isinstance(payload, dict):
-            return
+            return None
         try:
             xyz = np.asarray(payload.get("xyz", []), dtype=float).reshape(3)
             rpy = np.asarray(payload.get("rpy", []), dtype=float).reshape(3)
             duration = max(0.2, min(20.0, float(payload.get("duration", 1.2) or 1.2)))
         except Exception as exc:
             self.log(f"[IK Target] invalid target: {exc}", "warning")
+            return None
+        return xyz, rpy, duration
+
+    def _run_quick_pose_preview(self, payload: object, *, announce: bool) -> bool:
+        parsed = self._pose_target_from_payload(payload)
+        if parsed is None:
+            return False
+        xyz, rpy, _duration = parsed
+        self._set_sim_target_marker(xyz)
+        q_target = self._solve_sim_ik(xyz, rpy)
+        if q_target is None:
+            if announce:
+                self.statusBar().showMessage("IK preview failed")
+                self.log("[IK Target] IK preview failed for requested TCP", "warning")
+            return False
+        self._cancel_sim_motion()
+        if self._apply_sim_joint_q(np.asarray(q_target, dtype=float), update_plot=True):
+            self._sync_quick_joint_panel()
+            self._update_quick_pose_from_sim()
+            if announce:
+                self.statusBar().showMessage("IK preview updated")
+                self.log("[IK Target] preview updated", "success")
+            return True
+        return False
+
+    def _on_quick_pose_preview_timer(self):
+        payload = self._pending_pose_preview_payload
+        self._pending_pose_preview_payload = None
+        if payload is None:
             return
+        self._run_quick_pose_preview(payload, announce=False)
+
+    def _on_quick_pose_preview(self, payload: object):
+        self._pose_preview_timer.stop()
+        self._pending_pose_preview_payload = None
+        self._run_quick_pose_preview(payload, announce=True)
+
+    def _on_quick_pose_move(self, payload: object):
+        parsed = self._pose_target_from_payload(payload)
+        if parsed is None:
+            return
+        xyz, rpy, duration = parsed
         self._set_sim_target_marker(xyz)
         self._on_quick_jog_released(enqueue_stop=False)
         self._enqueue_sdk_command(
