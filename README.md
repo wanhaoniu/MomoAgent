@@ -97,25 +97,32 @@ Expected contents:
 ## 6. Quick Start
 ### 6.1 Environment
 - Ubuntu 20.04/22.04 is recommended (master/slave serial + camera workflow is mainly Linux-oriented)
-- Python 3.10 recommended (SDK minimum: Python 3.8)
+- Conda / Miniforge / Miniconda is recommended for the Python environment
+- Python 3.12 is recommended (matches the tested local `momo` environment; SDK minimum: Python 3.8)
 - Real-arm mode needs one Leader + one Follower arm and valid serial ports (for example `/dev/ttyACM0`)
 - Network ports: `6666/TCP` (control) and `6000/UDP` (camera stream, optional)
 
 ### 6.2 Install Dependencies
-From repo root:
+From repo root, create a conda environment that mirrors the tested local `momo` environment:
 ```bash
-bash scripts/bootstrap.sh
+conda create -n momoagent -c conda-forge python=3.12 pip pyqt=5 pyyaml requests python-dotenv pybullet vtk -y
+conda activate momoagent
+```
 
-# Add the Qt GUI / 3D / speech stack when needed
-bash scripts/bootstrap.sh --advanced
+Then install the project Python packages with one command:
+```bash
+python -m pip install -U pip && python -m pip install -r requirements/advanced.txt -r requirements/nanobot-bridge.txt -e ./sdk
+```
 
-source .venv/bin/activate
+For a lighter headless install without the Qt GUI / 3D stack:
+```bash
+python -m pip install -U pip && python -m pip install -r requirements/base.txt -r requirements/nanobot-bridge.txt -e ./sdk
 ```
 
 Notes:
-- `bash scripts/bootstrap.sh` automatically creates a repo-local `.venv`
+- The conda packages above follow the local `momo` environment: Python 3.12 plus `pyqt=5`, `vtk`, `pybullet`, `pyyaml`, `requests`, and `python-dotenv` from `conda-forge`
+- `requirements/advanced.txt` includes the base dependencies and adds the Qt GUI / 3D / speech stack
 - The base install covers robot control, `momo_robot_service`, and the camera / `face_loc` headless flow
-- `--advanced` adds the Qt GUI stack
 - Nanobot is the default agent backend. Its model/API settings use `MOMO_AGENT_NANOBOT_*`, falling back to `AUTOGRASP_VLM_*` from `.env` when present. Robot tools route through `momo_robot_service`, not curl or a second SDK session.
 
 ### 6.3 Start Leader-Follower Control (Real Hardware)
@@ -139,9 +146,7 @@ Notes:
 
 ### 6.4 Start GUI (Optional)
 ```bash
-bash scripts/bootstrap.sh --advanced
-source .venv/bin/activate
-
+conda activate momoagent
 python Software/Master/main.py
 ```
 Then configure IP/ports in the Settings page and click **Connect**.

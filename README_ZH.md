@@ -103,25 +103,32 @@
 ## 6. 快速开始
 ### 6.1 环境要求
 - 推荐 Ubuntu 20.04/22.04（主从串口与摄像头链路主要面向 Linux）
-- 推荐 Python 3.10（SDK 最低支持 Python 3.8）
+- 推荐使用 Conda / Miniforge / Miniconda 管理 Python 环境
+- 推荐 Python 3.12（与本机已验证的 `momo` 环境一致；SDK 最低支持 Python 3.8）
 - 实机模式需要 1 套 Leader + 1 套 Follower，并准备可用串口（如 `/dev/ttyACM0`）
 - 网络端口：`6666/TCP`（控制）与 `6000/UDP`（摄像头推流，可选）
 
 ### 6.2 安装依赖
-在仓库根目录执行：
+在仓库根目录创建 conda 环境，依赖组合参考本机已验证的 `momo` 环境：
 ```bash
-bash scripts/bootstrap.sh
+conda create -n momoagent -c conda-forge python=3.12 pip pyqt=5 pyyaml requests python-dotenv pybullet vtk -y
+conda activate momoagent
+```
 
-# 如需 Qt GUI / 3D 视图 / 语音窗口，再补进阶版
-bash scripts/bootstrap.sh --advanced
+然后用一条命令安装项目 Python 依赖：
+```bash
+python -m pip install -U pip && python -m pip install -r requirements/advanced.txt -r requirements/nanobot-bridge.txt -e ./sdk
+```
 
-source .venv/bin/activate
+如果只需要无界面的轻量版，不需要 Qt GUI / 3D 视图：
+```bash
+python -m pip install -U pip && python -m pip install -r requirements/base.txt -r requirements/nanobot-bridge.txt -e ./sdk
 ```
 
 说明：
-- `bash scripts/bootstrap.sh` 会自动在仓库根目录创建 `.venv`
+- 上面的 conda 包参考本机 `momo` 环境：Python 3.12，以及 `conda-forge` 中的 `pyqt=5`、`vtk`、`pybullet`、`pyyaml`、`requests`、`python-dotenv`
+- `requirements/advanced.txt` 包含基础依赖，并额外安装 Qt GUI / 3D 视图 / 语音窗口相关依赖
 - 基础版覆盖：机械臂控制、`momo_robot_service`、摄像头 / `face_loc` 的 headless 链路
-- 进阶版 `--advanced` 会额外安装 Qt GUI 相关依赖
 
 ### 6.2.1 搭建轻量级 Nanobot Agent
 
@@ -161,9 +168,7 @@ python3 main.py --ip <从臂IP> --port 6666 --leader-port /dev/ttyACM0 --leader-
 
 ### 6.4 启动图形界面（可选）
 ```bash
-bash scripts/bootstrap.sh --advanced
-source .venv/bin/activate
-
+conda activate momoagent
 python Software/Master/main.py
 ```
 在 Settings 页面填写 IP/端口后点击 **Connect**。
