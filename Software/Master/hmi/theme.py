@@ -169,6 +169,40 @@ QLabel#statusCardDetail {{
     font-size: 12px;
 }}
 
+QLabel#appTitleLabel {{
+    color: {t["text_primary"]};
+    font-size: 17px;
+    font-weight: 700;
+    background: transparent;
+}}
+
+QLabel#headerStateLabel {{
+    color: {t["text_secondary"]};
+    font-size: 14px;
+    font-weight: 700;
+    background: transparent;
+    padding: 0 8px;
+}}
+
+QLabel#tcpSummaryLabel {{
+    color: {t["text_primary"]};
+    font-size: 15px;
+    font-weight: 700;
+    background: transparent;
+}}
+
+QLabel#hintLabel {{
+    color: {t["text_muted"]};
+    font-size: 12px;
+    background: transparent;
+}}
+
+QLabel#jointValueLabel, QLabel#poseValueLabel {{
+    color: {t["text_primary"]};
+    font-weight: 700;
+    background: transparent;
+}}
+
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
     min-height: 44px;
     border-radius: 10px;
@@ -329,6 +363,25 @@ QPushButton#primaryBtn:pressed, QPushButton#navBtn:checked:pressed {{
     border-color: {t["accent_press"]};
 }}
 
+QFrame#globalStatusBar QPushButton {{
+    min-height: 30px;
+    max-height: 32px;
+    border-radius: 8px;
+    padding: 0 12px;
+    font-size: 13px;
+}}
+
+QFrame#globalStatusBar QPushButton#statusActionBtn {{
+    background: {t["surface"]};
+    border: 1px solid {t["stroke"]};
+    color: {t["text_secondary"]};
+}}
+
+QFrame#globalStatusBar QPushButton#statusActionBtn:hover {{
+    background: {t["surface_soft"]};
+    color: {t["text_primary"]};
+}}
+
 QPushButton#navBtn {{
     min-width: 112px;
 }}
@@ -419,6 +472,12 @@ QTextEdit {{
     background: {t["surface"]};
     color: {t["text_primary"]};
     padding: 10px;
+}}
+
+QTextEdit#logView {{
+    font-family: "SF Mono", "Consolas", "Menlo", monospace;
+    font-size: 12px;
+    padding: 8px;
 }}
 
 QLabel#cameraLabel {{

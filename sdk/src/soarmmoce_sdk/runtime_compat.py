@@ -63,6 +63,7 @@ class CompatibleRuntimeRobot:
         self,
         targets_deg,
         *,
+        multi_turn_targets_continuous_raw=None,
         duration: float | None = None,
         speed_percent: int | float | None = None,
         wait: bool = True,
@@ -70,6 +71,7 @@ class CompatibleRuntimeRobot:
     ) -> dict[str, Any]:
         return self._controller.move_joints(
             targets_deg,
+            multi_turn_targets_continuous_raw=multi_turn_targets_continuous_raw,
             duration=duration,
             speed_percent=speed_percent,
             wait=wait,

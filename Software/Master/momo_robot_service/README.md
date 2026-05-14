@@ -19,6 +19,7 @@ python /Users/moce/Documents/Project/MomoAgent/Software/Master/momo_robot_servic
 - `POST /api/v1/motion/cartesian-jog`
 - `POST /api/v1/motion/home`
 - `POST /api/v1/motion/stop`
+- `POST /api/v1/motion/free-move`
 - `POST /api/v1/tools/dispatch`
 - `GET /api/v1/follow/status`
 - `POST /api/v1/follow/start`

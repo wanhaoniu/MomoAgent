@@ -34,6 +34,7 @@ from .schemas import (
     HomeRequest,
     IdleScanStartRequest,
     JointStepRequest,
+    JointTargetRequest,
     ToolDispatchRequest,
 )
 from .service import MomoRobotService
@@ -345,6 +346,20 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.exception_handler(Exception)
+    async def generic_error_handler(_request: Request, exc: Exception):
+        message = str(exc).strip() or exc.__class__.__name__
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": message,
+                },
+            },
+        )
+
     @app.get("/api/v1/health")
     async def health(request: Request) -> dict[str, Any]:
         service: MomoRobotService = request.app.state.robot_service
@@ -406,6 +421,18 @@ def create_app() -> FastAPI:
             )
         )
 
+    @app.post("/api/v1/motion/joints-target")
+    async def motion_joints_target(payload: JointTargetRequest, request: Request) -> dict[str, Any]:
+        service: MomoRobotService = request.app.state.robot_service
+        return _ok(
+            service.joints_target(
+                targets_deg=payload.targets_deg,
+                multi_turn_targets_continuous_raw=payload.multi_turn_targets_continuous_raw,
+                duration=payload.duration,
+                speed_percent=payload.speed_percent,
+            )
+        )
+
     @app.post("/api/v1/motion/cartesian-jog")
     async def motion_cartesian_jog(payload: CartesianJogRequest, request: Request) -> dict[str, Any]:
         service: MomoRobotService = request.app.state.robot_service
@@ -429,6 +456,11 @@ def create_app() -> FastAPI:
     async def motion_stop(request: Request) -> dict[str, Any]:
         service: MomoRobotService = request.app.state.robot_service
         return _ok(service.stop())
+
+    @app.post("/api/v1/motion/free-move")
+    async def motion_free_move(request: Request) -> dict[str, Any]:
+        service: MomoRobotService = request.app.state.robot_service
+        return _ok(service.free_move())
 
     @app.post("/api/v1/tools/dispatch")
     async def tool_dispatch(payload: ToolDispatchRequest, request: Request) -> dict[str, Any]:

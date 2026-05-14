@@ -85,6 +85,7 @@ class MomoRobotService:
         self._motion = MotionConfig()
         self._control_mode = CONTROL_MODE_NONE
         self._control_error = ""
+        self._free_move_torque_released = False
         self._follow_worker: FaceFollowWorker | AttentionWorker | None = None
         self._idle_scan_worker: IdleScanWorker | None = None
         self._haiguitang_worker: HaiGuiTangWorker | None = None
@@ -175,6 +176,7 @@ class MomoRobotService:
                 last_connect_error="",
             )
             self._control_error = ""
+            self._free_move_torque_released = False
             return self._session_payload()
 
     def disconnect(self) -> dict[str, Any]:
@@ -190,6 +192,7 @@ class MomoRobotService:
             except Exception:
                 pass
         self._robot = None
+        self._free_move_torque_released = False
         self._set_runtime(mode="disconnected")
 
     def _require_robot(self) -> RuntimeRobot:
@@ -311,6 +314,47 @@ class MomoRobotService:
         if self._control_mode != CONTROL_MODE_NONE:
             self._deactivate_control_locked()
 
+    @staticmethod
+    def _robot_torque_targets(robot: RuntimeRobot) -> list[Any]:
+        targets: list[Any] = []
+        for candidate in (
+            robot,
+            getattr(robot, "_controller", None),
+            getattr(robot, "_robot", None),
+            getattr(robot, "_inner", None),
+            getattr(robot, "_impl", None),
+        ):
+            if candidate is not None and all(candidate is not existing for existing in targets):
+                targets.append(candidate)
+        return targets
+
+    def _set_robot_torque_enabled_locked(self, robot: RuntimeRobot, enabled: bool, *, required: bool) -> bool:
+        method_names = ("enable_torque",) if enabled else ("disable_torque",)
+        for target in self._robot_torque_targets(robot):
+            for method_name in method_names:
+                method = getattr(target, method_name, None)
+                if callable(method):
+                    method()
+                    return True
+        if required:
+            action = "enable" if enabled else "disable"
+            raise MomoRobotError(
+                "TORQUE_CONTROL_UNAVAILABLE",
+                f"Current SDK runtime does not expose torque {action}.",
+                500,
+            )
+        return False
+
+    def _prepare_motion_torque_locked(self, robot: RuntimeRobot) -> None:
+        if not self._free_move_torque_released:
+            return
+        try:
+            robot.stop()
+        except Exception:
+            pass
+        self._set_robot_torque_enabled_locked(robot, True, required=True)
+        self._free_move_torque_released = False
+
     def robot_state_payload(self) -> dict[str, Any]:
         with self._lock:
             state = self._read_robot_state_locked()
@@ -411,6 +455,7 @@ class MomoRobotService:
             self._stop_for_manual_motion_locked()
             self._update_motion(speed_percent=speed_percent, step_angle_deg=abs(delta_deg))
             robot = self._require_robot()
+            self._prepare_motion_torque_locked(robot)
             state = robot.get_state()
             q_target = np.asarray(state.joint_state.q, dtype=float).copy()
             joint_names = list(
@@ -449,26 +494,81 @@ class MomoRobotService:
                     f"joint_index out of range: {joint_index}",
                 )
             lo, hi = robot.robot_model.joint_limits[joint_index]
-            q_target[joint_index] = float(
+            q_target_rad = float(
                 np.clip(
                     q_target[joint_index] + math.radians(float(delta_deg)),
                     float(lo),
                     float(hi),
                 )
             )
-            robot.move_joints(
-                q_target,
-                speed_percent=speed_percent,
-                wait=True,
+            joint_name = (
+                str(joint_names[joint_index])
+                if joint_index < len(joint_names)
+                else f"joint_{joint_index}"
             )
+            try:
+                robot.move_joints(
+                    {joint_name: math.degrees(q_target_rad)},
+                    speed_percent=speed_percent,
+                    wait=True,
+                )
+            except MomoRobotError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise MomoRobotError("JOINT_STEP_FAILED", str(exc), 500) from exc
             return {
                 "joint_index": int(joint_index),
-                "joint_name": (
-                    str(joint_names[joint_index])
-                    if joint_index < len(joint_names)
-                    else f"joint_{joint_index}"
-                ),
+                "joint_name": joint_name,
                 "delta_deg": float(delta_deg),
+                "accepted": True,
+            }
+
+    def joints_target(
+        self,
+        *,
+        targets_deg: dict[str, float],
+        multi_turn_targets_continuous_raw: dict[str, float] | None,
+        duration: float,
+        speed_percent: int,
+    ) -> dict[str, Any]:
+        targets = {
+            str(joint_name): float(value)
+            for joint_name, value in dict(targets_deg or {}).items()
+        }
+        if not targets:
+            raise MomoRobotError("INVALID_ARGUMENT", "targets_deg is required", 400)
+        multi_turn_targets = {
+            str(joint_name): float(value)
+            for joint_name, value in dict(multi_turn_targets_continuous_raw or {}).items()
+            if str(joint_name) in targets
+        }
+        move_duration = float(np.clip(float(duration or 0.1), 0.03, 20.0))
+        with self._lock:
+            self._stop_for_manual_motion_locked()
+            self._update_motion(speed_percent=speed_percent)
+            robot = self._require_robot()
+            self._prepare_motion_torque_locked(robot)
+            move_kwargs: dict[str, Any] = {
+                "duration": move_duration,
+                "speed_percent": int(speed_percent),
+                "wait": True,
+                "timeout": max(2.0, move_duration + 2.0),
+            }
+            if multi_turn_targets:
+                move_kwargs["multi_turn_targets_continuous_raw"] = multi_turn_targets
+            try:
+                robot.move_joints(targets, **move_kwargs)
+            except TypeError:
+                move_kwargs.pop("multi_turn_targets_continuous_raw", None)
+                robot.move_joints(targets, **move_kwargs)
+            except MomoRobotError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise MomoRobotError("JOINT_TARGET_FAILED", str(exc), 500) from exc
+            return {
+                "targets_deg": targets,
+                "multi_turn_targets_continuous_raw": multi_turn_targets,
+                "duration": move_duration,
                 "accepted": True,
             }
 
@@ -492,6 +592,7 @@ class MomoRobotService:
                 step_angle_deg=step_angle_deg,
             )
             robot = self._require_robot()
+            self._prepare_motion_torque_locked(robot)
             axis_norm = str(axis or "").strip().upper()
             trans_step_m = float(step_dist_mm) / 1000.0
             rot_step_rad = math.radians(float(step_angle_deg))
@@ -565,6 +666,7 @@ class MomoRobotService:
             self._stop_for_manual_motion_locked()
             self._update_motion(speed_percent=speed_percent)
             robot = self._require_robot()
+            self._prepare_motion_torque_locked(robot)
             robot.home(speed_percent=speed_percent, wait=True)
             return {
                 "source": str(source or "home"),
@@ -575,6 +677,7 @@ class MomoRobotService:
         with self._lock:
             self._stop_for_manual_motion_locked()
             robot = self._require_robot()
+            self._prepare_motion_torque_locked(robot)
             x = float(payload.get("x", 0.0) or 0.0)
             y = float(payload.get("y", 0.0) or 0.0)
             z = float(payload.get("z", 0.0) or 0.0)
@@ -655,6 +758,7 @@ class MomoRobotService:
         with self._lock:
             self._stop_for_manual_motion_locked()
             robot = self._require_robot()
+            self._prepare_motion_torque_locked(robot)
             ratio = float(np.clip(float(payload.get("open_ratio", 1.0) or 1.0), 0.0, 1.0))
             wait = bool(payload.get("wait", True))
             robot.set_gripper(open_ratio=ratio, wait=wait)
@@ -672,6 +776,7 @@ class MomoRobotService:
         with self._lock:
             self._stop_for_manual_motion_locked()
             robot = self._require_robot()
+            self._prepare_motion_torque_locked(robot)
             joint_name = str(payload.get("joint_name", "") or "").strip()
             if not joint_name:
                 raise MomoRobotError("INVALID_ARGUMENT", "joint_name is required", 400)
@@ -806,6 +911,18 @@ class MomoRobotService:
                 robot.stop()
             return {"stopped": True}
 
+    def free_move(self) -> dict[str, Any]:
+        with self._lock:
+            self._stop_for_manual_motion_locked()
+            robot = self._require_robot()
+            try:
+                robot.stop()
+            except Exception:
+                pass
+            self._set_robot_torque_enabled_locked(robot, False, required=True)
+            self._free_move_torque_released = True
+            return {"torque_released": True}
+
     def follow_status(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -858,6 +975,7 @@ class MomoRobotService:
     ) -> dict[str, Any]:
         with self._lock:
             robot = self._require_robot()
+            self._prepare_motion_torque_locked(robot)
             self._deactivate_control_locked()
             default_latest_url = str(build_default_attention_payload()["latest_url"])
             idle_scan_move_min = float(
@@ -1025,6 +1143,7 @@ class MomoRobotService:
     ) -> dict[str, Any]:
         with self._lock:
             robot = self._require_robot()
+            self._prepare_motion_torque_locked(robot)
             self._deactivate_control_locked()
             move_min = float(max(0.2, min(move_duration_min_sec, move_duration_max_sec)))
             move_max = float(max(move_min, move_duration_max_sec))
@@ -1090,6 +1209,7 @@ class MomoRobotService:
     ) -> dict[str, Any]:
         with self._lock:
             robot = self._require_robot()
+            self._prepare_motion_torque_locked(robot)
             self._deactivate_control_locked()
             worker = HaiGuiTangWorker(
                 robot=robot,
