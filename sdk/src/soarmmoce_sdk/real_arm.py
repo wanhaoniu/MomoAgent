@@ -275,6 +275,7 @@ class GripperSpec:
     homing_offset: int
     range_min: int
     range_max: int
+    zero_raw: int | None = None
 
 
 class JointPositionPolicy:
@@ -638,6 +639,7 @@ class SoArmMoceController:
             homing_offset=int(entry["homing_offset"]),
             range_min=int(entry["range_min"]),
             range_max=int(entry["range_max"]),
+            zero_raw=int(entry["zero_present_raw"]) if "zero_present_raw" in entry else None,
         )
 
     def _probe_gripper_presence(self) -> bool:
@@ -1052,10 +1054,14 @@ class SoArmMoceController:
 
     def _gripper_register_raw_to_adjusted_raw(self, register_raw: int | float) -> int:
         spec = self._require_gripper_spec()
+        if spec.zero_raw is not None:
+            return _wrap_single_turn_raw(register_raw)
         return _wrap_single_turn_raw(int(round(float(register_raw))) + int(spec.homing_offset))
 
     def _gripper_adjusted_raw_to_register_raw(self, adjusted_raw: int | float) -> int:
         spec = self._require_gripper_spec()
+        if spec.zero_raw is not None:
+            return _wrap_single_turn_raw(adjusted_raw)
         return _wrap_single_turn_raw(int(round(float(adjusted_raw))) - int(spec.homing_offset))
 
     def _gripper_adjusted_raw_to_open_ratio(self, adjusted_raw: int | float) -> float:
@@ -1093,6 +1099,7 @@ class SoArmMoceController:
                 "range_min": int(self._gripper_spec.range_min),
                 "range_max": int(self._gripper_spec.range_max),
                 "homing_offset": int(self._gripper_spec.homing_offset),
+                "zero_present_raw": self._gripper_spec.zero_raw,
             }
         )
 

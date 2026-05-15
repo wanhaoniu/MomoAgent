@@ -1,0 +1,17 @@
+[plugin]
+name = "momoagent"
+version = "0.1.0"
+description = "Direct MomoAgent robotic arm control plugin for PhyAgentOS"
+
+[driver]
+name = "momoagent"
+module = "phyagentos_momo_plugin.driver"
+class = "MomoAgentDriver"
+profile_path = "phyagentos_momo_plugin/profiles/momoagent.md"
+
+[python]
+sys_paths = ["."]
+
+[[requirements]]
+path = "runtime/requirements.txt"
+optional = false

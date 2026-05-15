@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import base64
+import importlib.util
 import json
 import urllib.error
 import urllib.request
@@ -170,6 +171,8 @@ class ArmControlGUI(QMainWindow):
     sdk_command_failed = pyqtSignal(str, str)
     sdk_sync_state_ready = pyqtSignal(object)
     sdk_connection_finished = pyqtSignal(bool, str)
+    sequence_worker_progress = pyqtSignal(object)
+    sequence_worker_finished = pyqtSignal(str, object, str)
 
     PAGE_QUICK_MOVE = 0
     PAGE_SETTINGS = 1
@@ -248,11 +251,11 @@ class ArmControlGUI(QMainWindow):
         self._sdk_gui_sync_enabled = str(os.getenv("SOARMMOCE_GUI_SYNC", "1")).strip().lower() not in ("0", "false", "off", "no")
         try:
             self._sdk_gui_sync_interval_sec = max(
-                0.02,
-                float(str(os.getenv("SOARMMOCE_GUI_SYNC_INTERVAL", "0.04")).strip()),
+                0.01,
+                float(str(os.getenv("SOARMMOCE_GUI_SYNC_INTERVAL", "0.02")).strip()),
             )
         except Exception:
-            self._sdk_gui_sync_interval_sec = 0.04
+            self._sdk_gui_sync_interval_sec = 0.02
         self._sdk_last_gui_sync_ts = 0.0
         self._sdk_last_gui_sync_err_ts = 0.0
         self._sdk_gui_sync_failure_count = 0
@@ -292,7 +295,9 @@ class ArmControlGUI(QMainWindow):
         self._sequence_samples: List[Dict[str, Any]] = []
         self._sequence_record_started_at = 0.0
         self._sequence_record_started_monotonic = 0.0
+        self._sequence_record_cancel = threading.Event()
         self._sequence_replay_cancel = threading.Event()
+        self._sequence_worker_thread: Optional[threading.Thread] = None
         self._sequence_record_timer = QTimer(self)
         self._sequence_record_timer.setSingleShot(False)
         self._sequence_record_timer.timeout.connect(self._on_sequence_record_tick)
@@ -313,6 +318,8 @@ class ArmControlGUI(QMainWindow):
         self.sdk_command_failed.connect(self._on_sdk_command_failed)
         self.sdk_sync_state_ready.connect(self._on_sdk_sync_state_ready)
         self.sdk_connection_finished.connect(self._on_sdk_connection_finished)
+        self.sequence_worker_progress.connect(self._on_sequence_worker_progress)
+        self.sequence_worker_finished.connect(self._on_sequence_worker_finished)
         self._start_sdk_command_worker()
         self._start_sdk_sync_worker()
 
@@ -1509,13 +1516,15 @@ class ArmControlGUI(QMainWindow):
         multi_turn_targets_continuous_raw: Optional[Dict[str, float]] = None,
         duration: float,
         speed_percent: int,
+        wait: bool = True,
     ) -> object:
         move_kwargs: Dict[str, Any] = {
             "duration": float(duration),
             "speed_percent": int(speed_percent),
-            "wait": True,
-            "timeout": max(2.0, float(duration) + 2.0),
+            "wait": bool(wait),
         }
+        if wait:
+            move_kwargs["timeout"] = max(2.0, float(duration) + 2.0)
         multi_turn_targets = {
             str(name): float(value)
             for name, value in dict(multi_turn_targets_continuous_raw or {}).items()
@@ -1539,22 +1548,36 @@ class ArmControlGUI(QMainWindow):
         with self._sdk_lock:
             robot = self._sdk_get_robot()
             self._prepare_sdk_motion_torque(robot)
+            durations = [
+                self._sequence_replay_sample_duration(samples, index, speed)
+                for index in range(len(samples))
+            ]
+            next_deadline = time.monotonic()
             for index, sample in enumerate(samples):
                 if self._sequence_replay_cancel.is_set():
                     break
                 targets_deg, multi_turn_targets = self._sequence_targets_from_sample(sample)
-                if not targets_deg:
-                    continue
-                duration = self._sequence_replay_sample_duration(samples, index, speed)
-                self._call_robot_move_joints(
-                    robot,
-                    targets_deg,
-                    multi_turn_targets_continuous_raw=multi_turn_targets,
-                    duration=duration,
-                    speed_percent=speed_percent,
-                )
-                final_state = robot.get_state()
-                self.sdk_sync_state_ready.emit(final_state)
+                raw_targets = self._sequence_raw_targets_from_sample(sample)
+                used_raw = self._write_sequence_raw_targets(robot, raw_targets)
+                if not used_raw and targets_deg:
+                    self._call_robot_move_joints(
+                        robot,
+                        targets_deg,
+                        multi_turn_targets_continuous_raw=multi_turn_targets,
+                        duration=float(durations[index]),
+                        speed_percent=speed_percent,
+                        wait=False,
+                    )
+                self._write_sequence_gripper(robot, sample)
+                if index == 0 or index == len(samples) - 1 or index % 10 == 0:
+                    final_state = robot.get_state()
+                    self.sdk_sync_state_ready.emit(final_state)
+                next_deadline += float(durations[index])
+                sleep_for = next_deadline - time.monotonic()
+                if sleep_for > 0.0:
+                    time.sleep(sleep_for)
+                elif -sleep_for > max(0.02, float(durations[index]) * 2.0):
+                    next_deadline = time.monotonic()
 
             return final_state if final_state is not None else robot.get_state()
 
@@ -2211,6 +2234,31 @@ class ArmControlGUI(QMainWindow):
     def _script_python(self) -> str:
         return shlex.quote(sys.executable or "python3")
 
+    def _load_sdk_script_module(self, filename: str, module_name: str) -> object:
+        script_dir = REPO_ROOT / "sdk" / "scripts"
+        path = script_dir / filename
+        if not path.exists():
+            raise FileNotFoundError(f"script does not exist: {path}")
+        script_dir_text = str(script_dir)
+        if script_dir_text not in sys.path:
+            sys.path.insert(0, script_dir_text)
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"could not load script module: {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _record_motion_module(self) -> object:
+        return self._load_sdk_script_module("3_record_motion_sequence.py", "momo_record_motion_sequence")
+
+    def _replay_motion_module(self) -> object:
+        return self._load_sdk_script_module("3_replay_motion_sequence.py", "momo_replay_motion_sequence")
+
+    def _sequence_worker_alive(self) -> bool:
+        worker = self._sequence_worker_thread
+        return bool(worker is not None and worker.is_alive())
+
     def _sequence_relpath(self, path: Path = SEQUENCE_SAVE_PATH) -> str:
         try:
             return str(Path(path).resolve().relative_to(REPO_ROOT))
@@ -2259,6 +2307,35 @@ class ArmControlGUI(QMainWindow):
             if isinstance(value, (int, float)):
                 out[str(name)] = float(value)
         return out
+
+    def _raw_present_from_state(self, state: object) -> Dict[str, int]:
+        raw = self._state_value(state, "raw_present_position")
+        if not isinstance(raw, dict):
+            return {}
+        out: Dict[str, int] = {}
+        for name, value in raw.items():
+            if isinstance(value, (int, float)):
+                out[str(name)] = int(value)
+        return out
+
+    def _gripper_state_from_state(self, state: object) -> Dict[str, Any]:
+        for key in ("gripper_state", "gripper"):
+            gripper = self._state_value(state, key)
+            if isinstance(gripper, dict):
+                return {
+                    str(field): value
+                    for field, value in gripper.items()
+                    if isinstance(value, (str, int, float, bool)) or value is None
+                }
+        return {}
+
+    @staticmethod
+    def _gripper_raw_from_payload(gripper: Dict[str, Any]) -> Optional[int]:
+        for key in ("present_raw", "present_register_raw", "goal_raw"):
+            value = gripper.get(key)
+            if isinstance(value, (int, float)):
+                return int(value)
+        return None
 
     def _current_sequence_sample(self) -> Optional[Dict[str, Any]]:
         now_wall = time.time()
@@ -2312,11 +2389,24 @@ class ArmControlGUI(QMainWindow):
             sample["relative_raw_position"] = relative_raw
             sample["multi_turn_targets_continuous_raw"] = dict(relative_raw)
 
-        gripper = self._state_value(state, "gripper_state")
-        if isinstance(gripper, dict):
-            sample["gripper_state"] = {
-                key: value for key, value in gripper.items() if isinstance(value, (str, int, float, bool)) or value is None
-            }
+        raw_present = self._raw_present_from_state(state)
+        if raw_present:
+            sample["raw_present_position"] = raw_present
+
+        gripper = self._gripper_state_from_state(state)
+        if gripper:
+            sample["gripper_state"] = dict(gripper)
+            gripper_raw = self._gripper_raw_from_payload(gripper)
+            if gripper_raw is not None:
+                sample.setdefault("raw_present_position", {})["gripper"] = int(gripper_raw)
+
+        actuator_names = list(names)
+        if gripper and (bool(gripper.get("available", False)) or self._gripper_raw_from_payload(gripper) is not None):
+            actuator_names.append("gripper")
+        sample["actuator_state"] = {
+            "names": actuator_names,
+            "count": len(actuator_names),
+        }
 
         return sample
 
@@ -2329,6 +2419,19 @@ class ArmControlGUI(QMainWindow):
             f"file: {self._sequence_relpath()}",
         ]
         if self._sequence_samples:
+            actuator_state = self._sequence_samples[-1].get("actuator_state")
+            if isinstance(actuator_state, dict):
+                count = actuator_state.get("count")
+                if isinstance(count, (int, float)):
+                    items.append(f"actuators: {int(count)}")
+            gripper = self._sequence_samples[-1].get("gripper_state")
+            if isinstance(gripper, dict) and bool(gripper.get("available", False)):
+                raw_value = self._gripper_raw_from_payload(gripper)
+                ratio = gripper.get("open_ratio")
+                if raw_value is not None:
+                    items.append(f"gripper raw: {int(raw_value)}")
+                elif isinstance(ratio, (int, float)):
+                    items.append(f"gripper: {float(ratio):.2f}")
             tcp = self._sequence_samples[-1].get("tcp_pose")
             if isinstance(tcp, dict):
                 xyz = tcp.get("xyz")
@@ -2339,6 +2442,111 @@ class ArmControlGUI(QMainWindow):
     def _update_sequence_panel(self):
         if hasattr(self.quick_page, "set_sequence_items"):
             self.quick_page.set_sequence_items(self._sequence_status_items())
+
+    def _sequence_progress_items_from_payload(self, payload: Dict[str, Any]) -> List[str]:
+        items: List[str] = []
+        sample_count = payload.get("sample_count")
+        played_count = payload.get("played_count")
+        stream_tick_count = payload.get("stream_tick_count")
+        duration = payload.get("duration_sec", payload.get("source_time_sec"))
+        sample_rate = payload.get("sample_rate_hz")
+        stream_hz = payload.get("stream_hz")
+        path = payload.get("save_path") or payload.get("replay_path") or str(SEQUENCE_SAVE_PATH)
+        if isinstance(sample_count, (int, float)):
+            items.append(f"samples: {int(sample_count)}")
+        if isinstance(played_count, (int, float)):
+            items.append(f"played: {int(played_count)}")
+        if isinstance(stream_tick_count, (int, float)):
+            items.append(f"ticks: {int(stream_tick_count)}")
+        if isinstance(duration, (int, float)):
+            items.append(f"time: {float(duration):.2f}s")
+        if isinstance(sample_rate, (int, float)):
+            items.append(f"sample rate: {float(sample_rate):.1f} Hz")
+        if isinstance(stream_hz, (int, float)):
+            items.append(f"stream: {float(stream_hz):.1f} Hz")
+        items.append(f"file: {self._sequence_relpath(Path(str(path)))}")
+
+        sample = payload.get("sample")
+        if isinstance(sample, dict):
+            actuator_state = sample.get("actuator_state")
+            if isinstance(actuator_state, dict) and isinstance(actuator_state.get("count"), (int, float)):
+                items.append(f"actuators: {int(actuator_state['count'])}")
+            gripper = sample.get("gripper_state") if isinstance(sample.get("gripper_state"), dict) else sample.get("gripper")
+            if isinstance(gripper, dict):
+                raw_value = self._gripper_raw_from_payload(gripper)
+                ratio = gripper.get("open_ratio")
+                if raw_value is not None:
+                    items.append(f"gripper raw: {int(raw_value)}")
+                elif isinstance(ratio, (int, float)):
+                    items.append(f"gripper: {float(ratio):.2f}")
+        return items
+
+    def _on_sequence_worker_progress(self, payload: object):
+        if not isinstance(payload, dict):
+            return
+        mode = str(payload.get("mode", "") or "").strip()
+        if hasattr(self.quick_page, "set_sequence_items"):
+            self.quick_page.set_sequence_items(self._sequence_progress_items_from_payload(payload))
+        if mode == "record":
+            count = payload.get("sample_count", 0)
+            duration = payload.get("duration_sec", 0.0)
+            self.quick_page.set_sequence_status(f"Recording in GUI: {int(count)} samples, {float(duration):.2f}s")
+        elif mode == "replay":
+            ticks = payload.get("stream_tick_count", 0)
+            self.quick_page.set_sequence_status(f"Replaying in GUI: {int(ticks)} stream ticks")
+
+    def _on_sequence_worker_finished(self, mode: str, result: object, error: str):
+        mode_norm = str(mode or "").strip().lower()
+        message = str(error or "").strip()
+        self._sequence_worker_thread = None
+        if mode_norm == "record":
+            self._sequence_record_cancel.clear()
+            self._set_sequence_recording(False)
+            if message:
+                self.quick_page.set_sequence_status(f"Record failed: {message}")
+                self.statusBar().showMessage("Sequence record failed")
+                self.log(f"[Sequence] record failed: {message}", "warning")
+                return
+            payload = result if isinstance(result, dict) else {}
+            saved_path = Path(str(payload.get("saved_path") or SEQUENCE_SAVE_PATH))
+            count = int(payload.get("sample_count", 0) or 0)
+            duration = float(payload.get("duration_sec", 0.0) or 0.0)
+            self.quick_page.set_sequence_status(
+                f"Saved {count} samples ({duration:.2f}s) to {self._sequence_relpath(saved_path)}"
+            )
+            self.quick_page.set_sequence_items(
+                self._sequence_progress_items_from_payload(
+                    {
+                        "sample_count": count,
+                        "duration_sec": duration,
+                        "sample_rate_hz": payload.get("sample_rate_hz"),
+                        "save_path": str(saved_path),
+                    }
+                )
+            )
+            self.statusBar().showMessage("Sequence recorded")
+            self.log(f"[Sequence] saved {count} samples: {saved_path}", "success")
+            return
+
+        if mode_norm == "replay":
+            self._sequence_replay_cancel.clear()
+            self._set_sequence_replaying(False)
+            if message:
+                self.quick_page.set_sequence_status(f"Replay failed: {message}")
+                self.statusBar().showMessage("Sequence replay failed")
+                self.log(f"[Sequence] replay failed: {message}", "warning")
+                return
+            payload = result if isinstance(result, dict) else {}
+            cancelled = bool(payload.get("cancelled", False))
+            ticks = int(payload.get("stream_tick_count", 0) or 0)
+            self.quick_page.set_sequence_status(
+                f"Replay {'cancelled' if cancelled else 'complete'}: {ticks} stream ticks"
+            )
+            self.statusBar().showMessage("Sequence replay cancelled" if cancelled else "Sequence replay complete")
+            self.log(
+                f"[Sequence] replay {'cancelled' if cancelled else 'complete'}: {ticks} stream ticks",
+                "warning" if cancelled else "success",
+            )
 
     def _on_sequence_record_tick(self):
         if not self._sequence_recording:
@@ -2356,12 +2564,19 @@ class ArmControlGUI(QMainWindow):
     def _save_sequence_recording(self) -> Path:
         SEQUENCE_SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
         duration = float(self._sequence_samples[-1].get("t", 0.0)) if self._sequence_samples else 0.0
+        actuator_names: List[str] = []
+        if self._sequence_samples:
+            actuator_state = self._sequence_samples[-1].get("actuator_state")
+            if isinstance(actuator_state, dict):
+                actuator_names = [str(name) for name in list(actuator_state.get("names") or [])]
         payload = {
             "format": "momo_hmi_joint_trajectory_v1",
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "sample_count": len(self._sequence_samples),
             "duration_sec": duration,
             "sample_rate_hz": float(self.quick_page.sequence_sample_rate_hz()),
+            "actuator_count": len(actuator_names),
+            "actuator_order": actuator_names,
             "samples": self._sequence_samples,
         }
         SEQUENCE_SAVE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -2384,26 +2599,223 @@ class ArmControlGUI(QMainWindow):
         self.statusBar().showMessage("Sequence recorded")
         self.log(f"[Sequence] saved {len(self._sequence_samples)} continuous samples: {path}", "success")
 
+    def _run_record_motion_sequence_worker(self, sample_rate: float):
+        try:
+            module = self._record_motion_module()
+
+            def progress(payload: Dict[str, object]):
+                event_payload = dict(payload or {})
+                event_payload["mode"] = "record"
+                self.sequence_worker_progress.emit(event_payload)
+
+            if self._use_momo_service_backend():
+                interval = 1.0 / max(1.0, float(sample_rate))
+
+                def before_record():
+                    return self._service_request_json(
+                        method="POST",
+                        path="/api/v1/motion/free-move",
+                        payload={},
+                        timeout_sec=max(2.0, self._momo_service_timeout_sec),
+                    )
+
+                def state_provider():
+                    return self._service_get_robot_state(timeout_sec=max(2.0, interval * 8.0))
+
+                def lock_on_exit():
+                    return self._service_request_json(
+                        method="POST",
+                        path="/api/v1/motion/stop",
+                        payload={},
+                        timeout_sec=max(2.0, self._momo_service_timeout_sec),
+                    )
+
+                result = module.record_motion_sequence(
+                    save_path=SEQUENCE_SAVE_PATH,
+                    timestamped=False,
+                    sample_rate_hz=float(sample_rate),
+                    duration_sec=0.0,
+                    max_samples=0,
+                    disable_torque=True,
+                    lock_on_exit=True,
+                    release_torque_on_exit=False,
+                    config_path=None,
+                    state_provider=state_provider,
+                    before_record_callback=before_record,
+                    lock_on_exit_callback=lock_on_exit,
+                    stop_event=self._sequence_record_cancel,
+                    progress_callback=progress,
+                    interactive=False,
+                    close_controller=False,
+                )
+            else:
+                with self._sdk_lock:
+                    robot = self._sdk_get_robot()
+                    controller = getattr(robot, "_controller", robot)
+                    result = module.record_motion_sequence(
+                        save_path=SEQUENCE_SAVE_PATH,
+                        timestamped=False,
+                        sample_rate_hz=float(sample_rate),
+                        duration_sec=0.0,
+                        max_samples=0,
+                        disable_torque=True,
+                        lock_on_exit=True,
+                        release_torque_on_exit=False,
+                        config_path=None,
+                        controller=controller,
+                        stop_event=self._sequence_record_cancel,
+                        progress_callback=progress,
+                        interactive=False,
+                        close_controller=False,
+                    )
+                    try:
+                        self.sdk_sync_state_ready.emit(robot.get_state())
+                    except Exception:
+                        pass
+            self.sequence_worker_finished.emit("record", result, "")
+        except Exception as exc:
+            self.sequence_worker_finished.emit("record", {}, str(exc))
+
+    def _service_sequence_command_sink(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        raw_targets = {
+            str(name): int(value)
+            for name, value in dict(payload.get("raw_targets") or {}).items()
+            if isinstance(value, (int, float))
+        }
+        body: Dict[str, Any] = {
+            "targets_deg": dict(payload.get("targets_deg") or {}),
+            "multi_turn_targets_continuous_raw": dict(payload.get("multi_turn_targets") or {}),
+            "raw_goal_positions": raw_targets,
+            # Keep this compatible with an already-running older momo_robot_service
+            # whose JointTargetRequest still validates duration >= 0.03.
+            "duration": max(0.03, float(payload.get("duration_sec", 0.02) or 0.0)),
+            "speed_percent": int(payload.get("speed_percent", self.speed_percent) or self.speed_percent),
+            "wait": False,
+        }
+        gripper_raw = payload.get("gripper_raw")
+        gripper_ratio = payload.get("gripper_ratio")
+        if isinstance(gripper_raw, (int, float)):
+            body["gripper_raw"] = int(gripper_raw)
+        elif isinstance(gripper_ratio, (int, float)):
+            body["gripper_open_ratio"] = float(np.clip(float(gripper_ratio), 0.0, 1.0))
+        return self._service_request_json(
+            method="POST",
+            path="/api/v1/motion/joints-target",
+            payload=body,
+            timeout_sec=max(2.0, self._momo_service_timeout_sec),
+        )
+
+    def _run_replay_motion_sequence_worker(self, path: Path, speed: float, stream_hz: float):
+        try:
+            module = self._replay_motion_module()
+
+            def progress(payload: Dict[str, object]):
+                event_payload = dict(payload or {})
+                event_payload["mode"] = "replay"
+                event_payload["replay_path"] = str(path)
+                self.sequence_worker_progress.emit(event_payload)
+
+            if self._use_momo_service_backend():
+                result = module.replay_motion_sequence(
+                    replay_path=path,
+                    speed=float(speed),
+                    speed_percent=int(self.speed_percent),
+                    replay_mode="stream",
+                    stream_hz=float(stream_hz),
+                    initial_duration_sec=None,
+                    min_step_duration_sec=0.0,
+                    max_step_duration_sec=2.0,
+                    wait_timeout_margin_sec=2.0,
+                    replay_gripper=True,
+                    final_settle=False,
+                    dry_run=False,
+                    release_torque_on_exit=False,
+                    config_path=None,
+                    command_sink=self._service_sequence_command_sink,
+                    stop_event=self._sequence_replay_cancel,
+                    progress_callback=progress,
+                )
+                try:
+                    if self._sequence_replay_cancel.is_set():
+                        self._service_request_json(
+                            method="POST",
+                            path="/api/v1/motion/stop",
+                            payload={},
+                            timeout_sec=max(2.0, self._momo_service_timeout_sec),
+                        )
+                    final_state = self._service_get_robot_state(timeout_sec=max(2.0, self._momo_service_timeout_sec))
+                    self.sdk_sync_state_ready.emit(final_state)
+                except Exception:
+                    pass
+            else:
+                with self._sdk_lock:
+                    robot = self._sdk_get_robot()
+                    controller = getattr(robot, "_controller", robot)
+                    result = module.replay_motion_sequence(
+                        replay_path=path,
+                        speed=float(speed),
+                        speed_percent=int(self.speed_percent),
+                        replay_mode="stream",
+                        stream_hz=float(stream_hz),
+                        initial_duration_sec=None,
+                        min_step_duration_sec=0.0,
+                        max_step_duration_sec=2.0,
+                        wait_timeout_margin_sec=2.0,
+                        replay_gripper=True,
+                        final_settle=True,
+                        dry_run=False,
+                        release_torque_on_exit=False,
+                        config_path=None,
+                        controller=controller,
+                        stop_event=self._sequence_replay_cancel,
+                        progress_callback=progress,
+                        close_controller=False,
+                    )
+                    try:
+                        if self._sequence_replay_cancel.is_set():
+                            robot.stop()
+                        self.sdk_sync_state_ready.emit(robot.get_state())
+                    except Exception:
+                        pass
+            self.sequence_worker_finished.emit("replay", result, "")
+        except Exception as exc:
+            self.sequence_worker_finished.emit("replay", {}, str(exc))
+
     def _on_launch_record_sequence(self):
         if self._sequence_recording:
-            self._finish_sequence_recording()
+            self._sequence_record_cancel.set()
+            self.quick_page.set_sequence_status("Stopping recording and locking current pose...")
             return
         if self._sequence_replaying:
             self.log("[Sequence] replay is running; stop it before recording", "warning")
             return
+        if self._sequence_worker_alive():
+            self.log("[Sequence] another sequence worker is still running", "warning")
+            return
+        if not (self.connected or self._sdk_runtime_mode == "simulation"):
+            self.quick_page.set_sequence_status("Connect the robot before recording")
+            self.log("[Sequence] connect the robot before recording", "warning")
+            return
         sample_rate = float(self.quick_page.sequence_sample_rate_hz())
-        interval_ms = int(max(20, round(1000.0 / max(1.0, sample_rate))))
         self._sequence_samples = []
-        self._sequence_record_started_at = time.time()
-        self._sequence_record_started_monotonic = time.monotonic()
-        self._sequence_record_timer.setInterval(interval_ms)
+        self._sequence_record_cancel.clear()
         self._set_sequence_recording(True)
-        self.quick_page.set_sequence_status(f"Recording continuous trajectory -> {self._sequence_relpath()}")
-        self.quick_page.set_sequence_items(["samples: 0", f"sample rate: {sample_rate:.1f} Hz"])
-        self._on_sequence_record_tick()
-        self._sequence_record_timer.start()
+        self.quick_page.set_sequence_status(f"Recording in GUI -> {self._sequence_relpath(SEQUENCE_SAVE_PATH)}")
+        self.quick_page.set_sequence_items(
+            [
+                f"sample rate: {sample_rate:.1f} Hz",
+                f"file: {self._sequence_relpath(SEQUENCE_SAVE_PATH)}",
+                "stop: press Stop in GUI",
+            ]
+        )
         self.statusBar().showMessage("Sequence recording")
-        self.log(f"[Sequence] continuous recording started at {sample_rate:.1f} Hz", "info")
+        self._sequence_worker_thread = threading.Thread(
+            target=self._run_record_motion_sequence_worker,
+            args=(sample_rate,),
+            daemon=True,
+        )
+        self._sequence_worker_thread.start()
+        self.log(f"[Sequence] function-call recording started at {sample_rate:.1f} Hz", "info")
 
     def _coerce_sequence_samples(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         samples = payload.get("samples")
@@ -2420,17 +2832,26 @@ class ArmControlGUI(QMainWindow):
             targets = pose.get("replay_joint_targets_deg", pose.get("joint_targets_deg"))
             if not isinstance(targets, dict):
                 continue
-            converted.append(
-                {
-                    "index": index,
-                    "t": float(index - 1),
-                    "joint_targets_deg": {str(name): float(value) for name, value in targets.items()},
-                    "multi_turn_targets_continuous_raw": dict(pose.get("replay_multi_turn_continuous_raw", {}))
-                    if isinstance(pose.get("replay_multi_turn_continuous_raw"), dict)
-                    else {},
-                    "tcp_pose": pose.get("tcp_pose") if isinstance(pose.get("tcp_pose"), dict) else {},
+            sample = {
+                "index": index,
+                "t": float(index - 1),
+                "joint_targets_deg": {str(name): float(value) for name, value in targets.items()},
+                "multi_turn_targets_continuous_raw": dict(pose.get("replay_multi_turn_continuous_raw", {}))
+                if isinstance(pose.get("replay_multi_turn_continuous_raw"), dict)
+                else {},
+                "tcp_pose": pose.get("tcp_pose") if isinstance(pose.get("tcp_pose"), dict) else {},
+            }
+            gripper = pose.get("gripper")
+            if isinstance(gripper, dict):
+                sample["gripper_state"] = {
+                    str(key): value
+                    for key, value in gripper.items()
+                    if isinstance(value, (str, int, float, bool)) or value is None
                 }
-            )
+                gripper_raw = self._gripper_raw_from_payload(sample["gripper_state"])
+                if gripper_raw is not None:
+                    sample["raw_present_position"] = {"gripper": int(gripper_raw)}
+            converted.append(sample)
         return converted
 
     def _load_sequence_samples(self, path: Path = SEQUENCE_SAVE_PATH) -> Tuple[Path, List[Dict[str, Any]]]:
@@ -2449,7 +2870,11 @@ class ArmControlGUI(QMainWindow):
             return {}, {}
         targets = sample.get("joint_targets_deg")
         if isinstance(targets, dict) and targets:
-            targets_deg = {str(name): float(value) for name, value in targets.items()}
+            targets_deg = {
+                str(name): float(value)
+                for name, value in targets.items()
+                if str(name) != "gripper"
+            }
         else:
             joint_state = sample.get("joint_state")
             names = []
@@ -2463,6 +2888,7 @@ class ArmControlGUI(QMainWindow):
             targets_deg = {
                 str(names[idx]): float(math.degrees(float(values_rad[idx])))
                 for idx in range(n)
+                if str(names[idx]) != "gripper"
             }
 
         multi_raw = sample.get("multi_turn_targets_continuous_raw", sample.get("relative_raw_position", {}))
@@ -2488,20 +2914,105 @@ class ArmControlGUI(QMainWindow):
         speed = max(0.1, float(speed))
         if int(index) <= 0:
             if len(samples) > 1:
-                next_dt = max(0.05, self._sample_time(samples[1]) - self._sample_time(samples[0]))
+                next_dt = max(0.01, self._sample_time(samples[1]) - self._sample_time(samples[0]))
             else:
                 next_dt = 0.2
-            return float(np.clip(max(1.0, next_dt * 4.0) / speed, 0.2, 5.0))
+            return float(np.clip(max(0.5, next_dt * 3.0) / speed, 0.2, 5.0))
         dt = self._sample_time(samples[index]) - self._sample_time(samples[index - 1])
         if dt <= 1e-4:
-            dt = 0.1
-        return float(np.clip(dt / speed, 0.03, 2.0))
+            dt = 1.0 / 50.0
+        return float(np.clip(dt / speed, 0.01, 2.0))
+
+    def _sequence_estimated_duration(self, samples: List[Dict[str, Any]], speed: float) -> float:
+        return float(
+            sum(self._sequence_replay_sample_duration(samples, index, speed) for index in range(len(samples)))
+        )
+
+    @staticmethod
+    def _sequence_raw_targets_from_sample(sample: object) -> Dict[str, int]:
+        if not isinstance(sample, dict):
+            return {}
+        raw = sample.get("raw_present_position")
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(name): int(value)
+            for name, value in raw.items()
+            if str(name) != "gripper" and isinstance(value, (int, float))
+        }
+
+    @staticmethod
+    def _sequence_gripper_raw_from_sample(sample: object) -> Optional[int]:
+        if not isinstance(sample, dict):
+            return None
+        raw = sample.get("raw_present_position")
+        if isinstance(raw, dict) and isinstance(raw.get("gripper"), (int, float)):
+            return int(raw["gripper"])
+        for key in ("gripper_state", "gripper"):
+            gripper = sample.get(key)
+            if not isinstance(gripper, dict):
+                continue
+            for value_key in ("present_raw", "present_register_raw", "goal_raw"):
+                value = gripper.get(value_key)
+                if isinstance(value, (int, float)):
+                    return int(value)
+        return None
+
+    @staticmethod
+    def _sequence_gripper_ratio_from_sample(sample: object) -> Optional[float]:
+        if not isinstance(sample, dict):
+            return None
+        for key in ("gripper_state", "gripper"):
+            gripper = sample.get(key)
+            if not isinstance(gripper, dict):
+                continue
+            value = gripper.get("open_ratio")
+            if isinstance(value, (int, float)):
+                return float(np.clip(float(value), 0.0, 1.0))
+        return None
+
+    def _write_sequence_raw_targets(self, robot: SDKRobot, raw_targets: Dict[str, int]) -> bool:
+        if not raw_targets:
+            return False
+        writer = getattr(robot, "write_raw_positions", None)
+        if callable(writer):
+            return bool(writer(raw_targets))
+        controller = getattr(robot, "_controller", None)
+        if controller is not None:
+            bus = controller._ensure_bus()
+            controller._write_raw_goal_positions(bus, raw_targets)
+            return True
+        return False
+
+    def _write_sequence_gripper(self, robot: SDKRobot, sample: object) -> bool:
+        gripper_raw = self._sequence_gripper_raw_from_sample(sample)
+        if gripper_raw is not None:
+            writer = getattr(robot, "write_gripper_raw", None)
+            if callable(writer):
+                return bool(writer(int(gripper_raw)))
+            controller = getattr(robot, "_controller", None)
+            if controller is not None:
+                return bool(controller.write_gripper_raw(int(gripper_raw)))
+        ratio = self._sequence_gripper_ratio_from_sample(sample)
+        if ratio is None:
+            return False
+        robot.set_gripper(open_ratio=float(ratio), duration=0.0, wait=False)
+        return True
 
     def _on_launch_replay_sequence(self):
         if self._sequence_recording:
-            self._finish_sequence_recording()
+            self._sequence_record_cancel.set()
+            self.quick_page.set_sequence_status("Stopping recording before replay...")
+            return
         if self._sequence_replaying:
             self.log("[Sequence] replay is already running", "warning")
+            return
+        if self._sequence_worker_alive():
+            self.log("[Sequence] another sequence worker is still running", "warning")
+            return
+        if not (self.connected or self._sdk_runtime_mode == "simulation"):
+            self.quick_page.set_sequence_status("Connect the robot before replay")
+            self.log("[Sequence] connect the robot before replay", "warning")
             return
         try:
             path, samples = self._load_sequence_samples()
@@ -2511,33 +3022,40 @@ class ArmControlGUI(QMainWindow):
             return
 
         speed = float(self.quick_page.sequence_replay_speed())
+        stream_hz = float(self.quick_page.sequence_sample_rate_hz())
         self._sequence_replay_cancel.clear()
         self._set_sequence_replaying(True)
-        self.quick_page.set_sequence_status(f"Replaying {len(samples)} samples from {self._sequence_relpath(path)}")
+        self.quick_page.set_sequence_status(f"Replaying in GUI from {self._sequence_relpath(path)}")
         self.quick_page.set_sequence_items(
-            [f"samples: {len(samples)}", f"speed: {speed:.1f}x", f"file: {self._sequence_relpath(path)}"]
-        )
-        self._enqueue_sdk_command(
-            {
-                "kind": "sequence_replay",
-                "source": "sequence:replay",
-                "samples": samples,
-                "speed": speed,
-                "speed_percent": int(self.speed_percent),
-            },
-            drop_kinds=("sequence_replay", "joint_step", "cartesian_jog", "pose_move", "stop"),
+            [
+                f"samples: {len(samples)}",
+                f"speed: {speed:.1f}x",
+                f"stream: {stream_hz:.1f} Hz",
+                f"file: {self._sequence_relpath(path)}",
+            ]
         )
         self.statusBar().showMessage("Sequence replaying")
-        self.log(f"[Sequence] replay started: {len(samples)} samples at {speed:.1f}x", "info")
+        self._sequence_worker_thread = threading.Thread(
+            target=self._run_replay_motion_sequence_worker,
+            args=(path, speed, stream_hz),
+            daemon=True,
+        )
+        self._sequence_worker_thread.start()
+        self.log(
+            f"[Sequence] function-call replay started: {len(samples)} samples at {speed:.1f}x, {stream_hz:.1f} Hz",
+            "info",
+        )
 
     def _on_sequence_stop_clicked(self):
         if self._sequence_recording:
-            self._finish_sequence_recording()
+            self._sequence_record_cancel.set()
+            self.quick_page.set_sequence_status("Stopping recording and locking current pose...")
+            self.statusBar().showMessage("Stopping sequence recording")
             return
         if self._sequence_replaying:
             self._sequence_replay_cancel.set()
-            self._set_sequence_replaying(False)
             self.log("[Sequence] replay cancel requested", "warning")
+            self.quick_page.set_sequence_status("Stopping replay...")
         self._on_quick_stop()
 
     def _on_launch_calibration(self):
@@ -3014,8 +3532,6 @@ class ArmControlGUI(QMainWindow):
                 timeout_sec=max(timeout, duration + 8.0),
             )
             return self._service_get_robot_state(timeout_sec=max(2.0, timeout))
-        if kind == "sequence_replay":
-            return self._execute_service_sequence_replay(command)
         if kind == "home":
             self._service_request_json(
                 method="POST",
@@ -3044,37 +3560,6 @@ class ArmControlGUI(QMainWindow):
             )
             return self._service_get_robot_state(timeout_sec=max(2.0, timeout))
         raise ValueError(f"Unknown SDK command: {kind}")
-
-    def _execute_service_sequence_replay(self, command: Dict[str, Any]) -> object:
-        samples = list(command.get("samples") or [])
-        if not samples:
-            raise ValueError("No recorded samples to replay")
-        speed = max(0.1, float(command.get("speed", 1.0) or 1.0))
-        speed_percent = int(command.get("speed_percent", self.speed_percent))
-        final_state = None
-        for index, sample in enumerate(samples):
-            if self._sequence_replay_cancel.is_set():
-                break
-            targets_deg, multi_turn_targets = self._sequence_targets_from_sample(sample)
-            if not targets_deg:
-                continue
-            duration = self._sequence_replay_sample_duration(samples, index, speed)
-            self._service_request_json(
-                method="POST",
-                path="/api/v1/motion/joints-target",
-                payload={
-                    "targets_deg": targets_deg,
-                    "multi_turn_targets_continuous_raw": multi_turn_targets,
-                    "duration": duration,
-                    "speed_percent": speed_percent,
-                },
-                timeout_sec=max(float(self._momo_service_timeout_sec), duration + 4.0),
-            )
-            final_state = self._service_get_robot_state(timeout_sec=max(2.0, self._momo_service_timeout_sec))
-            self.sdk_sync_state_ready.emit(final_state)
-        if final_state is not None:
-            return final_state
-        return self._service_get_robot_state(timeout_sec=max(2.0, self._momo_service_timeout_sec))
 
     def _sdk_set_runtime_state(
         self,

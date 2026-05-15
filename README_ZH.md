@@ -172,4 +172,62 @@ conda activate momoagent
 python Software/Master/main.py
 ```
 在 Settings 页面填写 IP/端口后点击 **Connect**。
+
+### 6.5 连续轨迹录制与指定文件回放
+如果想像示教一样手动拖动机械臂并录制连续序列，可以使用 SDK 脚本。默认会把 JSON 保存到 `sdk/workspace/runtime/recorded_motion_sequence.json`，录制时会释放力矩，结束后重新锁住当前位置。
+
+```bash
+conda activate momoagent
+python sdk/scripts/3_record_motion_sequence.py --sample-rate-hz 10
+```
+
+运行后拖动机械臂，按 Enter 停止并保存。也可以录固定时长：
+
+```bash
+python sdk/scripts/3_record_motion_sequence.py --duration-sec 8 --sample-rate-hz 10
+```
+
+保存到指定文件：
+
+```bash
+python sdk/scripts/3_record_motion_sequence.py --save-path sdk/workspace/runtime/wave_demo.json --duration-sec 8
+```
+
+保存到指定目录时，脚本会自动生成带时间戳的 JSON 文件：
+
+```bash
+python sdk/scripts/3_record_motion_sequence.py --save-path sdk/workspace/runtime/recordings --duration-sec 8
+```
+
+回放默认文件：
+
+```bash
+python sdk/scripts/3_replay_motion_sequence.py
+```
+
+指定 JSON 文件回放：
+
+```bash
+python sdk/scripts/3_replay_motion_sequence.py sdk/workspace/runtime/wave_demo.json --speed 1.0
+```
+
+回放脚本默认使用 `stream` 模式，会对录制点做插值并连续下发目标。如果还觉得不够丝滑，可以提高下发频率，或录制时提高采样率：
+
+```bash
+python sdk/scripts/3_replay_motion_sequence.py sdk/workspace/runtime/wave_demo.json --stream-hz 50
+python sdk/scripts/3_record_motion_sequence.py --sample-rate-hz 20 --save-path sdk/workspace/runtime/wave_demo.json
+```
+
+如果需要对比旧的逐点等待方式：
+
+```bash
+python sdk/scripts/3_replay_motion_sequence.py sdk/workspace/runtime/wave_demo.json --replay-mode step
+```
+
+回放前可以先 dry-run 校验文件，不连接机械臂：
+
+```bash
+python sdk/scripts/3_replay_motion_sequence.py sdk/workspace/runtime/wave_demo.json --dry-run true
+```
+
 如有问题欢迎提交 issue。

@@ -428,8 +428,12 @@ def create_app() -> FastAPI:
             service.joints_target(
                 targets_deg=payload.targets_deg,
                 multi_turn_targets_continuous_raw=payload.multi_turn_targets_continuous_raw,
+                raw_goal_positions=payload.raw_goal_positions,
+                gripper_raw=payload.gripper_raw,
+                gripper_open_ratio=payload.gripper_open_ratio,
                 duration=payload.duration,
                 speed_percent=payload.speed_percent,
+                wait=payload.wait,
             )
         )
 

@@ -7,7 +7,7 @@ transport:
   gripper_available: true
   arm_p_coefficient: 16
   arm_d_coefficient: 8
-  update_hz: 25.0
+  update_hz: 50.0
 
 urdf:
   path: "pkg://soarmmoce_sdk/resources/urdf/soarmoce_urdf.urdf"
@@ -37,7 +37,7 @@ robot:
     wrist_flex: 0.0
 
 control:
-  hz: 25.0
+  hz: 50.0
   timeout: 2.0
   linear_step_m: 0.01
   joint_step_deg: 5.0

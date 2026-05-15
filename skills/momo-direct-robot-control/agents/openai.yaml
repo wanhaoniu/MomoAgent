@@ -1,0 +1,4 @@
+interface:
+  display_name: "Momo Direct Robot Control"
+  short_description: "Direct SDK control for the MomoAgent arm"
+  default_prompt: "Use $momo-direct-robot-control to connect an external agent directly to the MomoAgent SDK safely."

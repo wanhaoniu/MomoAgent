@@ -150,4 +150,62 @@ conda activate momoagent
 python Software/Master/main.py
 ```
 Then configure IP/ports in the Settings page and click **Connect**.
+
+### 6.5 Continuous Trajectory Recording and Replay
+Use the SDK scripts when you want to hand-guide the arm and record a continuous demonstration. By default, the recording is saved to `sdk/workspace/runtime/recorded_motion_sequence.json`. The recorder releases torque while recording and locks the current pose when it exits.
+
+```bash
+conda activate momoagent
+python sdk/scripts/3_record_motion_sequence.py --sample-rate-hz 10
+```
+
+Move the arm by hand, then press Enter to stop and save. You can also record for a fixed duration:
+
+```bash
+python sdk/scripts/3_record_motion_sequence.py --duration-sec 8 --sample-rate-hz 10
+```
+
+Save to a specific JSON file:
+
+```bash
+python sdk/scripts/3_record_motion_sequence.py --save-path sdk/workspace/runtime/wave_demo.json --duration-sec 8
+```
+
+If `--save-path` points to a directory, the script creates a timestamped JSON file there:
+
+```bash
+python sdk/scripts/3_record_motion_sequence.py --save-path sdk/workspace/runtime/recordings --duration-sec 8
+```
+
+Replay the default recording:
+
+```bash
+python sdk/scripts/3_replay_motion_sequence.py
+```
+
+Replay a specific JSON file:
+
+```bash
+python sdk/scripts/3_replay_motion_sequence.py sdk/workspace/runtime/wave_demo.json --speed 1.0
+```
+
+The replay script now defaults to `stream` mode, which interpolates between recorded points and continuously sends targets. If motion still looks choppy, raise the stream rate or record with a higher sample rate:
+
+```bash
+python sdk/scripts/3_replay_motion_sequence.py sdk/workspace/runtime/wave_demo.json --stream-hz 50
+python sdk/scripts/3_record_motion_sequence.py --sample-rate-hz 20 --save-path sdk/workspace/runtime/wave_demo.json
+```
+
+To compare against the old point-by-point waiting behavior:
+
+```bash
+python sdk/scripts/3_replay_motion_sequence.py sdk/workspace/runtime/wave_demo.json --replay-mode step
+```
+
+Validate a replay file without connecting to hardware:
+
+```bash
+python sdk/scripts/3_replay_motion_sequence.py sdk/workspace/runtime/wave_demo.json --dry-run true
+```
+
 If you run into issues, feel free to open an issue.

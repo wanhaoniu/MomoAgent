@@ -59,6 +59,24 @@ class CompatibleRuntimeRobot:
     def has_gripper(self) -> bool:
         return bool(self._controller.has_gripper())
 
+    def write_raw_positions(self, goal_raw_by_joint) -> bool:
+        bus = self._controller._ensure_bus()
+        payload = {
+            str(joint_name): int(value)
+            for joint_name, value in dict(goal_raw_by_joint or {}).items()
+            if str(joint_name) in JOINTS
+        }
+        if not payload:
+            return False
+        self._controller._write_raw_goal_positions(bus, payload)
+        return True
+
+    def write_gripper_raw(self, goal_raw: int | None) -> bool:
+        return bool(self._controller.write_gripper_raw(goal_raw))
+
+    def read_gripper_raw(self) -> int | None:
+        return self._controller.read_gripper_raw()
+
     def move_joints(
         self,
         targets_deg,

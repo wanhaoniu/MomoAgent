@@ -19,8 +19,12 @@ class JointStepRequest(BaseModel):
 class JointTargetRequest(BaseModel):
     targets_deg: dict[str, float] = Field(default_factory=dict)
     multi_turn_targets_continuous_raw: dict[str, float] = Field(default_factory=dict)
-    duration: float = Field(0.1, ge=0.03, le=20.0)
+    raw_goal_positions: dict[str, int] = Field(default_factory=dict)
+    gripper_raw: int | None = Field(default=None, ge=0, le=4095)
+    gripper_open_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    duration: float = Field(0.1, ge=0.0, le=20.0)
     speed_percent: int = Field(50, ge=1, le=100)
+    wait: bool = True
 
 
 class CartesianJogRequest(BaseModel):

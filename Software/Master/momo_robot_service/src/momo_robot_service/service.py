@@ -368,6 +368,8 @@ class MomoRobotService:
             values_rad: list[float] = []
             xyz_m: list[float] = []
             rpy_rad: list[float] = []
+            raw_present_position: dict[str, int] = {}
+            relative_raw_position: dict[str, float] = {}
             gripper = {
                 "available": False,
                 "open_ratio": None,
@@ -401,6 +403,35 @@ class MomoRobotService:
                         "available": bool(getattr(g, "available", False)),
                         "open_ratio": getattr(g, "open_ratio", None),
                         "moving": getattr(g, "moving", None),
+                    }
+                    for field_name in (
+                        "present_raw",
+                        "present_register_raw",
+                        "adjusted_raw",
+                        "goal_raw",
+                        "range_min",
+                        "range_max",
+                        "homing_offset",
+                        "zero_present_raw",
+                    ):
+                        value = getattr(g, field_name, None)
+                        if isinstance(value, (int, float, str, bool)) or value is None:
+                            gripper[field_name] = value
+                raw_map = getattr(state, "raw_present_position", None)
+                if isinstance(raw_map, dict):
+                    raw_present_position = {
+                        str(name): int(value)
+                        for name, value in raw_map.items()
+                        if isinstance(value, (int, float))
+                    }
+                if isinstance(gripper.get("present_raw"), (int, float)):
+                    raw_present_position["gripper"] = int(gripper["present_raw"])
+                relative_map = getattr(state, "relative_raw_position", None)
+                if isinstance(relative_map, dict):
+                    relative_raw_position = {
+                        str(name): float(value)
+                        for name, value in relative_map.items()
+                        if isinstance(value, (int, float))
                     }
                 p = getattr(state, "permissions", None)
                 if p is not None:
@@ -441,6 +472,8 @@ class MomoRobotService:
                     "names": names,
                     "values_rad": values_rad,
                 },
+                "raw_present_position": raw_present_position,
+                "relative_raw_position": relative_raw_position,
                 "tcp_pose": {
                     "xyz_m": xyz_m,
                     "rpy_rad": rpy_rad,
@@ -528,49 +561,83 @@ class MomoRobotService:
         *,
         targets_deg: dict[str, float],
         multi_turn_targets_continuous_raw: dict[str, float] | None,
+        raw_goal_positions: dict[str, int] | None = None,
+        gripper_raw: int | None = None,
+        gripper_open_ratio: float | None = None,
         duration: float,
         speed_percent: int,
+        wait: bool = True,
     ) -> dict[str, Any]:
         targets = {
             str(joint_name): float(value)
             for joint_name, value in dict(targets_deg or {}).items()
         }
-        if not targets:
-            raise MomoRobotError("INVALID_ARGUMENT", "targets_deg is required", 400)
+        raw_targets = {
+            str(joint_name): int(value)
+            for joint_name, value in dict(raw_goal_positions or {}).items()
+            if isinstance(value, (int, float))
+        }
+        has_gripper_raw = isinstance(gripper_raw, (int, float))
+        has_gripper_ratio = isinstance(gripper_open_ratio, (int, float))
+        if not targets and not raw_targets and not has_gripper_raw and not has_gripper_ratio:
+            raise MomoRobotError("INVALID_ARGUMENT", "targets_deg/raw_goal_positions/gripper target is required", 400)
         multi_turn_targets = {
             str(joint_name): float(value)
             for joint_name, value in dict(multi_turn_targets_continuous_raw or {}).items()
             if str(joint_name) in targets
         }
-        move_duration = float(np.clip(float(duration or 0.1), 0.03, 20.0))
+        wait_motion = bool(wait)
+        min_duration = 0.0 if not wait_motion else 0.03
+        move_duration = float(np.clip(float(duration if duration is not None else 0.1), min_duration, 20.0))
         with self._lock:
             self._stop_for_manual_motion_locked()
             self._update_motion(speed_percent=speed_percent)
             robot = self._require_robot()
             self._prepare_motion_torque_locked(robot)
-            move_kwargs: dict[str, Any] = {
-                "duration": move_duration,
-                "speed_percent": int(speed_percent),
-                "wait": True,
-                "timeout": max(2.0, move_duration + 2.0),
-            }
-            if multi_turn_targets:
-                move_kwargs["multi_turn_targets_continuous_raw"] = multi_turn_targets
-            try:
-                robot.move_joints(targets, **move_kwargs)
-            except TypeError:
-                move_kwargs.pop("multi_turn_targets_continuous_raw", None)
-                robot.move_joints(targets, **move_kwargs)
-            except MomoRobotError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                raise MomoRobotError("JOINT_TARGET_FAILED", str(exc), 500) from exc
-            return {
-                "targets_deg": targets,
-                "multi_turn_targets_continuous_raw": multi_turn_targets,
-                "duration": move_duration,
-                "accepted": True,
-            }
+            raw_accepted = False
+            gripper_accepted = False
+            if raw_targets:
+                writer = getattr(robot, "write_raw_positions", None)
+                if callable(writer):
+                    raw_accepted = bool(writer(raw_targets))
+            if has_gripper_raw:
+                writer = getattr(robot, "write_gripper_raw", None)
+                if callable(writer):
+                    gripper_accepted = bool(writer(int(gripper_raw)))
+            elif has_gripper_ratio:
+                robot.set_gripper(open_ratio=float(np.clip(float(gripper_open_ratio), 0.0, 1.0)), wait=False)
+                gripper_accepted = True
+            if targets and not raw_accepted:
+                move_kwargs: dict[str, Any] = {
+                    "duration": move_duration,
+                    "speed_percent": int(speed_percent),
+                    "wait": wait_motion,
+                }
+                if wait_motion:
+                    move_kwargs["timeout"] = max(2.0, move_duration + 2.0)
+                if multi_turn_targets:
+                    move_kwargs["multi_turn_targets_continuous_raw"] = multi_turn_targets
+                try:
+                    robot.move_joints(targets, **move_kwargs)
+                except TypeError:
+                    move_kwargs.pop("multi_turn_targets_continuous_raw", None)
+                    robot.move_joints(targets, **move_kwargs)
+                except MomoRobotError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    raise MomoRobotError("JOINT_TARGET_FAILED", str(exc), 500) from exc
+        return {
+            "targets_deg": targets,
+            "multi_turn_targets_continuous_raw": multi_turn_targets,
+            "raw_goal_positions": raw_targets,
+            "raw_accepted": bool(raw_accepted),
+            "gripper_raw": int(gripper_raw) if has_gripper_raw else None,
+            "gripper_open_ratio": float(gripper_open_ratio) if has_gripper_ratio else None,
+            "gripper_accepted": bool(gripper_accepted),
+            "duration": move_duration,
+            "wait": wait_motion,
+            "accepted": True,
+        }
 
     def cartesian_jog(
         self,
@@ -759,7 +826,10 @@ class MomoRobotService:
             self._stop_for_manual_motion_locked()
             robot = self._require_robot()
             self._prepare_motion_torque_locked(robot)
-            ratio = float(np.clip(float(payload.get("open_ratio", 1.0) or 1.0), 0.0, 1.0))
+            ratio_value = payload.get("open_ratio", 1.0)
+            if ratio_value is None:
+                ratio_value = 1.0
+            ratio = float(np.clip(float(ratio_value), 0.0, 1.0))
             wait = bool(payload.get("wait", True))
             robot.set_gripper(open_ratio=ratio, wait=wait)
             state = robot.get_state()
@@ -903,13 +973,37 @@ class MomoRobotService:
             float(timeout_sec),
         )
 
+    def _lock_current_pose_locked(self, robot: RuntimeRobot) -> dict[str, Any]:
+        controller = getattr(robot, "_controller", None)
+        if controller is not None and all(
+            callable(getattr(controller, method_name, None))
+            for method_name in ("_ensure_bus", "capture_hold_state", "apply_hold_state")
+        ):
+            bus = controller._ensure_bus()
+            hold_state = controller.capture_hold_state(bus)
+            controller.apply_hold_state(hold_state, bus=bus)
+            self._set_robot_torque_enabled_locked(robot, True, required=True)
+            set_manual_readback = getattr(controller, "set_manual_multi_turn_readback", None)
+            if callable(set_manual_readback):
+                set_manual_readback(False)
+            controller.apply_hold_state(hold_state, bus=bus)
+            return {"locked_hold_state": hold_state}
+
+        self._set_robot_torque_enabled_locked(robot, True, required=True)
+        return {"locked_hold_state": None}
+
     def stop(self) -> dict[str, Any]:
         with self._lock:
             self._deactivate_control_locked()
             robot = self._robot
+            locked_payload: dict[str, Any] = {}
             if robot is not None and getattr(robot, "connected", False):
-                robot.stop()
-            return {"stopped": True}
+                if self._free_move_torque_released:
+                    locked_payload = self._lock_current_pose_locked(robot)
+                    self._free_move_torque_released = False
+                else:
+                    robot.stop()
+            return {"stopped": True, **locked_payload}
 
     def free_move(self) -> dict[str, Any]:
         with self._lock:

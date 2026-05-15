@@ -1,0 +1,7 @@
+numpy
+pyyaml
+pybullet
+lerobot
+ftservo-python-sdk
+feetech-servo-sdk
+kinpy

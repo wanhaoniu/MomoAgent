@@ -260,6 +260,7 @@ def summarize_gripper_state(state: Any) -> dict[str, Any] | None:
             "range_min",
             "range_max",
             "homing_offset",
+            "zero_present_raw",
         )
         if key in payload
     }

@@ -2,9 +2,9 @@
   "shoulder_pan": {
     "id": 1,
     "drive_mode": 0,
-    "homing_offset": 1863,
-    "range_min": 769,
-    "range_max": 3144,
+    "homing_offset": 1784,
+    "range_min": 926,
+    "range_max": 3093,
     "zero_present_raw": 2048,
     "operating_mode": 0
   },
@@ -16,8 +16,8 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 7259,
-    "home_present_wrapped_raw": 3163
+    "home_present_raw": 2875,
+    "home_present_wrapped_raw": 2875
   },
   "elbow_flex": {
     "id": 3,
@@ -27,15 +27,15 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 5457,
-    "home_present_wrapped_raw": 1361
+    "home_present_raw": 1409,
+    "home_present_wrapped_raw": 1409
   },
   "wrist_flex": {
     "id": 4,
     "drive_mode": 0,
-    "homing_offset": -1116,
-    "range_min": 563,
-    "range_max": 2052,
+    "homing_offset": -967,
+    "range_min": 299,
+    "range_max": 2048,
     "zero_present_raw": 2048,
     "operating_mode": 0
   },
@@ -47,11 +47,11 @@
     "range_min": 0,
     "range_max": 0,
     "operating_mode": 0,
-    "home_present_raw": 3475,
-    "home_present_wrapped_raw": 3475
+    "home_present_raw": 1275,
+    "home_present_wrapped_raw": 1275
   },
   "_meta": {
-    "generated_at_unix_s": 1778224123.553107,
+    "generated_at_unix_s": 1778823356.1707258,
     "script": "soarmmoce_calibrate.py",
     "bounded_single_turn_joints": [
       "shoulder_pan",
@@ -62,17 +62,25 @@
       "elbow_flex",
       "wrist_roll"
     ],
+    "optional_gripper": {
+      "requested": true,
+      "detected": true,
+      "joint": "gripper"
+    },
     "notes": {
       "bounded_single_turn": "1/4 calibrate the selected zero pose to raw midpoint 2048, then record range limits around that midpoint.",
       "absolute_raw": "2/3/5 use mode 0 with min/max limit 0 and phase 28; startup pose is the runtime reference.",
+      "optional_gripper": "If motor id 6 responds, gripper is calibrated like a bounded single-turn joint: current midpoint to raw 2048, then safe range capture.",
       "home": "home() returns 1/4 to calibrated midpoint zero and 2/3/5 to their startup-pose zero."
     }
   },
   "gripper": {
     "id": 6,
     "drive_mode": 0,
-    "homing_offset": -1966,
-    "range_min": 0,
-    "range_max": 4095
+    "homing_offset": -1643,
+    "range_min": 1617,
+    "range_max": 3054,
+    "zero_present_raw": 2048,
+    "operating_mode": 0
   }
 }
